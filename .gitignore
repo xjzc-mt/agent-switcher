@@ -1,0 +1,28 @@
+
+# 由初始化补充
+node_modules/
+dist/
+build/
+.next/
+out/
+coverage/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.idea/
+.vscode/
+release/
+
+# Generated UI captures and isolated Electron test data
+test-results/
+artifacts/

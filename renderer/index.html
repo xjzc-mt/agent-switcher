@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>AgentSwitcher</title>
+  <style>
+    :root {
+      --surface: #ffffff;
+      --surface-hover: #f8fafc;
+      --border-subtle: #edf2f7;
+      --brand: #4f46e5;
+      --brand-hover: #4338ca;
+      --brand-bg: #eef2ff;
+      --brand-text: #4338ca;
+      --text-secondary: #475569;
+      --text-dim: #94a3b8;
+      --success: #059669;
+      --success-bg: #ecfdf5;
+      --success-border: #a7f3d0;
+      --danger: #dc2626;
+      --danger-bg: #fef2f2;
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      user-select: none;
+      height: 100vh;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-rows: 52px minmax(0, 1fr);
+      overflow: hidden;
+    }
+
+    /* Left Sidebar */
+    .sidebar {
+      grid-column: 1;
+      grid-row: 2;
+      min-height: 0;
+      width: 152px;
+      max-width: 184px;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      position: relative;
+    }
+
+    .sidebar-resizer {
+      position: absolute;
+      top: 0;
+      right: -3px;
+      width: 6px;
+      bottom: 0;
+      cursor: col-resize;
+      z-index: 20;
+    }
+    .sidebar-resizer:hover, .sidebar-resizer.resizing {
+      background: rgba(79, 70, 229, 0.35);
+    }
+
+    .sidebar-menu {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .menu-section-label {
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-radius: 7px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+    .nav-item:hover {
+      color: var(--text);
+    }
+    .nav-item.active {
+      border-color: rgba(226, 232, 240, 0.9);
+    }
+    .nav-item-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .nav-logo-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .nav-name {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .nav-badge {
+      border-radius: 999px;
+    }
+
+    .sidebar-footer {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .btn-footer {
+      width: 100%;
+      height: 30px;
+      justify-content: center;
+      white-space: nowrap;
+      font-size: 11.5px;
+      font-weight: 500;
+      gap: 6px;
+      border-radius: 6px;
+    }
+
+    /* Main Area */
+    .main-workspace {
+      grid-column: 2;
+      grid-row: 2;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    /* Top Bar */
+    .workspace-topbar {
+      grid-column: 1 / -1;
+      grid-row: 1;
+      position: relative;
+      -webkit-app-region: drag;
+      height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      background: #ffffff;
+      flex-shrink: 0;
+    }
+    body:has(dialog[open]) .workspace-topbar { -webkit-app-region: no-drag; }
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .topbar-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .topbar-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .topbar-actions {
+      -webkit-app-region: no-drag;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 6px 12px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      background: #ffffff;
+      color: var(--text-secondary);
+      box-shadow: var(--shadow-sm);
+      white-space: nowrap;
+      user-select: none;
+    }
+    .btn:hover {
+      background: var(--surface-hover);
+      color: var(--text);
+      border-color: #cbd5e1;
+    }
+    .btn-primary {
+      background: var(--brand);
+      color: #ffffff;
+      border-color: transparent;
+      box-shadow: 0 2px 6px rgba(79, 70, 229, 0.25);
+    }
+    .btn-primary:hover {
+      background: var(--brand-hover);
+      color: #ffffff;
+    }
+    .btn-brand-soft {
+      background: var(--brand-bg);
+      color: var(--brand-text);
+      border-color: #c7d2fe;
+    }
+    .btn-brand-soft:hover {
+      background: #e0e7ff;
+    }
+    .btn-danger-ghost {
+      background: transparent;
+      border-color: transparent;
+      color: var(--text-dim);
+      box-shadow: none;
+      padding: 5px 7px;
+    }
+    .btn-danger-ghost:hover {
+      background: var(--danger-bg);
+      color: var(--danger);
+    }
+    .btn-sm {
+      padding: 5px 11px;
+      font-size: 12px;
+    }
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    /* Scroll Content */
+    .workspace-content {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Active Session Card */
+    .active-session-card {
+      background: #ffffff;
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .session-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .session-meta-group {
+      display: flex;
+      align-items: center;
+    }
+    .platform-logo-big {
+      width: 38px;
+      height: 38px;
+      border-radius: 9px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .session-account-line { display:flex; align-items:center; gap:8px; min-width:0; margin-top:3px; }
+    .session-account-line .session-account-email { margin-top:0; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+    /* Plan & Status Pill Badges */
+    .pill-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 1.5px 6px;
+      border-radius: 999px;
+      letter-spacing: 0.2px;
+      white-space: nowrap;
+    }
+    .pill-standby {
+      background: #f1f5f9;
+      color: #64748b;
+      border: 1px solid #e2e8f0;
+    }
+    .credit-badge { font-size:10px; font-weight:600; white-space:nowrap; flex-shrink:0; }
+
+    /* Multi-Account Matrix (Grid) */
+    .matrix-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .matrix-title h4 {
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.1px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .pool-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      line-height: 1.3;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Account Grid Cards */
+    .accounts-grid {
+      width: 100%;
+    }
+    .accounts-grid:has(.empty-accounts-box) {
+      display: block;
+      width: 100%;
+    }
+    .account-card {
+      justify-content: space-between;
+    }
+    .account-main-name {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .account-email-sub {
+      word-break: break-all;
+    }
+    .btn-icon-ghost {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      padding: 5px 6px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    }
+    .btn-icon-ghost:hover {
+      background: #f1f5f9;
+      color: var(--text);
+      border-color: var(--border);
+    }
+
+    .input-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 5px;
+      display: block;
+    }
+    .modal-input {
+      width: 100%;
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 13px;
+      color: var(--text);
+      outline: none;
+      box-shadow: var(--shadow-sm);
+    }
+    .modal-input:focus {
+      border-color: var(--brand);
+      box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+    }
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    /* Toast */
+    .toast-box {
+      position: fixed;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+    }
+    .toast-item {
+      pointer-events: auto;
+      font-size: 12.5px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      overflow-wrap: anywhere;
+    }
+
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { 100% { transform: rotate(360deg); } }
+
+    .account-card.selectable, .active-session-card.selectable { cursor:pointer; }
+    .account-card.is-selected, .active-session-card.is-selected { border-color:var(--brand); box-shadow:0 0 0 1px var(--brand); }
+    .unassigned-session-card { background:#f8fafc; border:1px dashed var(--border); box-shadow:none; padding:16px 20px; }
+    .unassigned-logo { opacity:.6; background:#f1f5f9; border-style:dashed; }
+    .unassigned-title { font-size:14px; font-weight:700; color:var(--text-muted); }
+    .unassigned-tip { font-size:12px; color:var(--text-dim); }
+    .card-actions button { height:26px; }
+    .account-main-name, .account-email-sub { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .account-summary { flex:1; display:flex; flex-direction:column; }
+    .account-title-row { display:flex; align-items:center; gap:6px; }
+    .account-title-row .account-main-name { color:var(--text); }
+    .card-actions, .detail-header-actions { display:flex; align-items:center; gap:6px; flex-shrink:0; }
+    .detail-title { display:flex; align-items:center; gap:8px; }
+    .account-section { display:flex; flex-direction:column; }
+    .detail-note { font-size:12px; color:var(--text-muted); line-height:1.6; }
+    .detail-actions { display:flex; gap:8px; align-items:center; }
+    .password-dialog { margin:auto; max-width:calc(100vw - 40px); max-height:calc(100vh - 40px); overflow:auto; border:1px solid var(--border); border-radius:12px; width:360px; padding:24px; color:var(--text); }
+    .password-dialog::backdrop { background:#0f172a66; }
+    .password-dialog form { display:flex; flex-direction:column; gap:12px; }
+    dialog:not([open]) { display: none !important; }
+
+    [hidden] { display:none !important; }
+    .current-section { display:flex; flex-direction:column; gap:10px; }
+    .section-caption {
+      font-size: 13px;
+      color: var(--text);
+      font-weight: 700;
+      letter-spacing: -0.1px;
+    }
+    .empty-accounts-box {
+      grid-column: 1 / -1;
+      width: 100%;
+      min-height: 112px;
+      background: #ffffff;
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .empty-accounts-sub {
+      font-size: 11.5px;
+      color: var(--text-dim);
+      font-weight: 400;
+    }
+    .quota-cell { border:none; background:transparent; }
+    .quota-cell-line { font-size:12.5px; white-space:nowrap; }
+    .quota-cell-line strong { font-weight:650; }
+    .quota-track { border-radius:999px; overflow:hidden; }
+    .quota-track span { border-radius:999px; }
+    .btn-switch { font-size:11px; height:24px; border-radius:5px; font-weight:600; }
+    .platform-empty { flex:1; min-height:380px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:12px; }
+    .platform-empty h2 { font-size:16px; color:var(--text); }
+    .platform-empty p { font-size:12px; color:var(--text-muted); }
+    .platform-empty .btn { margin-top:6px; padding:8px 18px; }
+    .btn-switch { padding:4px 6px; }
+    .selection-check { width:22px; height:22px; flex-shrink:0; display:grid; place-items:center; border:1px solid #cbd5e1; border-radius:6px; color:white; background:white; cursor:pointer; font-size:13px; }
+    .selection-check.checked { border-color:var(--brand); background:var(--brand); }
+    input[type=checkbox] { accent-color:var(--brand); }
+    .import-list { max-height:40vh; overflow:auto; }
+    .import-row { display:flex; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid var(--border-subtle); }
+    .import-row span { min-width:0; }
+    .import-row strong, .import-row small { display:block; overflow-wrap:anywhere; }
+    .import-row strong { font-size:13px; }
+    .import-row small { color:var(--text-muted); font-size:11px; margin-top:4px; }
+    .import-select-all { font-size:12px; display:flex; gap:12px; }
+    .import-error { color:var(--danger); font-size:12px; }
+    .add-account-dialog { width:500px; min-height:420px; padding:22px; flex-direction:column; }
+    .add-account-dialog[open] { display:flex; }
+    .add-account-dialog form { display:flex; flex-direction:column; flex:1; }
+    .add-dialog-header { display:flex; align-items:center; justify-content:space-between; font-size:15px; }
+    .add-account-tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); margin:18px 0; }
+    .add-account-tabs button { flex:1; padding:10px 4px; border:0; border-bottom:2px solid transparent; background:transparent; color:var(--text-muted); cursor:pointer; font:inherit; font-size:12px; }
+    .add-account-tabs button[aria-selected=true] { border-bottom-color:var(--brand); color:var(--brand); font-weight:600; }
+    .add-platform-field { display:flex; align-items:center; justify-content:space-between; gap:16px; font-size:12px; color:var(--text-muted); margin-bottom:12px; }
+    .add-platform-field select { width:190px; }
+    .add-account-panel { display:flex; flex-direction:column; gap:12px; flex:1; }
+    .add-login-actions { display:flex; gap:6px; }
+    .add-login-actions #btnModalLaunch { flex:1; }
+    .add-login-actions .login-link-copy { width:34px; padding:0; color:var(--text-muted); }
+    .add-login-actions .login-link-copy:hover { color:var(--brand); }
+    .add-more-option { display:inline-flex; align-items:center; gap:6px; margin-right:auto; font-size:12px; color:var(--text-muted); cursor:pointer; }
+    .add-more-option input { margin:0; accent-color:var(--brand); }
+    .add-local-account { display:flex; align-items:center; justify-content:space-between; padding:12px; border:1px solid var(--border); border-radius:8px; }
+    .add-local-account strong { display:block; font-size:12px; overflow-wrap:anywhere; }
+    .add-local-account .input-label { margin-bottom:6px; }
+    .add-account-panel > .input-label { margin-bottom:-6px; }
+    .add-account-dialog textarea { min-height:84px; height:96px; resize:vertical; user-select:text; font-family:ui-monospace,monospace; font-size:11px; }
+    .session-extract-details { border:1px solid var(--border); border-radius:8px; background:var(--bg); font-size:11.5px; overflow:hidden; transition:border-color 0.15s ease; }
+    .session-extract-details[open] { border-color:#cbd5e1; background:#ffffff; box-shadow:0 1px 3px rgba(0,0,0,0.04); }
+    .session-extract-summary { display:flex; align-items:center; gap:6px; padding:7px 10px; cursor:pointer; user-select:none; color:var(--text-secondary); font-size:11.5px; font-weight:500; list-style:none; }
+    .session-extract-summary::-webkit-details-marker { display:none; }
+    .session-extract-summary:hover { color:var(--brand); }
+    .extract-chevron { color:var(--text-muted); transition:transform 0.18s ease; flex-shrink:0; }
+    .session-extract-details[open] .extract-chevron { transform:rotate(90deg); color:var(--brand); }
+    .session-extract-summary-title { flex:1; display:flex; align-items:center; gap:6px; }
+    .session-extract-body { padding:0 10px 9px; display:flex; flex-direction:column; gap:6px; }
+    .session-guide-file { font-family:ui-monospace,monospace; font-size:10px; color:var(--brand-text); background:var(--brand-bg); padding:1px 6px; border-radius:4px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .session-guide-rows { display:flex; flex-direction:column; gap:5px; }
+    .session-guide-row { display:flex; align-items:center; gap:6px; background:#ffffff; border:1px solid var(--border); border-radius:6px; padding:3px 6px 3px 8px; transition:border-color 0.15s ease; }
+    .session-extract-details[open] .session-guide-row { background:var(--bg); }
+    .session-guide-row:hover { border-color:#cbd5e1; }
+    .session-os-badge { font-size:10px; font-weight:600; color:var(--text-muted); width:58px; flex-shrink:0; }
+    .session-guide-code { flex:1; font-family:ui-monospace,monospace; font-size:10px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; user-select:all; }
+    .session-guide-code:hover { color:var(--brand); }
+    .btn-xs { padding:2px 8px; font-size:10.5px; height:22px; line-height:1; border-radius:4px; }
+    .btn-copy-cmd.btn-copied { background:var(--success-bg); color:var(--success); border-color:var(--success-border); }
+    .session-guide-hint { font-size:10.5px; color:var(--text-dim); line-height:1.3; }
+    .add-account-dialog .modal-footer { margin-top:auto; padding-top:10px; }
+    .add-account-dialog .import-list { max-height:180px; }
+    .add-account-dialog .import-select-all { margin-bottom:4px; }
+    #backupPasswordField .input-label { margin-bottom:6px; }
+  </style>
+  <link rel="stylesheet" href="accounts.css">
+</head>
+<body>
+
+<!-- Toast Notification Container -->
+<div class="toast-box" id="toastBox" popover="manual"></div>
+
+<!-- Unified account onboarding -->
+<dialog class="password-dialog add-account-dialog" id="saveModalOverlay" aria-labelledby="addAccountTitle">
+  <div class="add-dialog-header"><strong id="addAccountTitle">添加账号</strong><button class="btn-icon-ghost" type="button" data-action="closeSaveModal" aria-label="关闭添加账号">✕</button></div>
+  <div class="add-account-tabs" role="tablist" aria-label="添加账号方式">
+    <button type="button" role="tab" id="addTab-local" aria-controls="addPanel-local" data-add-tab="local">本地登录</button>
+    <button type="button" role="tab" id="addTab-session" aria-controls="addPanel-session" data-add-tab="session">Session 导入</button>
+    <button type="button" role="tab" id="addTab-backup" aria-controls="addPanel-backup" data-add-tab="backup">备份导入</button>
+  </div>
+  <form id="addAccountForm">
+    <p class="detail-note credential-update-target" id="credentialUpdateTarget" hidden></p>
+    <label class="add-platform-field" id="addPlatformField"><span>平台</span><select class="modal-input" id="modalPlatformSelect" aria-label="账号平台"><option value="codex" selected>Codex</option><option value="agy">Antigravity</option><option value="claude" disabled>Claude Code（开发中）</option></select></label>
+    <section id="addPanel-local" role="tabpanel" aria-labelledby="addTab-local" class="add-account-panel">
+      <div class="add-local-account"><div><span class="input-label">检测到的账号</span><strong id="modalAccountEmail" aria-live="polite">检测中…</strong></div><button type="button" id="btnDetectLogin" class="btn btn-sm" data-action="handleModalDetect" aria-label="重新检测账号">重新检测</button></div>
+      <label class="input-label" for="modalProfileInput">账号名称</label><input type="text" class="modal-input" id="modalProfileInput" maxlength="100" placeholder="例如：个人主力 / 工作账号" />
+      <div class="add-login-actions">
+        <button type="button" class="btn btn-brand-soft" id="btnModalLaunch" data-action="handleLaunchLogin">登录其他账号</button>
+        <button type="button" class="btn login-link-copy" id="btnCopyLoginLink" data-action="privateLogin" aria-label="无痕登录" data-tooltip-instant data-tooltip="在默认浏览器的无痕窗口中登录">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5.5 11 2.3-6.5a1.3 1.3 0 0 1 1.6-.8l2.6.8 2.6-.8a1.3 1.3 0 0 1 1.6.8l2.3 6.5M3 11h18"/><circle cx="7.5" cy="17" r="2.8"/><circle cx="16.5" cy="17" r="2.8"/><path d="M10.3 16.8a2.4 2.4 0 0 1 3.4 0"/></svg>
+        </button>
+      </div>
+      <p class="detail-note" id="localLoginHint" hidden></p>
+    </section>
+    <section id="addPanel-session" role="tabpanel" aria-labelledby="addTab-session" class="add-account-panel" hidden>
+      <p class="detail-note" id="sessionImportHint" hidden></p>
+      <textarea class="modal-input" id="sessionCredentials" aria-label="Session 凭据 JSON" placeholder="粘贴客户端凭据 JSON（单个 / 多个账号）" spellcheck="false"></textarea>
+      <button type="button" class="btn btn-sm" id="btnChooseSessionFile" data-action="chooseImportFile" data-kind="credentials">选择凭据文件</button>
+      <details class="session-extract-details" id="sessionExtractDetails">
+        <summary class="session-extract-summary">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="extract-chevron" aria-hidden="true"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          <span class="session-extract-summary-title">对方机器如何提取凭据？查看终端指令</span>
+          <span class="session-guide-file" id="sessionGuideFile" title="凭据文件路径">~/.codex/auth.json</span>
+        </summary>
+        <div class="session-extract-body">
+          <div class="session-guide-rows">
+            <div class="session-guide-row">
+              <span class="session-os-badge">macOS</span>
+              <code class="session-guide-code" id="sessionCmdMac" data-action="copyInstruction" data-copy-id="sessionCmdMac" title="点击直接复制">cat ~/.codex/auth.json | pbcopy</code>
+              <button type="button" class="btn btn-xs btn-copy-cmd" data-action="copyInstruction" data-copy-id="sessionCmdMac" title="复制 macOS 提取指令">复制</button>
+            </div>
+            <div class="session-guide-row">
+              <span class="session-os-badge">Windows</span>
+              <code class="session-guide-code" id="sessionCmdWin" data-action="copyInstruction" data-copy-id="sessionCmdWin" title="点击直接复制">Get-Content ~\.codex\auth.json | Set-Clipboard</code>
+              <button type="button" class="btn btn-xs btn-copy-cmd" data-action="copyInstruction" data-copy-id="sessionCmdWin" title="复制 Windows 提取指令">复制</button>
+            </div>
+            <div class="session-guide-row">
+              <span class="session-os-badge">Linux</span>
+              <code class="session-guide-code" id="sessionCmdLinux" data-action="copyInstruction" data-copy-id="sessionCmdLinux" title="点击直接复制">cat ~/.codex/auth.json</code>
+              <button type="button" class="btn btn-xs btn-copy-cmd" data-action="copyInstruction" data-copy-id="sessionCmdLinux" title="复制 Linux 查看指令">复制</button>
+            </div>
+          </div>
+          <div class="session-guide-hint">在对应系统终端运行后凭据已在剪贴板中，直接粘贴到上方输入框即可。</div>
+        </div>
+      </details>
+    </section>
+    <section id="addPanel-backup" role="tabpanel" aria-labelledby="addTab-backup" class="add-account-panel" hidden>
+      <button type="button" class="btn" id="btnChooseBackup" data-action="chooseImportFile" data-kind="backup">选择备份文件</button>
+      <span class="detail-note" id="backupFileName">支持 .ags 加密备份和 .zip 备份</span>
+      <label id="backupPasswordField" hidden><span class="input-label">备份密码</span><input class="modal-input" id="backupPassword" type="password" autocomplete="current-password" aria-label="备份密码" placeholder="输入密码后解锁" /></label>
+    </section>
+    <div id="addImportPreview" hidden></div>
+    <div class="import-error" id="addAccountError" role="alert"></div>
+    <div class="modal-footer">
+      <label class="add-more-option" id="addMoreOption" hidden><input id="keepAdding" type="checkbox">连续添加</label>
+      <button class="btn" id="btnAddBack" type="button" data-action="closeSaveModal">取消</button>
+      <button class="btn btn-primary" type="submit" id="btnConfirmSave">保存账号</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- One window-wide drag region; every toolbar control belongs to this header. -->
+<header class="workspace-topbar">
+    <button class="btn-icon-ghost sidebar-toggle" id="sidebarToggle" data-action="toggleSidebar" aria-controls="appSidebar" aria-expanded="true" aria-label="收起侧边栏" title="收起侧边栏"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button>
+    <div class="topbar-left">
+      <div class="topbar-title" id="viewTitle">Codex 调度中心</div>
+      <div class="topbar-sub" id="viewSub"></div>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn btn-sm" id="btnRefresh" data-action="loadStatus" title="刷新实时额度与状态">
+        <svg id="refreshIcon" width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+        <span id="refreshLabel">刷新全部</span>
+      </button>
+    </div>
+</header>
+
+<!-- Left Sidebar Navigation -->
+<aside class="sidebar" id="appSidebar">
+  <div class="sidebar-resizer" id="sidebarResizer" title="拖拽调整侧边栏宽度" aria-hidden="true"></div>
+
+  <nav class="sidebar-menu">
+    <div class="menu-section-label">智能体</div>
+
+    <!-- Codex Nav -->
+    <button type="button" title="Codex" aria-label="Codex" class="nav-item active" id="nav-codex" data-action="selectTab" data-agent="codex">
+      <div class="nav-item-left">
+        <div class="nav-logo-wrap" id="logo-nav-codex"></div>
+        <span class="nav-name">Codex</span>
+      </div>
+      <span class="nav-badge" id="badge-count-codex">0</span>
+    </button>
+
+    <!-- Antigravity Nav -->
+    <button type="button" title="Antigravity" aria-label="Antigravity" class="nav-item" id="nav-agy" data-action="selectTab" data-agent="agy">
+      <div class="nav-item-left">
+        <div class="nav-logo-wrap" id="logo-nav-agy"></div>
+        <span class="nav-name">Antigravity</span>
+      </div>
+      <span class="nav-badge" id="badge-count-agy">0</span>
+    </button>
+    <!-- Claude Nav -->
+    <button type="button" aria-label="Claude Code · 功能开发中，敬请期待" aria-disabled="true" data-tooltip="功能开发中，敬请期待" class="nav-item" id="nav-claude" data-action="selectTab" data-agent="claude">
+      <div class="nav-item-left">
+        <div class="nav-logo-wrap" id="logo-nav-claude"></div>
+        <span class="nav-name">Claude</span>
+      </div>
+      <span class="nav-badge" id="badge-count-claude" hidden>0</span>
+    </button>
+
+
+  </nav>
+
+  <div class="sidebar-footer" aria-label="应用工具">
+    <button class="btn btn-footer sidebar-setting" id="utilitySettings" data-action="selectTab" data-agent="settings" title="设置" aria-label="设置"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></svg><span id="settingsLabel">设置</span></button>
+
+  </div>
+
+</aside>
+
+<!-- Right Main Workbench Area -->
+<main class="main-workspace">
+  <!-- Dynamic Content Container -->
+  <div class="workspace-content" id="workspaceContent">
+    <!-- Rendered dynamically -->
+  </div>
+</main>
+
+<script src="account-policy.js"></script>
+<script src="tooltips.js"></script>
+<script src="refresh-queue.js"></script>
+<script src="layout.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

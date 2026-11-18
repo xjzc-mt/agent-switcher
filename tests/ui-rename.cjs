@@ -1,0 +1,74 @@
+const outputPath = require('./ui-support.cjs');
+const {app,BrowserWindow}=require('electron');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+app.whenReady().then(async()=>{
+  const window=new BrowserWindow({width:880,height:700,show:false,titleBarStyle:'hiddenInset',webPreferences:{preload:path.join(__dirname,'fixture-preload.cjs'),contextIsolation:true,backgroundThrottling:false}});
+  const run=script=>window.webContents.executeJavaScript(script),errors=[];
+  window.webContents.on('console-message',event=>{if(event.level==='error')errors.push(event.message);});
+  const until=async script=>{for(let i=0;i<100;i++){if(await run(script))return;await pause(20);}throw new Error(`Timed out: ${script}`);};
+  const click=selector=>run(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  const value=text=>run(`document.querySelector('.account-name-input').value=${JSON.stringify(text)}`);
+  const submit=()=>run(`document.querySelector('.account-name-editor').requestSubmit()`);
+  const count=()=>run(`window.testApi.calls().filter(c=>c.method==='rename').length`);
+  const capture=async name=>fs.writeFileSync(outputPath(`${name}.png`),(await window.webContents.capturePage()).toPNG());
+  const key=keyCode=>{window.webContents.sendInputEvent({type:'keyDown',keyCode});if(keyCode==='Enter')window.webContents.sendInputEvent({type:'char',keyCode:'\r'});window.webContents.sendInputEvent({type:'keyUp',keyCode});};
+  try{
+    await window.loadFile(path.join(__dirname,'../renderer/index.html'));await pause(200);
+    window.webContents.debugger.attach('1.3');await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled',{enabled:true});
+    await run(`localStorage.clear();applySidebar();accountLayout='cards';renderWorkbench();const row=document.querySelector('[data-profile="工作账号"].account-card');row.focus();row.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'F10',shiftKey:true}));window.nameDialog=document.querySelector('dialog[data-account-details]');`);
+    await pause(170);
+    assert.equal(await run(`document.querySelectorAll('dialog[open]').length`),1);
+    assert.equal(await run(`document.querySelector('.rename-dialog,.detail-actions [data-edit-account-name]')===null`),true);
+    assert.equal(await run(`(()=>{const name=document.querySelector('.account-name-display strong').getBoundingClientRect(),edit=document.querySelector('[data-edit-account-name]').getBoundingClientRect();return edit.left-name.right>=0&&edit.left-name.right<=8&&Math.abs(edit.y+edit.height/2-name.y-name.height/2)<1;})()`),true);
+    await capture('account-name-details');
+    await click('[data-edit-account-name]');
+    assert.equal(await run(`document.activeElement.matches('.account-name-input')`),true);
+    await value('未保存的草稿');
+    await run(`window.nameInput=document.querySelector('.account-name-input');loadStatus()`);
+    assert.equal(await run(`document.querySelector('.account-name-input')===window.nameInput&&window.nameInput.value==='未保存的草稿'&&document.activeElement===window.nameInput`),true,'Refreshing details must not replace the draft or focus');
+    await capture('account-name-editing');
+    key('Escape');await until(`document.querySelector('.account-name-editor').hidden`);
+    assert.equal(await run(`window.nameDialog.open&&document.querySelector('.account-name-display strong').textContent==='工作账号'`),true);
+    assert.equal(await count(),0);
+
+    await click('[data-edit-account-name]');await value('   ');await submit();
+    assert.equal(await run(`document.querySelector('.account-name-error').textContent`),'名称不能为空');assert.equal(await count(),0);
+    await value('个人主力');await submit();await until(`!document.querySelector('.account-name-editor').hasAttribute('aria-busy')`);
+    assert.equal(await run(`document.querySelector('.account-name-error').textContent`),'该名称已被使用');
+    assert.equal(await run(`window.nameDialog.open&&document.activeElement.matches('.account-name-input')&&!document.activeElement.disabled`),true);
+    await click('[data-cancel-name]');
+    await click('[data-edit-account-name]');await submit();assert.equal(await count(),1,'Unchanged names do not send a rename request');
+    assert.equal(await run(`document.querySelector('.account-name-editor').hidden`),true);
+
+    await click('[data-edit-account-name]');await value('中文输入');
+    await run(`document.querySelector('.account-name-input').dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}))`);await submit();assert.equal(await count(),1);
+    await run(`document.querySelector('.account-name-input').dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}))`);
+    await value('重命名 & <账号>');await run(`window.nameTestApi.blockNext()`);
+    key('Enter');await until(`document.querySelector('.account-name-editor').hasAttribute('aria-busy')`);
+    await submit();assert.equal(await count(),2,'Pending save must not submit twice');
+    assert.equal(await run(`[...document.querySelector('.account-name-editor').elements].every(control=>control.disabled)`),true);
+    await run(`window.nameTestApi.release()`);await until(`document.querySelector('.account-name-editor').hidden`);
+    assert.equal(await run(`window.nameDialog===document.querySelector('dialog[data-account-details]')&&window.nameDialog.open`),true,'Saving keeps the original details window');
+    assert.equal(await run(`document.querySelector('.account-name-display strong').textContent`),'重命名 & <账号>');
+    assert.equal(await run(`document.querySelector('dialog [data-refresh-account]').dataset.profile`),'重命名 & <账号>');
+    assert.equal(await run(`document.querySelector('.account-name-display strong').children.length`),0,'Names remain plain text');
+    assert.equal(await run(`[...document.querySelectorAll('.account-card')].some(card=>card.dataset.profile==='重命名 & <账号>')`),true);
+    await click('dialog [data-refresh-account]');await until(`!document.querySelector('dialog [data-refresh-account]').disabled`);
+    assert.equal(await run(`window.testApi.calls().filter(call=>call.method==='refresh').at(-1).name`),'重命名 & <账号>');
+    await run(`document.querySelector('dialog[data-account-details]').dismissAccountDialog()`);
+    assert.equal(await run(`document.activeElement.dataset.profile`),'重命名 & <账号>','Keyboard dismissal returns to the renamed account');
+
+    await run(`document.querySelector('.active-session-card').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2}))`);
+    await click('[data-edit-account-name]');await value('当前主力');await submit();await until(`document.querySelector('.account-name-editor').hidden`);
+    assert.equal(await run(`document.querySelector('.active-session-card .account-name').textContent`),'当前主力');
+    assert.equal(await run(`document.querySelector('.active-session-card .current-credit-badge').textContent`),'Credits12.5');
+    assert.match(await run(`document.querySelector('.account-dialog-email').textContent`),/account-1@example.test/);
+    await run(`document.querySelector('dialog[data-account-details]').dismissAccountDialog();localStorage.clear()`);
+    window.webContents.debugger.detach();assert.deepEqual(errors,[]);
+    console.log(JSON.stringify({passed:true,singleDialog:true,inlineSave:true,escapeCancelsEdit:true,emptyName:true,duplicateName:true,unchangedName:true,composition:true,duplicateSubmit:true,draftSurvivesRefresh:true,renamedRefreshTarget:true,keyboardFocusRestored:true,currentAccountRename:true}));
+    app.exit(0);
+  }catch(error){console.error(error);fs.writeFileSync(outputPath('agent-switcher-rename-error.png'),(await window.webContents.capturePage()).toPNG());app.exit(1);}
+});

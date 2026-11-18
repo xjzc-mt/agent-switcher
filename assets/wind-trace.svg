@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 96" preserveAspectRatio="none" fill="none">
+  <defs>
+    <linearGradient id="wind" x1="0" y1="0" x2="640" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a6ddf5" stop-opacity="0"/>
+      <stop offset=".28" stop-color="#b1d7f5" stop-opacity=".65"/>
+      <stop offset=".66" stop-color="#b9a9fb" stop-opacity=".58"/>
+      <stop offset="1" stop-color="#b9a9fb" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="air" x1="0" y1="18" x2="0" y2="91" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#cce8ff" stop-opacity=".15"/>
+      <stop offset="1" stop-color="#e2ddff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <path d="M0 76C96 23 164 12 250 37S389 93 474 53S575 9 640 12L640 96H0Z" fill="url(#air)"/>
+  <path d="M0 76C96 23 164 12 250 37S389 93 474 53S575 9 640 12C575 9 558 16 474 55S335 65 250 42S96 23 0 76Z" fill="url(#wind)"/>
+  <path d="M220 66C298 91 350 98 424 71S562 16 640 12" stroke="url(#wind)" stroke-width=".7" vector-effect="non-scaling-stroke"/>
+</svg>

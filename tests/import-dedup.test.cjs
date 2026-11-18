@@ -1,0 +1,68 @@
+const {test,beforeEach,after}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const os=require('node:os');
+const path=require('node:path');
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'ags-import-dedup-'));
+os.homedir=()=>root;
+const { readCredentialFile } = require('./vault-fixture.cjs');
+const store=require('../dist/store');
+const backup=require('../dist/backup');
+const {atomicWrite}=require('../dist/utils');
+const auth=(workspace,subject='person',refresh='original')=>Buffer.from(JSON.stringify({tokens:{
+  access_token:'fixture-access',refresh_token:refresh,account_id:workspace,
+  id_token:`header.${Buffer.from(JSON.stringify({sub:subject,email:'same@example.test'})).toString('base64url')}.signature`,
+}}));
+const put=(name,bytes)=>atomicWrite(path.join(store.profileDir('codex',name),'auth.json'),bytes);
+const combine=async entries=>{
+  const parts=await Promise.all(entries.map(([name,bytes,agent='codex'])=>backup.parseCredentials(bytes,agent,name)));
+  return {groups:new Map(parts.flatMap(p=>[...p.groups])),items:parts.flatMap(p=>p.items)};
+};
+const install=parsed=>backup.installBackup(parsed,parsed.items.map(i=>i.key));
+beforeEach(()=>fs.rmSync(store.STORE_DIR,{recursive:true,force:true}));
+after(()=>fs.rmSync(root,{recursive:true,force:true}));
+
+test('mixed imports skip existing and within-backup identities without touching existing credentials',async()=>{
+  const existing=auth('personal','person','live-rotated');put('已保存',existing);
+  const parsed=await combine([
+    ['换个名字的同一账号',auth('personal','person','old-backup')],
+    ['新账号',auth('new')],['备份内重复',auth('new','person','another-token')],
+  ]);
+  const result=await install(parsed);
+  assert.deepEqual(result,{imported:['codex/新账号'],skipped:[
+    {key:'codex/换个名字的同一账号',existing:'codex/已保存'},
+    {key:'codex/备份内重复',existing:'codex/新账号'},
+  ]});
+  assert.deepEqual(readCredentialFile(path.join(store.profileDir('codex','已保存'),'auth.json')),existing);
+  assert.equal(store.listProfiles('codex').length,2);
+  const repeat=await install(parsed);assert.equal(repeat.imported.length,0);assert.equal(repeat.skipped.length,3);
+  assert.equal(store.listProfiles('codex').length,2);
+});
+test('matching email does not merge distinct workspaces or distinct members of one workspace',async()=>{
+  put('个人',auth('personal'));
+  const result=await install(await combine([['团队',auth('team')],['团队另一成员',auth('team','other-person')]]));
+  assert.equal(result.imported.length,2);assert.deepEqual(result.skipped,[]);
+});
+test('same display name for a new identity is renamed, while duplicates added after preview are skipped',async()=>{
+  put('同名',auth('first'));
+  const preview=await combine([['同名',auth('new')],['预览后已存在',auth('late')]]);
+  put('另一个名字',auth('late','person','newer-token'));
+  assert.deepEqual(await install(preview),{imported:['codex/同名-import-1'],skipped:[{key:'codex/预览后已存在',existing:'codex/另一个名字'}]});
+});
+test('API keys deduplicate by key identity and remain separate across providers',async()=>{
+  const api=Buffer.from(JSON.stringify({OPENAI_API_KEY:'fixture-key'}));put('API',api);
+  // Force equal identity strings across providers to check namespace isolation.
+  const keyIdentity=require('../dist/agents/codex').codexAgent.identity(store.profileDir('codex','API')).id;
+  const claude=Buffer.from(JSON.stringify({claudeAiOauth:{refreshToken:'fixture-refresh'},email:keyIdentity}));
+  const result=await install(await combine([['重复Key',api],['不同Key',Buffer.from(JSON.stringify({OPENAI_API_KEY:'another-key'}))],['另一平台',claude,'claude']]));
+  assert.equal(result.imported.length,2);assert.deepEqual(result.skipped,[{key:'codex/重复Key',existing:'codex/API'}]);
+});
+test('a later installation failure rolls back only newly imported accounts',async()=>{
+  const original=auth('existing');put('原有',original);
+  const parsed=await combine([['重复',original],['新建',auth('new')],['损坏',auth('bad')]]);
+  parsed.groups.get('codex/损坏').set('auth.json',Buffer.from('{}'));
+  await assert.rejects(install(parsed),/凭据/);
+  assert.deepEqual(store.listProfiles('codex'),['原有']);
+  assert.deepEqual(readCredentialFile(path.join(store.profileDir('codex','原有'),'auth.json')),original);
+  assert.equal(fs.readdirSync(store.STORE_DIR).some(name=>name.startsWith('.import-')),false);
+});

@@ -1,0 +1,91 @@
+{
+  "name": "agent-switcher",
+  "version": "1.0.0",
+  "description": "Multi-account & quota manager for AI coding agents",
+  "main": "dist/main.js",
+  "bin": {
+    "ags": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "gui": "electron .",
+    "electron": "electron .",
+    "electron:dev": "tsc && electron .",
+    "dist": "tsc && electron-builder --publish never",
+    "dist:dir": "tsc && electron-builder --dir --publish never",
+    "dist:zip": "tsc && electron-builder --mac zip --publish never",
+    "size:audit": "node scripts/size-audit.cjs",
+    "release:checksums": "node scripts/release-checksums.cjs",
+    "screenshots": "electron scripts/capture-screenshots.cjs",
+    "dev": "npm run build && node dist/index.js",
+    "lint": "tsc --noEmit && node --check renderer/app.js && node --check renderer/account-policy.js && node --check renderer/tooltips.js && node --check renderer/refresh-queue.js && node --check renderer/layout.js && node --check scripts/release-checksums.cjs && node --check scripts/size-audit.cjs && node --check scripts/capture-screenshots.cjs",
+    "test": "npm run build && node --test tests/*.test.cjs",
+    "test:ui": "npm run build && electron tests/ui-smoke.cjs && electron tests/ui-layout.cjs && electron tests/ui-account-groups.cjs && electron tests/ui-refresh.cjs && electron tests/ui-interactions.cjs && electron tests/ui-chrome.cjs && electron tests/ui-rename.cjs && electron tests/ui-account-errors-import.cjs && electron tests/ui-account-actions.cjs && electron tests/ui-cleanup.cjs && electron tests/ui-credential-batch.cjs && electron tests/ui-providers.cjs && electron tests/ui-app-updates.cjs"
+  },
+  "keywords": [
+    "codex",
+    "claude",
+    "antigravity",
+    "account-switcher",
+    "ai-tools"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "unzipper": "^0.12.3",
+    "yazl": "^3.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.4",
+    "@types/unzipper": "^0.10.10",
+    "@types/yazl": "^3.3.1",
+    "electron": "^44.11.1",
+    "electron-builder": "^26.18.0",
+    "typescript": "^5.5.4"
+  },
+  "build": {
+    "appId": "com.agent-switcher.app",
+    "productName": "AgentSwitcher",
+    "mac": {
+      "icon": "packaging/app-icon.png",
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg"
+      ],
+      "identity": "-"
+    },
+    "electronLanguages": [
+      "en",
+      "en-US",
+      "en_FEMININE",
+      "en_MASCULINE",
+      "en_NEUTER",
+      "zh-CN",
+      "zh_CN",
+      "zh_CN_FEMININE",
+      "zh_CN_MASCULINE",
+      "zh_CN_NEUTER",
+      "zh-TW",
+      "zh_TW",
+      "zh_TW_FEMININE",
+      "zh_TW_MASCULINE",
+      "zh_TW_NEUTER"
+    ],
+    "files": [
+      "dist/**/*.js",
+      "renderer/**/*",
+      "assets/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    }
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "overrides": {
+    "minimatch@>=7 <11.0.1": "11.0.1"
+  }
+}

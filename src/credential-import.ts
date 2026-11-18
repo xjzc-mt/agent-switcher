@@ -1,0 +1,136 @@
+import path from 'path';
+import { Worker } from 'worker_threads';
+import { randomUUID } from 'crypto';
+import { isSameIdentity, resolveAgent, availableCredentialUpdateTarget, CredentialUpdateTarget } from './accounts';
+import { ParsedBackup, parseCredentials, installBackup, ImportResult } from './backup';
+import { listProfiles, profileDir, validateName } from './store';
+import type { Identity } from './agents/base';
+import { parseCredentialDocument } from './credential-document';
+
+const MAX_ACCOUNTS = 200;
+const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
+export interface CredentialImportItem {
+  key: string;
+  agent?: string;
+  profile: string;
+  email?: string;
+  fileName?: string;
+  sourceIndex?: number;
+  state: 'ready' | 'update' | 'duplicate' | 'error';
+  duplicate?: { key: string; profile: string; source: 'pool' | 'batch' };
+  error?: string;
+}
+export interface CredentialBatch {
+  parsed: ParsedBackup;
+  items: CredentialImportItem[];
+  updates: Map<string, CredentialUpdateTarget>;
+}
+function defaultName(fileName: string | undefined, email: string | undefined, agent: string): string {
+  const stem = fileName?.replace(/\.(?:json|jsonl|ndjson|jsonc)$/i, '').replace(/^\./, '').trim();
+  const generic = /^(?:auth|credentials?|session|oauth|tokens?|jetski-standalone-oauth-token)(?:[-_ ]*\d+|\s*\(\d+\)|[-_ ]copy|[-_ ]副本)?$/i;
+  const raw = stem && !generic.test(stem) ? stem : email?.split('@')[0] || `${agent}-账号`;
+  const name = raw.replace(/[\\/\x00-\x1f\x7f]/g, '-').replace(/\.{2,}/g, '-').trim().slice(0, 80).trim();
+  return !name || name === '.' ? `${agent}-账号` : name;
+}
+
+/** Only identity metadata is exposed to the renderer. Credential bytes stay in the main process. */
+function classify(batch: CredentialBatch): void {
+  const known = new Map<string, Array<{ key: string; profile: string; source: 'pool' | 'batch'; identity: Identity }>>();
+  const usedNames = new Map<string, Set<string>>();
+  for (const item of batch.items) {
+    if (item.state === 'error' || !item.agent) continue;
+    const agent = resolveAgent(item.agent);
+    if (!known.has(agent.id)) {
+      const profiles = listProfiles(agent.id);
+      usedNames.set(agent.id, new Set(profiles));
+      known.set(agent.id, profiles.flatMap(profile => {
+        const identity = agent.identity(profileDir(agent.id, profile));
+        return identity ? [{ key: `${agent.id}/${profile}`, profile, source: 'pool' as const, identity }] : [];
+      }));
+    }
+    const identity = batch.parsed.identities!.get(item.key)!;
+    const accounts = known.get(agent.id)!;
+    const duplicate = accounts.find(saved => isSameIdentity(saved.identity, identity));
+    const update = duplicate?.source === 'pool' ? availableCredentialUpdateTarget(agent, duplicate.profile) : undefined;
+    item.state = update ? 'update' : duplicate ? 'duplicate' : 'ready';
+    item.duplicate = duplicate && !update ? { key: duplicate.key, profile: duplicate.profile, source: duplicate.source } : undefined;
+    if (update) {
+      item.profile = update.profile;
+      batch.updates.set(item.key, update);
+      // One replacement per identity in a batch; later copies stay duplicates.
+      accounts.unshift({ key: item.key, profile: item.profile, source: 'batch', identity });
+    } else if (!duplicate) {
+      const used = usedNames.get(agent.id)!;
+      const original = item.profile;
+      let suffix = 2;
+      while (used.has(item.profile)) item.profile = `${original.slice(0, 80)} (${suffix++})`;
+      used.add(item.profile);
+      accounts.push({ key: item.key, profile: item.profile, source: 'batch', identity });
+      batch.parsed.items.find(parsed => parsed.key === item.key)!.profile = item.profile;
+    }
+  }
+}
+
+type CredentialDocument = ReturnType<typeof parseCredentialDocument>;
+
+async function parseForPreview(data: Buffer, agent?: string): Promise<CredentialDocument> {
+  if (data.length < 256 * 1024) return parseCredentialDocument(data, agent);
+  const worker = new Worker(path.join(__dirname, 'credential-worker.js'), { workerData: { data, agent } });
+  const document = await new Promise<CredentialDocument>((resolve, reject) => {
+    worker.once('message', resolve);
+    worker.once('error', reject);
+    worker.once('exit', () => reject(new Error('凭据解析中断，请重试')));
+  });
+  for (const entry of document.entries) {
+    if (entry.data) entry.data = Buffer.from(entry.data);
+  }
+  return document;
+}
+
+/** Each preview is one pasted document or one file; a document may contain many accounts. */
+export async function parseCredentialBatch(data: Buffer, agent?: string, fileName?: string): Promise<CredentialBatch> {
+  if (agent) resolveAgent(agent);
+  if (data.length > MAX_DOCUMENT_BYTES) throw new Error('凭据文件超过 32 MB');
+  const document = await parseForPreview(data, agent);
+  const batch: CredentialBatch = {
+    items: [], updates: new Map(),
+    parsed: { groups: new Map(), items: [], identities: new Map() },
+  };
+  if (document.entries.length > MAX_ACCOUNTS) throw new Error(`一次最多导入 ${MAX_ACCOUNTS} 个账号`);
+  for (const [index, entry] of document.entries.entries()) {
+    const sourceIndex = document.collection ? index + 1 : undefined;
+    try {
+      if (entry.error || !entry.data) throw new Error(entry.error || '未找到完整的客户端凭据');
+      const parsed = await parseCredentials(entry.data, agent);
+      const item = parsed.items[0];
+      const key = `${item.agent}/${randomUUID()}`;
+      // A bundle filename is not an account name. Prefer per-account metadata or identity.
+      const profile = entry.name || defaultName(document.collection ? undefined : fileName, item.email, item.agent);
+      batch.parsed.groups.set(key, parsed.groups.get(item.key)!);
+      batch.parsed.identities!.set(key, parsed.identities!.get(item.key)!);
+      batch.parsed.items.push({ ...item, key, profile });
+      batch.items.push({ key, agent: item.agent, email: item.email, profile, fileName, sourceIndex, state: 'ready' });
+    } catch (error) {
+      batch.items.push({ key: randomUUID(), profile: '', fileName, sourceIndex, state: 'error', error: (error as Error).message });
+    }
+  }
+  classify(batch);
+  return batch;
+}
+
+export async function installCredentialBatch(batch: CredentialBatch, keys: string[], names: Record<string, string>): Promise<ImportResult & { failed: Array<{ fileName?: string; sourceIndex?: number; error: string }> }> {
+  if (!Array.isArray(keys) || new Set(keys).size !== keys.length || keys.some(key => !batch.items.some(item => item.key === key && ['ready', 'update'].includes(item.state)))) throw new Error('请选择有效的导入账号');
+  if (!names || typeof names !== 'object' || Array.isArray(names) || Object.keys(names).length !== keys.length || keys.some(key => !Object.hasOwn(names, key))) throw new Error('请为所选账号填写名称');
+  const renamed = new Map<string, string>();
+  for (const key of keys) {
+    validateName(names[key]);
+    if (batch.updates.has(key) && names[key] !== batch.updates.get(key)!.profile) throw new Error('更新凭据会保留原账号名称');
+    renamed.set(key, names[key]);
+  }
+  const result = keys.length ? await installBackup(batch.parsed, keys, renamed, batch.updates) : { imported: [], skipped: [] };
+  return {
+    ...result,
+    skipped: [...batch.items.filter(item => item.state === 'duplicate').map(item => ({ key: item.key, existing: item.duplicate!.key })), ...result.skipped],
+    failed: batch.items.filter(item => item.state === 'error').map(item => ({ fileName: item.fileName, sourceIndex: item.sourceIndex, error: item.error! })),
+  };
+}
