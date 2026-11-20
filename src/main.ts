@@ -178,12 +178,16 @@ if (!app.requestSingleInstanceLock()) app.quit();
 app.on('second-instance', () => { if (tray) dispatchTrayCommand({ action: 'open' }); });
 app.whenReady().then(async () => {
   const version = app.getVersion();
-  initializeDiagnostics(path.join(app.getPath('userData'), 'diagnostics'), app.isPackaged ? version : sourceDiagnosticVersion(version));
+  const userDataDir = app.getPath('userData');
+  initializeDiagnostics(path.join(userDataDir, 'diagnostics'), app.isPackaged ? version : sourceDiagnosticVersion(version));
   if (!app.isPackaged) app.dock?.setIcon(path.join(app.getAppPath(), 'packaging', 'app-icon.png'));
   try { await maintainCredentialStorage(); }
   catch (error) { dialog.showErrorBox('账号池安全存储需要处理', (error as Error).message + '\n已有文件已保留；请解锁系统安全存储或恢复备份后重试。'); }
+  let downloadsDir: string;
+  try { downloadsDir = app.getPath('downloads'); }
+  catch { downloadsDir = path.join(userDataDir, 'downloads'); }
   appUpdates = new AppUpdates({
-    currentVersion: app.getVersion(), userDataDir: app.getPath('userData'), downloadsDir: app.getPath('downloads'),
+    currentVersion: app.getVersion(), userDataDir, downloadsDir,
     platform: process.platform, arch: process.arch,
     onChange: state => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app-update-state', state); },
   });
