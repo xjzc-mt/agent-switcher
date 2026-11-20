@@ -5,11 +5,11 @@
   <p><strong>Side by side with your agents, walking together toward the AGI gate.</strong></p>
   <p>
     Whether you juggle multiple personal and team accounts, or borrow a teammate’s <strong>Codex</strong> or <strong>Antigravity</strong> account in a crunch —<br />
-    put them in one macOS desktop window: see who still has quota left at a glance, switch in one click without breaking flow or overwriting your unsaved primary login.
+    put them in one desktop window: see who still has quota left at a glance, switch in one click without breaking flow or overwriting your unsaved primary login.
   </p>
   <p>
-    <a href="docs/release-1.0.1.md"><img src="https://img.shields.io/badge/source-1.0.1_candidate-4F46E5?style=flat-square" alt="1.0.1 source candidate" /></a>
-    <img src="https://img.shields.io/badge/macOS-Apple_Silicon-172033?style=flat-square&logo=apple&logoColor=white" alt="macOS Apple Silicon" />
+    <a href="docs/release-1.0.1.md"><img src="https://img.shields.io/badge/release-1.0.1-4F46E5?style=flat-square" alt="1.0.1 release" /></a>
+    <img src="https://img.shields.io/badge/desktop-macOS_%C2%B7_Windows_x64-172033?style=flat-square" alt="macOS Apple Silicon, macOS Intel, Windows x64" />
     <img src="https://img.shields.io/badge/agents-Codex_%C2%B7_Antigravity-6366F1?style=flat-square" alt="Codex and Antigravity" />
     <img src="https://img.shields.io/badge/privacy-Zero_Backend_%C2%B7_AES--256--GCM-0D9488?style=flat-square" alt="Zero Backend · AES-256-GCM" />
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748B?style=flat-square" alt="MIT License" /></a>
@@ -19,7 +19,7 @@
     <a href="#visual-tour">Visual Tour</a> ·
     <a href="#security--platform-support">Security &amp; Support</a> ·
     <a href="#quick-install">Quick Install</a> ·
-    <a href="docs/release-1.0.1.md">1.0.1 Candidate Notes</a> ·
+    <a href="docs/release-1.0.1.md">1.0.1 Release Notes</a> ·
     <a href="#beyond-the-gate">✦ Beyond the Gate</a>
   </p>
 </div>
@@ -61,7 +61,7 @@ Select accounts and set a dedicated password to export an encrypted `.ags` archi
 ## Security & Platform Support
 
 - **Zero custom backend, open to audit**: No proprietary servers, no analytics SDKs, and no telemetry. Sign-in only allows official OpenAI and Google auth domains, and you can also run straight from source.
-- **Strong local encryption**: Pool credentials are encrypted with `AES-256-GCM` (`0600` file permissions) with the master key held in macOS Keychain; `.ags` exports derive their key from your own backup password.
+- **Strong local encryption**: AGS encrypts stored credentials with `AES-256-GCM`. macOS Keychain or Windows DPAPI protects the master key for the current user. Exported `.ags` backups use a separate password.
 - **No silent overwrites or side effects**: Switching away from an unsaved active login triggers a protection prompt first. AGS only swaps login credentials — never touching chat history or project configs, and never auto-switching in the background.
 - **Clear boundaries**: Only add someone else’s account with explicit permission; this release is strictly local to your machine. See [Account Management Flow](docs/account-management.md) and [Quota Refresh](docs/refresh-behavior.md) for details (docs in Chinese).
 
@@ -71,22 +71,27 @@ Select accounts and set a dedicated password to export an encrypted `.ags` archi
 | **Antigravity** (`agy`) | ✅ Supported | macOS 2.x personal Google account isolated sign-in, Keychain or official file switching & model-group quotas (requires official `agy` CLI; enterprise auth unverified) |
 | **Claude Code** (`claude`) | 🚧 Planned | Core compatibility code retained; GUI entry disabled in v1.0 until activation and quota capabilities are ready |
 
-The 1.0.1 candidate targets **macOS on Apple Silicon** and includes the desktop app and the `ags` CLI. Windows compatibility for Codex is still awaiting testing on Windows.
+Codex sign-in, switching and quotas on Windows x64 still need verification on hardware. Antigravity native switching and quotas are available on macOS only.
 
 ---
 
 ## Quick Install
 
-This workspace contains the **1.0.1 source candidate**. From a checkout that includes these changes, run `npm ci && npm run build && npm run gui`. The macOS menu bar lets you hover to choose an account and stays on the display where you opened it when you switch tabs. See the [1.0.1 candidate notes](docs/release-1.0.1.md).
+To run **1.0.1** from source, check out the release and run `npm ci && npm run build && npm run gui`. The macOS menu bar lets you hover to choose an account and stays on the display where you opened it when you switch tabs. See the [1.0.1 release notes](docs/release-1.0.1.md).
 
-Official installers are listed on [GitHub Releases](https://github.com/xjzc-mt/agent-switcher/releases). When a release includes the Apple Silicon DMG, open it and drag the app into **Applications**. Install the corresponding official client and finish active tasks before switching. AGS can quit and relaunch the desktop client after confirmation. For Antigravity, close any shared `agy` or IDE sessions first.
+Choose the 1.0.1 installer for your operating system and processor. On Mac, find the chip in **About This Mac**.
+
+[macOS · Apple Silicon (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-arm64.dmg) · [macOS · Intel (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-x64.dmg) · [Windows · x64 (EXE)](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-Setup-1.0.1-x64.exe)
+
+On macOS, open the DMG and drag AgentSwitcher into **Applications**. On Windows, run the EXE installer. Install the corresponding official client and finish active tasks before switching. AGS can quit and relaunch the desktop client after confirmation. For Antigravity, close any shared `agy` or IDE sessions first.
 
 ```bash
-shasum -a 256 -c SHA256SUMS   # Optional: place DMG and SHA256SUMS in the same folder to verify integrity
+shasum -a 256 AgentSwitcher-*.dmg   # macOS. Compare the result with SHA256SUMS from the same release.
+# Windows PowerShell: Get-FileHash .\AgentSwitcher-Setup-1.0.1-x64.exe
 ```
 
 > [!IMPORTANT]
-> Initial builds use **ad-hoc signing** (not yet Apple notarized). If macOS reports that the developer cannot be verified on first launch, verify the download source, then open **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway**.
+> macOS builds use **ad-hoc signing** (not yet Apple notarized). If macOS reports that the developer cannot be verified on first launch, verify the download source, then open **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway**.
 
 In the current source build, open **Settings → App & Updates → Export diagnostic report** to save a redacted record of recent operations. You can share it privately with a maintainer. You can also check [Known Issues](issues/README.md) or file a report on [GitHub Issues](https://github.com/xjzc-mt/agent-switcher/issues). **Never upload real credential JSON, tokens, or backup passwords.**
 

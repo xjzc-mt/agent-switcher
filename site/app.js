@@ -30,7 +30,7 @@
     zh: {
       'meta.title': 'AgentSwitcher · AGS — AI 编程 Agent 多账号与额度管理工具',
       'meta.desc':
-        '把多个个人号、团队号或朋友临时借用的 Codex、Antigravity 账号放进同一个 macOS 桌面窗口：谁还有余量一眼看清，点一下顺手切换，零自建后端，本地 AES-256-GCM 加密。',
+        '把多个个人号、团队号或朋友临时借用的 Codex、Antigravity 账号放进同一个桌面窗口：谁还有余量一眼看清，点一下顺手切换，零自建后端，本地 AES-256-GCM 加密。',
       'nav.features': '核心场景',
       'nav.security': '安全与支持',
       'nav.install': '快速安装',
@@ -41,11 +41,10 @@
       'hero.motto': '与 Agent 并肩，与伙伴同行，携手走向 AGI 之门。',
       'hero.title': '多个 AI Agent 账号，一眼看清余量，点一下顺手切换',
       'hero.lead':
-        '不管你手头攒了多个个人号与团队号，还是搭档、朋友临时借你一个 Codex 或 Antigravity 账号救急——放进同一个 macOS 桌面窗口，谁还有余量一目了然，既不打断心流，也不误覆盖原有主号。',
-      'hero.releaseHistory': '查看发布记录',
+        '不管你手头攒了多个个人号与团队号，还是搭档、朋友临时借你一个 Codex 或 Antigravity 账号救急——放进同一个桌面窗口，谁还有余量一目了然，既不打断心流，也不误覆盖原有主号。',
+      'hero.download': '选择安装包',
       'hero.source': '查看 GitHub 源码',
-      'hero.installGuide': '首次打开指引',
-      'hero.fact1': 'macOS Apple Silicon',
+      'hero.fact1': 'macOS · Windows',
       'hero.fact2': '支持 Codex 与 Antigravity',
       'hero.fact3': '零自建后端 · 本地 AES-256-GCM',
       'hero.fact4': 'MIT 许可证',
@@ -91,9 +90,9 @@
       'security.p1Title': '零自建后端，透明可审',
       'security.p1Desc':
         '登录仅放行 OpenAI 与 Google 官方授权域名。故障记录保存在本机，可在设置中导出脱敏报告并自行转交维护者。',
-      'security.p2Title': '本机强加密与钥匙串托管',
+      'security.p2Title': '本机凭据加密',
       'security.p2Desc':
-        '池内凭据经 `AES-256-GCM` 加密（文件权限 `0600`），主密钥由 macOS Keychain 托管；`.ags` 备份由你设置的独立密码派生密钥。',
+        '账号凭据使用 `AES-256-GCM` 加密。macOS 钥匙串或 Windows 当前用户的 DPAPI 保护主密钥，导出的 `.ags` 备份使用独立密码。',
       'security.p3Title': '不丢号、不越界',
       'security.p3Desc':
         '未入池的当前登录在切换前会弹窗提醒保护；只替换登录凭据，不动聊天历史与项目配置，也不会在后台偷偷自动切号。',
@@ -111,18 +110,17 @@
       'support.agyDesc':
         'macOS 2.x 个人 Google 账号独立登录、Keychain 或官方文件切换与模型组额度（需官方 agy CLI；企业认证暂未验证）。',
       'support.claudeDesc': '保留底层兼容代码，首版 GUI 入口暂置灰，待补齐激活与额度能力后开放。',
-      'support.foot': '1.0.1 候选源码面向 macOS Apple Silicon，包含桌面版和 ags 命令行工具。Windows Codex 兼容性仍待实机验收。',
+      'support.foot': 'macOS 提供 Apple Silicon 和 Intel 版。Windows x64 版的 Codex 登录、切换与额度仍待实机验收，Antigravity 原生切换和额度仅适用于 macOS。',
       'install.title': '下载与快速安装',
-      'install.subtitle': '拥有候选源码的用户可通过 Node.js 22.12+ 直接运行。已公开的正式安装包可在 GitHub Releases 查看。',
-      'install.dmgTitle': '桌面版安装包（DMG）',
-      'install.dmgMeta': '尚未确认可下载的 Apple Silicon 正式安装包。',
-      'install.dmgDirectMeta': 'macOS Apple Silicon · 直连 GitHub Release 安装包',
-      'install.downloadDirect': '直接下载 Apple Silicon DMG',
+      'install.subtitle': '在 Mac 的「关于本机」中查看芯片，在 Windows 的「设置 → 系统 → 系统信息」中查看系统类型。',
+      'install.desktopTitle': '桌面版安装包',
+      'install.releaseFallback': '可在 GitHub Releases 查看已发布的安装包。',
+      'install.choose': '请选择与系统和处理器匹配的安装包。',
       'install.allReleases': '所有版本与说明',
-      'install.gatekeeperTitle': '首次打开提示「无法验证开发者」？',
+      'install.gatekeeperTitle': 'macOS 首次打开提示「无法验证开发者」？',
       'install.gatekeeperDesc':
         '首发包采用 ad-hoc 签名（尚未接入 Apple 公证）。核对下载来源后，打开「系统设置 → 隐私与安全性」，滑到底部点击「仍要打开」即可放行。',
-      'install.verifyLabel': '可选：校验 DMG 完整性',
+      'install.verifyLabel': 'macOS：将输出与同版 SHA256SUMS 对照',
       'install.cliTitle': '源码运行与 ags CLI',
       'install.cliDesc': '适合想直接审计源码、打包最新工作区，或在终端用 ags 命令快速切换的开发者（需 Node.js 22.12+）。',
       'install.sourceLabel': '克隆并启动桌面窗口',
@@ -145,7 +143,7 @@
     en: {
       'meta.title': 'AgentSwitcher · AGS — Multi-Account & Quota Manager for AI Coding Agents',
       'meta.desc':
-        'Manage personal, team, and borrowed Codex & Antigravity accounts in one macOS desktop window. Compare remaining quotas at a glance and switch safely — local-first, AES-256-GCM encrypted, zero backend.',
+        'Manage personal, team, and borrowed Codex & Antigravity accounts in one desktop window. Compare remaining quotas at a glance and switch safely — local-first, AES-256-GCM encrypted, zero backend.',
       'nav.features': 'Workflows',
       'nav.security': 'Security & Support',
       'nav.install': 'Install',
@@ -156,11 +154,10 @@
       'hero.motto': 'Side by side with your agents, walking together toward the AGI gate.',
       'hero.title': 'See remaining quota across AI agent accounts, switch in one click',
       'hero.lead':
-        'Whether you juggle personal and team accounts or borrow a teammate’s Codex or Antigravity account in a crunch — keep them in one calm macOS desktop window, see who still has quota left, and switch without breaking flow or overwriting an unsaved primary login.',
-      'hero.releaseHistory': 'View releases',
+        'Whether you juggle personal and team accounts or borrow a teammate’s Codex or Antigravity account in a crunch — keep them in one desktop window, see who still has quota left, and switch without breaking flow or overwriting an unsaved primary login.',
+      'hero.download': 'Choose an installer',
       'hero.source': 'View Source on GitHub',
-      'hero.installGuide': 'First-launch guide',
-      'hero.fact1': 'macOS Apple Silicon',
+      'hero.fact1': 'macOS · Windows',
       'hero.fact2': 'Codex & Antigravity supported',
       'hero.fact3': 'Zero backend · Local AES-256-GCM',
       'hero.fact4': 'MIT license',
@@ -211,16 +208,16 @@
       'security.pillarsTitle': 'Local-first security guarantees',
       'security.p1Title': 'Zero custom backend, open to audit',
       'security.p1Desc':
-        'Sign-in is limited to official OpenAI and Google authorization domains. Diagnostic records stay on your Mac. You can export a redacted report from Settings and share it with a maintainer.',
-      'security.p2Title': 'Strong local encryption & macOS Keychain',
+        'Sign-in is limited to official OpenAI and Google authorization domains. Diagnostic records stay on your device. You can export a redacted report from Settings and share it with a maintainer.',
+      'security.p2Title': 'Local credential encryption',
       'security.p2Desc':
-        'Stored credentials are encrypted with `AES-256-GCM` (`0600` file mode) using a master key held in macOS Keychain; `.ags` exports use keys derived from your own backup password.',
+        'AGS encrypts stored credentials with `AES-256-GCM`. macOS Keychain or Windows DPAPI protects the master key for the current user. Exported `.ags` backups use a separate password.',
       'security.p3Title': 'No silent overwrites or side effects',
       'security.p3Desc':
         'Unsaved active logins trigger a protection prompt before switching. AGS swaps login credentials only — never touching chat history, project settings, or auto-switching in the background.',
       'security.p4Title': 'Clear local-only scope',
       'security.p4Desc':
-        'Only store accounts you own or have explicit permission to use. This release is strictly local to your Mac with no online relay or account sharing.',
+        'Only store accounts you own or have explicit permission to use. This release is strictly local to your device with no online relay or account sharing.',
       'support.title': 'Supported platforms',
       'support.colPlatform': 'Platform',
       'support.colStatus': 'Status',
@@ -233,19 +230,18 @@
         'macOS 2.x personal Google account isolated sign-in, Keychain or official file switching & model-group quotas (requires official agy CLI; enterprise auth unverified).',
       'support.claudeDesc':
         'Core compatibility code kept in place; GUI entry disabled in v1.0 until activation and quota tracking are completed.',
-      'support.foot': 'The 1.0.1 source candidate targets macOS on Apple Silicon and includes the desktop app and ags CLI. Windows compatibility for Codex is still under test.',
+      'support.foot': 'macOS builds target Apple Silicon and Intel. Codex sign-in, switching and quotas on Windows x64 still need verification on hardware. Antigravity native switching and quotas are available on macOS only.',
       'install.title': 'Download & quick install',
       'install.subtitle':
-        'Run a checkout of the candidate with Node.js 22.12+ or look for a published installer on GitHub Releases.',
-      'install.dmgTitle': 'Desktop Installer (DMG)',
-      'install.dmgMeta': 'An Apple Silicon installer from a stable release could not be confirmed.',
-      'install.dmgDirectMeta': 'macOS Apple Silicon · Direct GitHub Release DMG',
-      'install.downloadDirect': 'Download Apple Silicon DMG',
+        'Find your chip in About This Mac, or check System type in Windows Settings → System → About.',
+      'install.desktopTitle': 'Desktop installers',
+      'install.releaseFallback': 'See GitHub Releases for published installers.',
+      'install.choose': 'Choose the installer for your operating system and processor.',
       'install.allReleases': 'All releases & notes',
       'install.gatekeeperTitle': 'macOS says the developer cannot be verified?',
       'install.gatekeeperDesc':
         'Initial builds use ad-hoc signing (not yet Apple notarized). After verifying the release source, open System Settings → Privacy & Security, scroll to the bottom, and click "Open Anyway".',
-      'install.verifyLabel': 'Optional: verify DMG checksum',
+      'install.verifyLabel': 'macOS: compare the output with SHA256SUMS for this release',
       'install.cliTitle': 'Run from source & ags CLI',
       'install.cliDesc':
         'Prefer auditing the code directly, building the latest workspace, or switching accounts from the terminal? Requires Node.js 22.12+.',
@@ -444,26 +440,32 @@
       if (data?.draft !== false || data.prerelease !== false || typeof tag !== 'string' ||
           !/^v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(tag) ||
           data.html_url !== `${RELEASES_URL}/tag/${tag}` || !Array.isArray(data.assets)) return;
-      const name = `AgentSwitcher-${tag.replace(/^v/, '')}-arm64.dmg`;
-      const url = `${RELEASES_URL}/download/${tag}/${name}`;
-      const asset = data.assets.find(item => item?.name === name && item.browser_download_url === url &&
-        item.state === 'uploaded' && Number.isSafeInteger(item.size) && item.size > 0);
-      if (!asset) return;
-
+      const version = tag.replace(/^v/, '');
+      const installers = {
+        macArmDownload: `AgentSwitcher-${version}-arm64.dmg`,
+        macIntelDownload: `AgentSwitcher-${version}-x64.dmg`,
+        windowsDownload: `AgentSwitcher-Setup-${version}-x64.exe`,
+      };
+      let available = false;
+      for (const [id, name] of Object.entries(installers)) {
+        const url = `${RELEASES_URL}/download/${tag}/${name}`;
+        const uploaded = data.assets.some(item => item?.name === name && item.browser_download_url === url &&
+          item.state === 'uploaded' && Number.isSafeInteger(item.size) && item.size > 0);
+        if (!uploaded) continue;
+        const link = document.getElementById(id);
+        link.href = url;
+        link.hidden = false;
+        available = true;
+      }
+      if (!available) return;
       for (const id of ['heroReleaseTag', 'installVersionPill']) {
         const badge = document.getElementById(id);
         badge.textContent = tag;
         badge.hidden = false;
       }
-      const install = document.getElementById('installDownloadBtn');
-      install.href = url;
-      install.hidden = false;
-      document.getElementById('heroDownloadBtn').href = url;
-      for (const [id, key] of [['heroActionLabel', 'install.downloadDirect'], ['releaseMeta', 'install.dmgDirectMeta']]) {
-        const label = document.getElementById(id);
-        label.dataset.i18n = key;
-        label.textContent = t(key);
-      }
+      const label = document.getElementById('releaseMeta');
+      label.dataset.i18n = 'install.choose';
+      label.textContent = t('install.choose');
     } catch {
       // The static release-history link remains usable offline or when the API is rate-limited.
     }

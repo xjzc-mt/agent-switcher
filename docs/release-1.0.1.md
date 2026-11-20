@@ -1,6 +1,6 @@
-# AgentSwitcher 1.0.1 候选版
+# AgentSwitcher 1.0.1
 
-2026-11-20。Apple Silicon Mac 的 1.0.1 候选安装包已在本地构建并校验，主要管理 Codex 和 Antigravity。公开下载以 GitHub Releases 上实际提供的附件为准。[发布记录](https://github.com/xjzc-mt/agent-switcher/releases)
+2026-11-20。本版提供 Apple Silicon Mac、Intel Mac 和 Windows x64 三种安装包。Mac 用户可以在「关于本机」查看芯片，选择对应的 DMG。Windows 用户选择 Setup EXE。[发布记录](https://github.com/xjzc-mt/agent-switcher/releases)
 
 ## 从 1.0.0 测试版升级后有什么变化
 
@@ -15,10 +15,10 @@
 
 如果正在使用初始 1.0.0 测试包，请先用旧版导出并保留一份加密备份及其密码。1.0.1 可读取旧版 AGS1 备份，新导出使用 AGS2；回退到初始版本时应恢复升级前的 AGS1。应用标识和账号池目录沿用原位置。桌面安装包和从源码安装的 `ags` 命令分别更新。
 
-## 发版前仍需完成
+## 验证范围
 
 1. 在独立 macOS 用户下用两个已授权 Antigravity 账号，重开官方桌面和 CLI 核对 A → B → A；保持桌面打开跨一次官方续期，核对新额度和成功时间。
-2. 本批候选源码的构建标识为 `1.0.1+20a1a0ab46bc`。使用对应签名安装包核对干净环境安装、旧版替换安装及正式入口的公开下载。个人测试源已验证旧版能自动发现本版、验证发布签名并开始下载。当前采用 ad-hoc 应用签名。
-3. Windows Codex 已通过候选提交的 7 项 CI 检查，仍待独立 Windows x64 环境实机验收。Windows 安装包单独决定发布时机。
+2. 两款 Mac 安装包分别在对应架构的 macOS 上验签和启动。Mac 应用采用 ad-hoc 签名，未经 Apple 公证。保留 Apple Silicon 文件名供现有 1.0.0 发现更新，正式入口的匿名下载和就地升级在仓库公开后验证。
+3. Windows x64 发行包采用 NSIS，未进行 Authenticode 签名。发布检查覆盖安装、启动、卸载和 Codex 平台回归。真实账号登录与切换仍需用户环境验证。Antigravity 原生切换和额度查询目前限 macOS。
 
 维护者的检查结果、未完成项和对应入口集中在[当前待办](当前待办.md)与[构建与发布](releasing.md)。

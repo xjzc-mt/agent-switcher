@@ -1,6 +1,6 @@
 # 构建与发布
 
-当前为 [1.0.1 候选版](release-1.0.1.md)，拟先分发 macOS Apple Silicon DMG。版本基线、源码验收和待测环境见[当前待办](当前待办.md)。初始 1.0.0 测试版资料保留在[历史说明](release-1.0.0.md)。
+[1.0.1](release-1.0.1.md) 分发 macOS Apple Silicon、Intel 两种 DMG 及 Windows x64 安装程序。版本基线、源码验收和待测环境见[当前待办](当前待办.md)。初始 1.0.0 测试版资料保留在[历史说明](release-1.0.0.md)。
 
 ## 版本与提交
 
@@ -11,15 +11,14 @@
 
 ## 构建候选版本
 
-在 Apple Silicon Mac 上核对 `package.json`、锁文件根版本与预定标签。以下以候选版本 `1.0.1` 和标签 `v1.0.1` 为例，从同一提交构建并校验。
+在构建前核对 `package.json`、锁文件根版本与预定标签。在 GitHub 创建指向完整提交 SHA 的 Release 草稿，手动运行 [Build release installers](../.github/workflows/release-build.yml)。三个原生 runner 从该提交打包，启动校验成功后写入版本和提交均匹配的草稿。下载三份安装包，在保管私钥的机器上签名。
 
 ```bash
 npm ci
 npm run lint
 npm test
 npm run test:ui
-npm run dist
-npm run release:checksums -- --sign-key /path/to/offline-private.pem release/AgentSwitcher-1.0.1-arm64.dmg
+npm run release:checksums -- --sign-key /path/to/offline-private.pem release/AgentSwitcher-1.0.1-arm64.dmg release/AgentSwitcher-1.0.1-x64.dmg release/AgentSwitcher-Setup-1.0.1-x64.exe
 (cd release && shasum -a 256 -c SHA256SUMS)
 hdiutil verify release/AgentSwitcher-1.0.1-arm64.dmg
 ```
@@ -40,7 +39,7 @@ UI 回归使用演示账号。界面发生变化时，先用 `npm run screenshot
 
 ## 发布稳定版
 
-1. 为待发布版本新建草稿，指向构建安装包的提交。上传 DMG、同名 `.dmg.signed.json` 清单、同批 `SHA256SUMS`，核对版本、文件名、大小和 SHA-256。草稿正文中的文档链接应指向该版本源码。
+1. 为待发布版本新建草稿，指向构建安装包的提交。核对三份安装包，上传各自同名的 `.signed.json` 清单及同批 `SHA256SUMS`，核对版本、文件名、大小和 SHA-256。草稿正文中的文档链接应指向该版本源码。
 2. 核对安装说明和对应提交的 CI，完成安装验收后发布稳定版。正式标签指向已验收的提交。
-3. 匿名访问 Pages 与公开 Release，验证中英文页面的下载、校验与安装。从较旧的受支持版本验证应用内更新。Pages 可用后，将两份 README 顶部的站点源码链接切换为已验证的中英文主页。
+3. 匿名访问 Pages 与公开 Release，验证中英文页面的下载、校验与安装。从较旧的受支持版本验证应用内更新。当前私有仓库的套餐无法启用 Pages。仓库公开后，在 Settings → Pages 选择 GitHub Actions 并运行 Deploy GitHub Pages，再核对中英文主页。
 4. 已发布版本如有安装或凭据问题，保留可追溯的原包并发布新版本。回退账号池须使用目标版本可读取的备份；回退到初始 v1.0.0 时，使用升级前保留的 AGS1 备份。详见[账号管理](account-management.md)。

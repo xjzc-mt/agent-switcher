@@ -56,11 +56,11 @@ Module._load = function(name, ...args) {
 };
 let AppUpdates, newerVersion;
 try { ({ AppUpdates, newerVersion } = require('../dist/app-updates')); } finally { Module._load = load; }
-function release(version = '1.2.0', signed = true) {
-  const tag = `v${version}`, name = assetName(version);
+function release(version = '1.2.0', signed = true, names = [assetName(version)]) {
+  const tag = `v${version}`;
   const asset = (name, size) => ({ name, size, state: 'uploaded', browser_download_url: `${repo}/releases/download/${tag}/${name}` });
   return { tag_name: tag, html_url: `${repo}/releases/tag/${tag}`, body: '修复显示 <script>example</script>', published_at: '2026-11-16T00:00:00Z',
-    assets: [{ ...asset(name, payload.length), digest: `sha256:${digest}` }, ...(signed ? [asset(name + '.signed.json', 320)] : [])] };
+    assets: names.flatMap(name => [{ ...asset(name, payload.length), digest: `sha256:${digest}` }, ...(signed ? [asset(name + '.signed.json', 320)] : [])]) };
 }
 const response = value => new Response(JSON.stringify(value), { status: 200 });
 function fixture(overrides = {}) {
@@ -246,8 +246,9 @@ test('old or modified download caches cannot authorize opening a file', async ()
   }
   assert.equal(opened.length, 0);
 });
-test('release signing command and updater agree on the DMG; a different signing key is rejected', async () => {
-  const f = fixture(), version = '1.3.1', name = assetName(version);
+test('mixed-platform release signs each installer and each Mac downloads its own architecture', async () => {
+  const f = fixture(), version = '1.3.1';
+  const names = [`AgentSwitcher-Setup-${version}-x64.exe`, `AgentSwitcher-${version}-x64.dmg`, assetName(version)];
   for (const dir of ['dist', 'assets', 'scripts', 'release']) fs.mkdirSync(path.join(f.root, dir));
   for (const file of ['scripts/release-checksums.cjs', 'dist/release-manifest.js']) {
     fs.copyFileSync(path.join(__dirname, '..', file), path.join(f.root, file));
@@ -255,24 +256,41 @@ test('release signing command and updater agree on the DMG; a different signing 
   const privateFile = path.join(f.root, 'test-only-private.pem');
   fs.writeFileSync(path.join(f.root, 'assets/release-signing-public.pem'), key.publicKey.export({ type: 'spki', format: 'pem' }));
   fs.writeFileSync(privateFile, key.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
-  const dmg = path.join(f.root, 'release', name);
-  fs.writeFileSync(dmg, payload);
-  const run = () => spawnSync(process.execPath, ['scripts/release-checksums.cjs', '--sign-key', privateFile, dmg], { cwd: f.root, encoding: 'utf8' });
+  const files = names.map(name => path.join(f.root, 'release', name));
+  for (const file of files) fs.writeFileSync(file, payload);
+  const run = () => spawnSync(process.execPath, ['scripts/release-checksums.cjs', '--sign-key', privateFile, ...files], { cwd: f.root, encoding: 'utf8' });
   const success = run();
   assert.equal(success.status, 0, success.stderr);
-  assert.equal(fs.readFileSync(path.join(f.root, 'release/SHA256SUMS'), 'utf8'), `${digest}  ${name}\n`);
-  const signed = fs.readFileSync(dmg + '.signed.json', 'utf8');
-  f.network.responses.push(response(release(version)));
-  f.network.manifestResponse = new Response(signed);
-  assert.equal((await f.updates.check()).release.downloadable, true);
-  const downloaded = await completed(f);
-  await f.updates.openDownloaded();
-  assert.equal(opened.at(-1), downloaded);
+  assert.equal(fs.readFileSync(path.join(f.root, 'release/SHA256SUMS'), 'utf8'), names.map(name => `${digest}  ${name}\n`).join(''));
+  const signed = files.map(file => fs.readFileSync(file + '.signed.json', 'utf8'));
+  const data = release(version, true, names);
+  const intel = fixture({ arch: 'x64' }), win = fixture({ platform: 'win32', arch: 'x64' });
+  for (const [i, client] of [win, intel, f].entries()) {
+    const asset = { version, name: names[i], size: payload.length };
+    assert(require('../dist/release-manifest').verifyReleaseManifest(JSON.parse(signed[i]), asset, key.publicKey));
+    client.network.responses.push(response(data));
+    client.network.manifestResponse = new Response(signed[i]);
+    const state = await client.updates.check();
+    assert.equal(state.release.name, names[i]);
+    assert.equal(state.release.downloadable, client !== win);
+    if (client === win) { await assert.rejects(client.updates.download()); continue; }
+    assert(client.network.requests.at(-1).url.endsWith(names[i] + '.signed.json'));
+    const downloaded = await completed(client);
+    assert.equal(path.basename(downloaded), names[i]);
+    await client.updates.openDownloaded();
+    assert.equal(opened.at(-1), downloaded);
+    const restored = new AppUpdates(client.options, key.publicKey);
+    assert.equal(restored.getState().status, 'downloaded');
+    restored.stop();
+  }
+  const changedArch = new AppUpdates({ ...intel.options, arch: 'arm64' }, key.publicKey);
+  assert.equal(changedArch.getState().release, undefined);
+  changedArch.stop();
   fs.writeFileSync(privateFile, generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }));
   const wrong = run();
   assert.equal(wrong.status, 1);
   assert.match(wrong.stderr, /私钥与应用内置的 Ed25519 公钥不匹配/);
-  assert.equal(fs.readFileSync(dmg + '.signed.json', 'utf8'), signed);
+  assert.deepEqual(files.map(file => fs.readFileSync(file + '.signed.json', 'utf8')), signed);
 });
 test('a file moved during revalidation clears the stale download and allows retry', async () => {
   const f = await prepared(), file = await completed(f), createReadStream = fs.createReadStream;

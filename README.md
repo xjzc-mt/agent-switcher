@@ -8,8 +8,8 @@
     放进同一个桌面窗口：谁还有余量一眼看清，点一下顺手切换，既不打断心流，也不误覆盖原有主号。
   </p>
   <p>
-    <a href="docs/release-1.0.1.md"><img src="https://img.shields.io/badge/source-1.0.1_candidate-4F46E5?style=flat-square" alt="1.0.1 source candidate" /></a>
-    <img src="https://img.shields.io/badge/macOS-Apple_Silicon-172033?style=flat-square&logo=apple&logoColor=white" alt="macOS Apple Silicon" />
+    <a href="docs/release-1.0.1.md"><img src="https://img.shields.io/badge/release-1.0.1-4F46E5?style=flat-square" alt="1.0.1 release" /></a>
+    <img src="https://img.shields.io/badge/desktop-macOS_%C2%B7_Windows_x64-172033?style=flat-square" alt="macOS Apple Silicon, macOS Intel, Windows x64" />
     <img src="https://img.shields.io/badge/agents-Codex_%C2%B7_Antigravity-6366F1?style=flat-square" alt="Codex and Antigravity" />
     <img src="https://img.shields.io/badge/privacy-%E9%9B%B6%E8%87%AA%E5%BB%BA%E5%90%8E%E7%AB%AF_%C2%B7_AES--256--GCM-0D9488?style=flat-square" alt="零自建后端 · AES-256-GCM" />
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748B?style=flat-square" alt="MIT License" /></a>
@@ -19,7 +19,7 @@
     <a href="#界面速览">界面速览</a> ·
     <a href="#安全与支持范围">安全与支持范围</a> ·
     <a href="#快速安装">快速安装</a> ·
-    <a href="docs/release-1.0.1.md">1.0.1 候选版说明</a> ·
+    <a href="docs/release-1.0.1.md">1.0.1 版本说明</a> ·
     <a href="#门后的彩蛋">✦ 门后彩蛋</a>
   </p>
 </div>
@@ -61,7 +61,7 @@
 ## 安全与支持范围
 
 - **零自建后端，透明可审**：无自建服务器、无统计 SDK 与遥测上报；登录仅放行 OpenAI 与 Google 官方授权域名，也可直接从源码启动。
-- **本机强加密**：池内凭据经 `AES-256-GCM` 加密（文件权限 `0600`），主密钥由 macOS Keychain 托管；`.ags` 备份由你设置的独立密码派生密钥。
+- **本机强加密**：账号凭据使用 `AES-256-GCM` 加密。macOS 钥匙串或 Windows 当前用户的 DPAPI 保护主密钥，导出的 `.ags` 备份使用独立密码。
 - **不丢号、不越界**：未保存的当前登录在切换前会先弹窗提醒保护；只替换登录凭据，不动聊天记录与项目配置，也不会在后台自动切号。
 - **边界清楚**：放入他人账号须事先获持有人授权；本版仅限本机使用。详细机制见 [账号管理流程](docs/account-management.md) 与 [额度刷新](docs/refresh-behavior.md)。
 
@@ -71,22 +71,27 @@
 | **Antigravity** (`agy`) | ✅ 已支持 | macOS 2.x 个人 Google 账号独立登录、Keychain 或官方文件切换与模型组额度（需官方 `agy` CLI；企业认证暂未验证） |
 | **Claude Code** (`claude`) | 🚧 规划中 | 保留底层兼容代码，首版 GUI 入口暂置灰，待补齐激活与额度能力后开放 |
 
-1.0.1 候选版面向 **macOS Apple Silicon**，包括桌面应用和 `ags` CLI。Windows Codex 兼容性仍待实机验收。
+Windows x64 版的 Codex 登录、切换和额度仍待实机验收。Antigravity 原生切换与额度仅适用于 macOS。
 
 ---
 
 ## 快速安装
 
-当前工作区是 **1.0.1 候选源码**。在包含该版本的源码目录执行 `npm ci && npm run build && npm run gui` 即可体验。macOS 右上角菜单可悬停选择账号，切换平台时菜单会留在打开它的屏幕。参见 [1.0.1 候选版说明](docs/release-1.0.1.md)。
+要从源码运行 **1.0.1**，在该版本的源码目录执行 `npm ci && npm run build && npm run gui` 即可体验。macOS 右上角菜单可悬停选择账号，切换平台时菜单会留在打开它的屏幕。参见 [1.0.1 版本说明](docs/release-1.0.1.md)。
 
-正式安装包以 [GitHub Releases](https://github.com/xjzc-mt/agent-switcher/releases) 公开的附件为准。选定版本提供 Apple Silicon DMG 后，可将应用拖入「应用程序」。请先安装相应的官方客户端，切换前结束正在运行的任务。桌面客户端会在确认后退出并重开；Antigravity 共用登录的 `agy` 或 IDE 会话需先关闭。
+1.0.1 安装包按系统和芯片选择。Mac 可在「关于本机」查看芯片。
+
+[macOS · Apple Silicon（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-arm64.dmg) · [macOS · Intel（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-x64.dmg) · [Windows · x64（EXE）](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-Setup-1.0.1-x64.exe)
+
+在 macOS 打开 DMG，将应用拖入「应用程序」。在 Windows 运行 EXE 安装。请先安装相应的官方客户端，切换前结束正在运行的任务。桌面客户端会在确认后退出并重开；Antigravity 共用登录的 `agy` 或 IDE 会话需先关闭。
 
 ```bash
-shasum -a 256 -c SHA256SUMS   # 可选：将 DMG 与同版 SHA256SUMS 放同一目录校验完整性
+shasum -a 256 AgentSwitcher-*.dmg   # macOS。将结果与同版 SHA256SUMS 对照。
+# Windows PowerShell: Get-FileHash .\AgentSwitcher-Setup-1.0.1-x64.exe
 ```
 
 > [!IMPORTANT]
-> 首发包采用 **ad-hoc 签名**（尚未接入 Apple 公证）。首次打开若提示无法验证开发者，核对来源后前往 **「系统设置 → 隐私与安全性」滑至底部点击「仍要打开」** 即可。
+> macOS 安装包采用 **ad-hoc 签名**（尚未接入 Apple 公证）。首次打开若提示无法验证开发者，核对来源后前往 **「系统设置 → 隐私与安全性」滑至底部点击「仍要打开」** 即可。
 
 当前源码版可在「设置 → 应用与更新 → 导出故障报告」保存近期操作的脱敏记录，并自行决定是否私下转交维护者。也可查看[已知问题记录](issues/README.md)或到 [GitHub Issues](https://github.com/xjzc-mt/agent-switcher/issues) 反馈。**切勿上传真实凭据 JSON、Token 或备份密码**。
 

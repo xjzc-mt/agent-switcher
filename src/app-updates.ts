@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash, KeyObject, randomUUID } from 'crypto';
 import { session, shell, DownloadItem, Session } from 'electron';
-import { manifestName, ReleaseManifest, trustedReleaseKey, verifyReleaseManifest } from './release-manifest';
+import { manifestName, releaseAssetName, ReleaseManifest, trustedReleaseKey, verifyReleaseManifest } from './release-manifest';
 
 const REPO = 'https://github.com/xjzc-mt/agent-switcher';
 const API = 'https://api.github.com/repos/xjzc-mt/agent-switcher/releases/latest';
@@ -105,9 +105,13 @@ export class AppUpdates {
       this.nextAutomaticCheck = Math.min(Number(cached.nextAutomaticCheck) || 0, now + DAY);
       this.retryAt = Math.min(Number(cached.retryAt) || 0, now + DAY);
       const record: ReleaseRecord = cached.record, info = record?.info;
+      if (info && info.name !== releaseAssetName(info.version, this.options.platform, this.options.arch)) {
+        this.nextAutomaticCheck = 0;
+        return;
+      }
       if (!info || !newerVersion(info.version, this.options.currentVersion) ||
         ![`v${info.version}`, info.version].some(tag => info.url === releaseUrl(tag) && record.assetUrl === assetUrl(tag, info.name)) ||
-        info.name !== `AgentSwitcher-${info.version}-arm64.dmg` || !Number.isSafeInteger(info.size) || info.size <= 0 ||
+        typeof info.name !== 'string' || !Number.isSafeInteger(info.size) || info.size <= 0 ||
         typeof info.notes !== 'string' || typeof info.publishedAt !== 'string') return;
       if (!verifyReleaseManifest(record.manifest, info, this.releaseKey)) record.manifest = undefined;
       info.downloadable = !!record.manifest && this.supported();
@@ -118,7 +122,7 @@ export class AppUpdates {
       } else this.state.status = 'available';
     } catch { /* An absent or stale cache must not block the application. */ }
   }
-  private supported() { return this.options.platform === 'darwin' && this.options.arch === 'arm64'; }
+  private supported() { return this.options.platform === 'darwin' && ['arm64', 'x64'].includes(this.options.arch); }
   start() {
     if (this.timer || this.stopped) return;
     void this.check(false);
@@ -194,13 +198,13 @@ export class AppUpdates {
         this.record = undefined; this.downloadedPath = undefined;
         this.changed({ status: 'current', message: '当前已是最新版本' });
       } else {
-        const name = `AgentSwitcher-${version}-arm64.dmg`;
+        const name = releaseAssetName(version, this.options.platform, this.options.arch) ?? '';
         const assets = Array.isArray(release.assets) ? release.assets.filter((asset: any) => validAsset(asset, tag)) : [];
         const matches = assets.filter((asset: any) => asset.name === name);
         const asset = matches.length === 1 ? matches[0] : undefined;
         const manifests = assets.filter((entry: any) => entry.name === manifestName(name));
         let manifest: ReleaseManifest | undefined;
-        if (asset && this.releaseKey && manifests.length === 1 && manifests[0].size <= 4096) {
+        if (asset && this.supported() && this.releaseKey && manifests.length === 1 && manifests[0].size <= 4096) {
           const text = await this.fetchText(manifests[0].browser_download_url, 4096);
           let parsed: unknown;
           try { parsed = JSON.parse(text); } catch { /* A malformed manifest cannot authorize a download. */ }
@@ -212,8 +216,8 @@ export class AppUpdates {
           notes: typeof release.body === 'string' ? release.body.slice(0, 8000) : '',
           publishedAt: typeof release.published_at === 'string' ? release.published_at : '',
           downloadable: !!manifest && this.supported() }, assetUrl: asset?.browser_download_url || '', manifest };
-        const message = !this.supported() ? '应用内下载目前支持 macOS Apple Silicon，可在 GitHub 项目页查看其他版本' :
-          !asset ? '此版本没有可用的 Apple Silicon 安装包，可在 GitHub 项目页查看发布信息' :
+        const message = !this.supported() ? '请前往 GitHub 发布页下载适用于此系统的安装包' :
+          !asset ? '此版本没有适用于此 Mac 的安装包，可在 GitHub 项目页查看发布信息' :
           !manifest ? '此版本缺少有效的发布者签名，可在 GitHub 项目页查看发布信息' : undefined;
         this.changed({ status: this.downloadedPath ? 'downloaded' : 'available', message });
       }

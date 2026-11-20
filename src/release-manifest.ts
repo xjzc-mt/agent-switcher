@@ -6,6 +6,11 @@ export interface ReleaseAsset { version: string; name: string; size: number }
 export interface ReleaseManifest extends ReleaseAsset { sha256: string; signature: string }
 export const manifestName = (assetName: string) => `${assetName}.signed.json`;
 
+export function releaseAssetName(version: string, platform: string, arch: string): string | undefined {
+  if (platform === 'darwin' && (arch === 'arm64' || arch === 'x64')) return `AgentSwitcher-${version}-${arch}.dmg`;
+  if (platform === 'win32' && arch === 'x64') return `AgentSwitcher-Setup-${version}-x64.exe`;
+}
+
 export function trustedReleaseKey(): KeyObject | undefined {
   try {
     const key = createPublicKey(fs.readFileSync(path.join(__dirname, '../assets/release-signing-public.pem')));

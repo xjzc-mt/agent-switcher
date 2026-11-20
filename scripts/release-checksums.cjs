@@ -17,11 +17,11 @@ async function main() {
     }
   }
   const files = args.map(file => path.resolve(file));
-  if (!files.length) throw new Error('请传入本次发布的 DMG 路径');
+  if (!files.length) throw new Error('请传入本次发布的 DMG 或 EXE 安装包路径');
   const directory = path.dirname(files[0]);
   if (new Set(files).size !== files.length || files.some(file =>
-    path.dirname(file) !== directory || !/^[\w.-]+\.dmg$/.test(path.basename(file)))) {
-    throw new Error('请选择同一目录中的 DMG，文件名只使用字母、数字、点、下划线和连字符，不重复选择');
+    path.dirname(file) !== directory || !/^[\w.-]+\.(dmg|exe)$/.test(path.basename(file)))) {
+    throw new Error('请选择同一目录中的 DMG 或 EXE，文件名只使用字母、数字、点、下划线和连字符，不重复选择');
   }
   const lines = [], manifests = [];
   for (const file of files) {
@@ -32,8 +32,10 @@ async function main() {
     const sha256 = hash.digest('hex');
     lines.push(`${sha256}  ${name}`);
     if (privateKey) {
-      const version = /^AgentSwitcher-((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-arm64\.dmg$/.exec(name)?.[1];
-      if (!version || version.length >= 80 || size <= 0 || size >= 2 ** 31) throw new Error('请选择受应用内更新支持的稳定版本、文件名和大小');
+      const [, version, arch, ext] = /-((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-(arm64|x64)\.(dmg|exe)$/.exec(name) || [];
+      if (!version || version.length >= 80 || name !== signing.releaseAssetName(version, ext === 'dmg' ? 'darwin' : 'win32', arch) ||
+          size <= 0 || size >= 2 ** 31) throw new Error('安装包的版本、文件名或大小不符合发布要求');
+      if (manifests.length && manifests[0].version !== version) throw new Error('一次只能为同一版本的安装包签名');
       const asset = { version, name, size };
       const signature = sign(null, signing.releaseSigningBytes(asset, sha256), privateKey).toString('base64');
       manifests.push({ ...asset, sha256, signature });

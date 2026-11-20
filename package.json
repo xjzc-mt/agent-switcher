@@ -58,6 +58,11 @@
       ],
       "identity": "-"
     },
+    "win": {
+      "target": ["nsis"],
+      "icon": "packaging/app-icon.png",
+      "artifactName": "AgentSwitcher-Setup-${version}-${arch}.${ext}"
+    },
     "electronLanguages": [
       "en",
       "en-US",

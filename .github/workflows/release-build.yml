@@ -1,0 +1,81 @@
+name: Build release installers
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, platform: mac, target: dmg, arch: arm64 }
+          - { os: macos-15-intel, platform: mac, target: dmg, arch: x64 }
+          - { os: windows-latest, platform: win, target: nsis, arch: x64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.12.0'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx --no-install electron-builder --${{ matrix.platform }} ${{ matrix.target }} --${{ matrix.arch }} --publish never
+      - name: Verify and launch the Mac installer
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=(release/*.dmg)
+          [[ ${#image[@]} == 1 ]]
+          hdiutil verify -quiet "${image[0]}"
+          mount="$RUNNER_TEMP/ags-volume"
+          mkdir -p "$mount"
+          hdiutil attach -quiet -readonly -nobrowse -mountpoint "$mount" "${image[0]}"
+          trap 'hdiutil detach -quiet "$mount"' EXIT
+          app="$mount/AgentSwitcher.app"
+          codesign --verify --deep --strict "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$(node -p "require('./package.json').version")"
+          binary="$app/Contents/MacOS/AgentSwitcher"
+          test "$(lipo -archs "$binary")" = "$(uname -m)"
+          node scripts/check-packaged-app.cjs "$binary" "${{ matrix.arch }}"
+      - name: Install, launch and uninstall on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = @(Get-ChildItem release/AgentSwitcher-Setup-*-x64.exe)
+          if ($setup.Count -ne 1) { throw 'Expected one Windows x64 installer' }
+          $dir = Join-Path $env:RUNNER_TEMP 'AGS install check'
+          $install = Start-Process $setup[0].FullName -ArgumentList "/S /D=$dir" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer exited with $($install.ExitCode)" }
+          $exe = Join-Path $dir 'AgentSwitcher.exe'
+          if (!(Test-Path $exe)) { throw 'Installed executable missing' }
+          node scripts/check-packaged-app.cjs "$exe" x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $uninstaller = Get-ChildItem $dir -Filter 'Uninstall*.exe'
+          $uninstall = Start-Process $uninstaller.FullName -ArgumentList "/S _?=$dir" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0 -or (Test-Path $exe)) { throw 'Uninstall check failed' }
+      - name: Stage verified installer in the matching draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          tag="v$version"
+          test "$(gh release view "$tag" --json isDraft,targetCommitish --jq 'if .isDraft then .targetCommitish else "" end')" = "$GITHUB_SHA"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            file="release/AgentSwitcher-Setup-$version-x64.exe"
+          else
+            file="release/AgentSwitcher-$version-${{ matrix.arch }}.dmg"
+          fi
+          node -e "const fs=require('node:fs'),c=require('node:crypto'),p=process.argv[1];console.log(c.createHash('sha256').update(fs.readFileSync(p)).digest('hex'),fs.statSync(p).size,p)" "$file"
+          gh release upload "$tag" "$file" --clobber

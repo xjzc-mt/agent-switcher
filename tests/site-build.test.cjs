@@ -90,34 +90,42 @@ test('bilingual README files cross-link cleanly', () => {
   }
 });
 
-test('the site offers a DMG only when the stable release includes its matching Apple Silicon asset', async () => {
+test('the download chooser exposes only uploaded installers for the stable tag and architecture', async () => {
   const html = fs.readFileSync(path.join(ROOT, 'site/index.html'), 'utf8');
   const script = fs.readFileSync(path.join(ROOT, 'site/app.js'), 'utf8');
   const releases = 'https://github.com/xjzc-mt/agent-switcher/releases';
-  const tag = 'v1.2.3', name = 'AgentSwitcher-1.2.3-arm64.dmg';
-  const asset = { name, size: 123, state: 'uploaded', browser_download_url: releases + '/download/' + tag + '/' + name };
-  const stable = { draft: false, prerelease: false, tag_name: tag, html_url: releases + '/tag/' + tag };
-  const x64 = { ...asset, name: name.replace('arm64', 'x64') };
-  const matching = { ...stable, assets: [x64, asset] };
-  for (const [release, language, available] of [[null, 'zh', false], [{ ...stable, assets: [x64] }, 'en', false],
-    [{ ...matching, prerelease: true }, 'zh', false], [matching, 'zh', true], [matching, 'en', true]]) {
+  const version = '1.2.3', tag = 'v' + version;
+  const names = {
+    macArmDownload: `AgentSwitcher-${version}-arm64.dmg`,
+    macIntelDownload: `AgentSwitcher-${version}-x64.dmg`,
+    windowsDownload: `AgentSwitcher-Setup-${version}-x64.exe`,
+  };
+  const asset = name => ({ name, size: 123, state: 'uploaded', browser_download_url: releases + '/download/' + tag + '/' + name });
+  const all = Object.values(names).map(asset);
+  const stable = { draft: false, prerelease: false, tag_name: tag, html_url: releases + '/tag/' + tag, assets: all };
+  const partial = [all[0], { ...all[1], browser_download_url: all[0].browser_download_url }, { ...all[2], state: 'starter' }];
+  const cases = [
+    [null, []], [{ ...stable, prerelease: true }, []],
+    [{ ...stable, assets: partial }, ['macArmDownload']], [stable, Object.keys(names)],
+  ];
+  assert.match(html, /href="#install">\s*<span data-i18n="hero.download">/);
+  assert.ok(html.includes(`href="${releases}"`));
+  for (const [release, available] of cases) {
     const elements = new Map();
-    for (const [, attrs] of html.matchAll(/<(?:a|span|p)\b([^>]*\bid="(?:heroDownloadBtn|heroActionLabel|heroReleaseTag|releaseMeta|installVersionPill|installDownloadBtn)"[^>]*)>/g)) {
+    for (const [, attrs] of html.matchAll(/<(?:a|span|p)\b([^>]*\bid="[^"]+"[^>]*)>/g)) {
       elements.set(attrs.match(/\bid="([^"]+)"/)[1], { href: attrs.match(/\bhref="([^"]+)"/)?.[1], hidden: /\bhidden\b/.test(attrs), dataset: {} });
     }
     const document = { documentElement: {}, querySelector: () => null, querySelectorAll: () => [],
       addEventListener() {}, getElementById: id => elements.get(id) };
-    vm.runInNewContext(script, { window: { location: { search: '?lang=' + language } }, document, URLSearchParams,
+    vm.runInNewContext(script, { window: { location: { search: '?lang=en' } }, document, URLSearchParams,
       fetch: async () => ({ ok: !!release, json: async () => release }) });
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(elements.get('heroDownloadBtn').href, available ? asset.browser_download_url : releases);
-    assert.equal(elements.get('installDownloadBtn').hidden, !available);
-    assert.equal(elements.get('installVersionPill').hidden, !available);
-    assert.equal(elements.get('heroReleaseTag').hidden, !available);
-    if (available) {
-      assert.equal(elements.get('installDownloadBtn').href, asset.browser_download_url);
-      assert.equal(elements.get('installVersionPill').textContent, tag);
-      assert.equal(elements.get('heroActionLabel').textContent, extractI18nMaps(script)[language]['install.downloadDirect']);
+    for (const [id, name] of Object.entries(names)) {
+      assert.equal(elements.get(id).hidden, !available.includes(id));
+      assert.equal(elements.get(id).href, available.includes(id) ? asset(name).browser_download_url : undefined);
     }
+    assert.equal(elements.get('installVersionPill').hidden, !available.length);
+    assert.equal(elements.get('heroReleaseTag').hidden, !available.length);
+    if (available.length) assert.equal(elements.get('installVersionPill').textContent, tag);
   }
 });

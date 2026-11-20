@@ -6,7 +6,7 @@
     <title>AgentSwitcher · AGS — AI 编程 Agent 多账号与额度管理工具</title>
     <meta
       name="description"
-      content="把多个个人号、团队号或朋友临时借用的 Codex、Antigravity 账号放进同一个 macOS 桌面窗口：谁还有余量一眼看清，点一下顺手切换，零自建后端，本地 AES-256-GCM 加密。"
+      content="把多个个人号、团队号或朋友临时借用的 Codex、Antigravity 账号放进同一个桌面窗口：谁还有余量一眼看清，点一下顺手切换，零自建后端，本地 AES-256-GCM 加密。"
     />
     <meta property="og:type" content="website" />
     <meta property="og:title" content="AgentSwitcher · AGS" />
@@ -23,7 +23,7 @@
     <meta name="twitter:title" content="AgentSwitcher · AGS" />
     <meta
       name="twitter:description"
-      content="Multi-account & quota manager for Codex and Antigravity on macOS. Local-first, AES-256-GCM encrypted, zero backend."
+      content="Multi-account & quota manager for Codex and Antigravity on macOS and Windows. Local-first, AES-256-GCM encrypted, zero backend."
     />
     <meta
       name="twitter:image"
@@ -87,20 +87,14 @@
                 <p class="hero-motto" data-i18n="hero.motto">与 Agent 并肩，与伙伴同行，携手走向 AGI 之门。</p>
                 <h1 data-i18n="hero.title">多个 AI Agent 账号，一眼看清余量，点一下顺手切换</h1>
                 <p class="hero-lead" data-i18n="hero.lead">
-                  不管你手头攒了多个个人号与团队号，还是搭档、朋友临时借你一个 Codex 或 Antigravity 账号救急——放进同一个 macOS 桌面窗口，谁还有余量一目了然，既不打断心流，也不误覆盖原有主号。
+                  不管你手头攒了多个个人号与团队号，还是搭档、朋友临时借你一个 Codex 或 Antigravity 账号救急——放进同一个桌面窗口，谁还有余量一目了然，既不打断心流，也不误覆盖原有主号。
                 </p>
               </div>
             </div>
 
             <div class="hero-actions">
-              <a
-                id="heroDownloadBtn"
-                class="btn btn-primary"
-                href="https://github.com/xjzc-mt/agent-switcher/releases"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <span id="heroActionLabel" data-i18n="hero.releaseHistory">查看发布记录</span>
+              <a class="btn btn-primary" href="#install">
+                <span data-i18n="hero.download">选择安装包</span>
                 <span id="heroReleaseTag" class="btn-badge" hidden></span>
               </a>
               <a
@@ -112,11 +106,10 @@
               >
                 查看 GitHub 源码
               </a>
-              <a class="btn btn-ghost" href="#install" data-i18n="hero.installGuide">首次打开指引</a>
             </div>
 
             <ul class="hero-facts">
-              <li data-i18n="hero.fact1">macOS Apple Silicon</li>
+              <li data-i18n="hero.fact1">macOS · Windows</li>
               <li data-i18n="hero.fact2">支持 Codex 与 Antigravity</li>
               <li data-i18n="hero.fact3">零自建后端 · 本地 AES-256-GCM</li>
               <li data-i18n="hero.fact4">MIT 许可证</li>
@@ -354,9 +347,9 @@
                   </dd>
                 </div>
                 <div class="spec-item">
-                  <dt data-i18n="security.p2Title">本机强加密与钥匙串托管</dt>
+                  <dt data-i18n="security.p2Title">本机凭据加密</dt>
                   <dd data-i18n="security.p2Desc">
-                    池内凭据经 <code>AES-256-GCM</code> 加密（文件权限 <code>0600</code>），主密钥由 macOS Keychain 托管；<code>.ags</code> 备份由你设置的独立密码派生密钥。
+                    账号凭据使用 <code>AES-256-GCM</code> 加密。macOS 钥匙串或 Windows 当前用户的 DPAPI 保护主密钥，导出的 <code>.ags</code> 备份使用独立密码。
                   </dd>
                 </div>
                 <div class="spec-item">
@@ -420,7 +413,7 @@
                 </table>
               </div>
               <p class="panel-foot" data-i18n="support.foot">
-                1.0.1 候选源码面向 macOS Apple Silicon，包含桌面版和 ags 命令行工具。Windows Codex 兼容性仍待实机验收。
+                macOS 提供 Apple Silicon 和 Intel 版。Windows x64 版的 Codex 登录、切换与额度仍待实机验收，Antigravity 原生切换和额度仅适用于 macOS。
               </p>
             </div>
           </div>
@@ -432,7 +425,7 @@
           <div class="section-head">
             <h2 data-i18n="install.title">下载与快速安装</h2>
             <p data-i18n="install.subtitle">
-              拥有候选源码的用户可通过 Node.js 22.12+ 直接运行。已公开的正式安装包可在 GitHub Releases 查看。
+              在 Mac 的「关于本机」中查看芯片，在 Windows 的「设置 → 系统 → 系统信息」中查看系统类型。
             </p>
           </div>
 
@@ -440,25 +433,18 @@
             <div class="panel install-primary">
               <div class="install-head">
                 <div>
-                  <h3 class="panel-title" data-i18n="install.dmgTitle">桌面版安装包（DMG）</h3>
-                  <p class="install-meta" id="releaseMeta" data-i18n="install.dmgMeta">
-                    尚未确认可下载的 Apple Silicon 正式安装包。
+                  <h3 class="panel-title" data-i18n="install.desktopTitle">桌面版安装包</h3>
+                  <p class="install-meta" id="releaseMeta" data-i18n="install.releaseFallback">
+                    可在 GitHub Releases 查看已发布的安装包。
                   </p>
                 </div>
                 <span class="version-pill" id="installVersionPill" hidden></span>
               </div>
 
               <div class="install-actions">
-                <a
-                  id="installDownloadBtn"
-                  class="btn btn-primary"
-                  hidden
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  data-i18n="install.downloadDirect"
-                >
-                  下载 Apple Silicon DMG
-                </a>
+                <a id="macArmDownload" class="btn btn-primary" hidden>macOS · Apple Silicon</a>
+                <a id="macIntelDownload" class="btn btn-primary" hidden>macOS · Intel</a>
+                <a id="windowsDownload" class="btn btn-primary" hidden>Windows · x64</a>
                 <a
                   class="btn btn-secondary"
                   href="https://github.com/xjzc-mt/agent-switcher/releases"
@@ -471,7 +457,7 @@
               </div>
 
               <div class="notice-box">
-                <strong data-i18n="install.gatekeeperTitle">首次打开提示「无法验证开发者」？</strong>
+                <strong data-i18n="install.gatekeeperTitle">macOS 首次打开提示「无法验证开发者」？</strong>
                 <p data-i18n="install.gatekeeperDesc">
                   首发包采用 ad-hoc 签名（尚未接入 Apple 公证）。核对下载来源后，打开「系统设置 → 隐私与安全性」，滑到底部点击「仍要打开」即可放行。
                 </p>
@@ -479,17 +465,17 @@
 
               <div class="code-box">
                 <div class="code-box-head">
-                  <span data-i18n="install.verifyLabel">可选：校验 DMG 完整性</span>
+                  <span data-i18n="install.verifyLabel">macOS：将输出与同版 SHA256SUMS 对照</span>
                   <button
                     type="button"
                     class="copy-btn"
-                    data-copy="shasum -a 256 -c SHA256SUMS"
+                    data-copy="shasum -a 256 AgentSwitcher-*.dmg"
                     data-i18n="common.copy"
                   >
                     复制
                   </button>
                 </div>
-                <pre><code>shasum -a 256 -c SHA256SUMS</code></pre>
+                <pre><code>shasum -a 256 AgentSwitcher-*.dmg</code></pre>
               </div>
             </div>
 
