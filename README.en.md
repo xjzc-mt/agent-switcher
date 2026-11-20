@@ -1,7 +1,7 @@
 <div align="center">
   <img src="packaging/app-icon.png" width="128" alt="AgentSwitcher · The AGI Gate and Five Agent Companions" />
   <h1>AgentSwitcher · AGS</h1>
-  <p><a href="README.md">中文</a> · <strong>English</strong> · <a href="site/">Landing page source (GitHub Pages)</a></p>
+  <p><a href="README.md">中文</a> · <strong>English</strong> · <a href="https://xjzc-mt.github.io/agent-switcher/?lang=en">Product website</a></p>
   <p><strong>Side by side with your agents, walking together toward the AGI gate.</strong></p>
   <p>
     Whether you juggle multiple personal and team accounts, or borrow a teammate’s <strong>Codex</strong> or <strong>Antigravity</strong> account in a crunch —<br />

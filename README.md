@@ -1,7 +1,7 @@
 <div align="center">
   <img src="packaging/app-icon.png" width="128" alt="AgentSwitcher · AGI 之门与五个 Agent 搭档" />
   <h1>AgentSwitcher · AGS</h1>
-  <p><strong>中文</strong> · <a href="README.en.md">English</a> · <a href="site/">产品主页源码 (GitHub Pages)</a></p>
+  <p><strong>中文</strong> · <a href="README.en.md">English</a> · <a href="https://xjzc-mt.github.io/agent-switcher/">产品主页</a></p>
   <p><strong>与 Agent 并肩，与伙伴同行，携手走向 AGI 之门。</strong></p>
   <p>
     不管你手头攒了多个个人号与团队号，还是搭档、朋友临时借你一个 <strong>Codex</strong>、<strong>Antigravity</strong> 账号救急——<br />
