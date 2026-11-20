@@ -1,173 +1,154 @@
-# AgentSwitcher · AGS
-
-**账号放一起，额度看得清，切换更顺手。**
-
-AGS 是面向 AI 编程工具的本地账号与额度管理器。把自己常用的账号，以及同事、朋友授权使用的 Codex、Antigravity 账号放进一个桌面窗口：看看谁还有额度，选好账号再切换，少一些反复登录和逐个查询。
-
-[首发说明](docs/release-1.0.0.md) · [下载安装包](https://github.com/xjzc-mt/agent-switcher/releases) · [使用与安全边界](docs/account-management.md) · [反馈问题](https://github.com/xjzc-mt/agent-switcher/issues)
-
-> v1.0.0 桌面版面向 **macOS Apple Silicon**，支持从源码运行。安装包和配套校验文件随稳定版一同提供。
+<div align="center">
+  <img src="packaging/app-icon.png" width="128" alt="AgentSwitcher · AGI 之门与五个 Agent 搭档" />
+  <h1>AgentSwitcher · AGS</h1>
+  <p><strong>中文</strong> · <a href="README.en.md">English</a> · <a href="site/">产品主页源码 (GitHub Pages)</a></p>
+  <p><strong>与 Agent 并肩，与伙伴同行，携手走向 AGI 之门。</strong></p>
+  <p>
+    不管你手头攒了多个个人号与团队号，还是搭档、朋友临时借你一个 <strong>Codex</strong>、<strong>Antigravity</strong> 账号救急——<br />
+    放进同一个桌面窗口：谁还有余量一眼看清，点一下顺手切换，既不打断心流，也不误覆盖原有主号。
+  </p>
+  <p>
+    <a href="docs/release-1.0.1.md"><img src="https://img.shields.io/badge/source-1.0.1_candidate-4F46E5?style=flat-square" alt="1.0.1 source candidate" /></a>
+    <img src="https://img.shields.io/badge/macOS-Apple_Silicon-172033?style=flat-square&logo=apple&logoColor=white" alt="macOS Apple Silicon" />
+    <img src="https://img.shields.io/badge/agents-Codex_%C2%B7_Antigravity-6366F1?style=flat-square" alt="Codex and Antigravity" />
+    <img src="https://img.shields.io/badge/privacy-%E9%9B%B6%E8%87%AA%E5%BB%BA%E5%90%8E%E7%AB%AF_%C2%B7_AES--256--GCM-0D9488?style=flat-square" alt="零自建后端 · AES-256-GCM" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748B?style=flat-square" alt="MIT License" /></a>
+  </p>
+  <p>
+    <a href="https://github.com/xjzc-mt/agent-switcher/releases">查看发布记录</a> ·
+    <a href="#界面速览">界面速览</a> ·
+    <a href="#安全与支持范围">安全与支持范围</a> ·
+    <a href="#快速安装">快速安装</a> ·
+    <a href="docs/release-1.0.1.md">1.0.1 候选版说明</a> ·
+    <a href="#门后的彩蛋">✦ 门后彩蛋</a>
+  </p>
+</div>
 
 ![Codex 账号总览：当前账号、套餐分组和备用额度](docs/images/01-codex-cards.png)
 
-*以下均为真实应用界面的演示截图，使用虚构账号与模拟额度，不包含真实凭据。*
+<p align="center"><sub>真实桌面界面演示截图（使用虚构账号与模拟额度，不含真实凭据）</sub></p>
 
-## 日常使用，少几次来回
+---
 
-| 你想做的事 | AGS 怎么帮你 |
+## 界面速览
+
+### 1. 看余量，不盲猜
+
+当前账号置顶，备用账号按套餐归组、按可用余量排好序，支持**卡片**与**单行**两种视图。Codex 分列 `5h / 7d` 与 Credits；Antigravity 以 `Gemini` 为主并独立展示 `Claude / GPT` 等模型组，缺失值如实显示 `—`，不混算总比例。
+
+| Codex 单行视图 · 密集对齐比对 | Antigravity · 模型组主次分层 |
 | --- | --- |
-| 找到还有额度的账号 | 同屏查看当前与备用账号，按套餐分组和可用额度排序 |
-| 快速选中工作账号 | 卡片 / 单行视图、搜索、改名与分组折叠 |
-| 分清自己、同事和朋友的账号 | 用容易识别的昵称标注来源和用途，按任务选择 |
-| 添加账号，不打断当前登录 | 独立官方浏览器授权，核对邮箱后保存；支持连续添加 |
-| 一次整理多个账号 | 导入完整客户端凭据，先预览、命名、勾选，再按身份去重 |
-| 凭据过期后继续使用 | 重新登录或导入新凭据，核对身份后原位更新，保留账号名称 |
-| 换机器或留一份备份 | 选择账号，导出由独立密码加密的 `.ags` 文件 |
+| ![单行视图：按套餐比较多个账号的额度](docs/images/02-codex-rows.png) | ![Antigravity：当前与备用账号的模型组额度](docs/images/03-antigravity.png) |
 
-### 额度一眼可见，账号多也好找
+### 2. 添账号，不掉线
 
-当前账号单独展示，备用账号按套餐归组。卡片适合浏览，单行视图便于集中比较；按各套餐的实际额度周期展示，缺失值用「—」标记，不当成零。
+拉起官方浏览器（支持无痕窗口与连续添加）独立完成授权，**不踢掉当前正在工作的客户端**。多账号 JSON 可先预览、改名、按身份去重再导入；过期账号可原位更新并保留昵称；从文件导入的替换凭据须先验证归属（详见 [导入格式](docs/session-import.md)）。
 
-自己的账号留给日常开发，同事授权的备用账号接手长任务，朋友提供的账号用来体验另一款工具——用名称记住来源与用途，下次协作时一眼就能找到适合的账号。
+| 独立浏览器授权 · 支持无痕与连续添加 | 批量导入预览 · 改名、去重与过期替换 |
+| --- | --- |
+| ![添加账号：官方浏览器登录与连续添加](docs/images/04-add-account.png) | ![批量导入：选择、命名与身份去重](docs/images/05-import-preview.png) |
 
-![单行视图：按套餐比较多个账号的额度](docs/images/02-codex-rows.png)
+### 3. 留备份，不伤现场
 
-Antigravity 按实际返回的模型组展示额度：Gemini 为主，Claude / GPT 等额度保留各自含义，不合成一个容易误解的总百分比。
+勾选账号并设置独立密码即可导出 `.ags` 加密备份，方便跨机迁移。移除前先摊开确认范围，**默认只删 AGS 内的备份**，完整保留官方客户端登录、聊天历史与项目文件。
 
-![Antigravity：当前与备用账号的模型组额度](docs/images/03-antigravity.png)
+| 加密导出 · 独立密码保护 `.ags` 备份 | 移除确认 · 默认保留客户端现场 |
+| --- | --- |
+| ![加密备份：选择账号并设置独立密码](docs/images/06-encrypted-backup.png) | ![移除确认：展示范围，退出客户端由用户选择](docs/images/07-remove-confirmation.png) |
 
-### 登录一次，留作备用
+---
 
-「添加账号 → 本地登录」使用官方授权页面。普通与无痕入口共用同一次独立登录，授权后回到 AGS 核对邮箱并保存；添加备用账号不会切换当前客户端账号。
+## 安全与支持范围
 
-![添加账号：官方浏览器登录与连续添加](docs/images/04-add-account.png)
+- **零自建后端，透明可审**：无自建服务器、无统计 SDK 与遥测上报；登录仅放行 OpenAI 与 Google 官方授权域名，也可直接从源码启动。
+- **本机强加密**：池内凭据经 `AES-256-GCM` 加密（文件权限 `0600`），主密钥由 macOS Keychain 托管；`.ags` 备份由你设置的独立密码派生密钥。
+- **不丢号、不越界**：未保存的当前登录在切换前会先弹窗提醒保护；只替换登录凭据，不动聊天记录与项目配置，也不会在后台自动切号。
+- **边界清楚**：放入他人账号须事先获持有人授权；本版仅限本机使用。详细机制见 [账号管理流程](docs/account-management.md) 与 [额度刷新](docs/refresh-behavior.md)。
 
-<details>
-<summary><strong>批量导入：先看清，再保存</strong></summary>
+| 平台 | 状态 | macOS 支持与使用条件 |
+| --- | :---: | --- |
+| **Codex** (`codex`) | ✅ 已支持 | 独立登录、`auth.json` 切换、`5h / 7d` 额度与 Credits（需本机 Codex 客户端；Keychain-only 未适配，API Key 无订阅额度） |
+| **Antigravity** (`agy`) | ✅ 已支持 | macOS 2.x 个人 Google 账号独立登录、Keychain 或官方文件切换与模型组额度（需官方 `agy` CLI；企业认证暂未验证） |
+| **Claude Code** (`claude`) | 🚧 规划中 | 保留底层兼容代码，首版 GUI 入口暂置灰，待补齐激活与额度能力后开放 |
 
-选择 JSON 文件或粘贴完整客户端凭据，逐项预览、改名和勾选。重复账号按身份识别，同邮箱不同工作区不会直接合并。已失效账号可原位更新。
+1.0.1 候选版面向 **macOS Apple Silicon**，包括桌面应用和 `ags` CLI。Windows Codex 兼容性仍待实机验收。
 
-![批量导入：选择、命名与身份去重](docs/images/05-import-preview.png)
+---
 
-支持单个 / 多个账号及常见 JSON 包装。文件最多 32 MB、一次最多 200 个账号；不接受来源不明的单段 Token 或浏览器 Cookie。详见 [导入格式](docs/session-import.md)。
+## 快速安装
 
-</details>
+当前工作区是 **1.0.1 候选源码**。在包含该版本的源码目录执行 `npm ci && npm run build && npm run gui` 即可体验。macOS 右上角菜单可悬停选择账号，切换平台时菜单会留在打开它的屏幕。参见 [1.0.1 候选版说明](docs/release-1.0.1.md)。
 
-<details>
-<summary><strong>备份与移除：范围明确，由你确认</strong></summary>
-
-在「管理」中选择账号，使用独立密码导出加密备份。跨机器迁移时，通过「添加账号 → 备份导入」恢复。
-
-![加密备份：选择账号并设置独立密码](docs/images/06-encrypted-backup.png)
-
-移除前先列出账号及同身份备份范围。默认只移除 AGS 内的备份，保留官方客户端登录、项目和历史；受支持的当前账号可明确选择同时退出登录。
-
-![移除确认：展示范围，退出客户端由用户选择](docs/images/07-remove-confirmation.png)
-
-</details>
-
-## 几分钟开始使用
-
-### 1. 安装与准备
-
-从 [Releases](https://github.com/xjzc-mt/agent-switcher/releases) 下载 `AgentSwitcher-1.0.0-arm64.dmg` 与同版 `SHA256SUMS`，放在同一目录，核对文件：
+正式安装包以 [GitHub Releases](https://github.com/xjzc-mt/agent-switcher/releases) 公开的附件为准。选定版本提供 Apple Silicon DMG 后，可将应用拖入「应用程序」。请先安装相应的官方客户端，切换前结束正在运行的任务。桌面客户端会在确认后退出并重开；Antigravity 共用登录的 `agy` 或 IDE 会话需先关闭。
 
 ```bash
-shasum -a 256 -c SHA256SUMS
+shasum -a 256 -c SHA256SUMS   # 可选：将 DMG 与同版 SHA256SUMS 放同一目录校验完整性
 ```
 
-退出旧版 AGS，打开 DMG，将 `AgentSwitcher.app` 拖入「应用程序」。当前候选包使用 ad-hoc 签名，尚无 Developer ID 签名和 Apple 公证；若系统阻止打开，核对来源后通过 macOS「隐私与安全性」按提示批准打开。
+> [!IMPORTANT]
+> 首发包采用 **ad-hoc 签名**（尚未接入 Apple 公证）。首次打开若提示无法验证开发者，核对来源后前往 **「系统设置 → 隐私与安全性」滑至底部点击「仍要打开」** 即可。
 
-需要安装对应官方客户端：Codex 使用本机 Codex CLI / app-server；Antigravity 的独立登录和额度查询需要官方 `agy` CLI。当前实测环境与兼容范围见 [账号管理流程](docs/account-management.md)。
+当前源码版可在「设置 → 应用与更新 → 导出故障报告」保存近期操作的脱敏记录，并自行决定是否私下转交维护者。也可查看[已知问题记录](issues/README.md)或到 [GitHub Issues](https://github.com/xjzc-mt/agent-switcher/issues) 反馈。**切勿上传真实凭据 JSON、Token 或备份密码**。
 
-### 2. 添加账号
+<details>
+<summary><strong>偏好设置与应用内更新</strong></summary>
 
-选择 Codex 或 Antigravity，点击「添加账号」：
-
-- **本地登录**：保存已检测到的当前账号，或通过浏览器独立登录后保存。
-- **Session 导入**：导入完整客户端 JSON，支持多账号预览。
-- **备份导入**：恢复 `.ags` 密码备份，也兼容旧 ZIP 备份。
-
-### 3. 看额度，按需切换
-
-额度会按需刷新，也可手动刷新全部，或在账号详情中刷新单个账号。查询失败时保留并标明历史记录；凭据失效会提供更新入口。详见 [刷新机制](docs/refresh-behavior.md)。
-
-切换前先结束正在进行的任务。GUI 会在确认后正常退出正在运行的对应桌面客户端，写入所选凭据并尝试重开；原本未运行的客户端不会自动启动。已有终端会话需要自行重启。AGS 不会按额度自动切换账号。
-
-### 4. 按自己的习惯设置
-
-在设置中选择额度重置时间的显示方式、无痕登录入口的行为，以及是否自动检查新版。应用内可下载并校验新版 DMG，安装时仍由你退出应用、拖入替换。
+设置页支持切换重置时间格式（倒计时 / 日期时间）、无痕登录行为、复制 Codex 历史数据排查指令，以及在应用内检查与下载新版 DMG。当前源码使用内置 Ed25519 公钥验证发布清单，并核对安装包的 SHA-256。详见 [应用内下载更新](docs/app-updates.md)。
 
 ![设置：紧凑的偏好、清理辅助与应用更新](docs/images/08-settings.png)
 
-无痕入口支持 macOS 上的 Chrome / Chromium、Edge、Brave 和 Firefox；未适配浏览器或打开失败时复制同一授权链接。无法访问公开 Release 时，更新入口显示暂未取得可用版本，不把查询失败当作已是最新。
+</details>
 
-## 本地保存，也把操作边界说清楚
+<details>
+<summary><strong>源码运行、<code>ags</code> CLI 与开发者文档</strong></summary>
 
-- **账号池加密**：凭据使用 AES-256-GCM 加密，macOS 主密钥由 Keychain 保管；账号文件权限为 `0600`。旧明文逐文件验证后迁移，失败保留原文件，不降级为明文写入。
-- **备份独立加密**：`.ags` 使用 AES-256-GCM + scrypt，由你设置密码。跨机器迁移请导出备份，不直接复制加密账号池。
-- **身份核对与写入保护**：按稳定身份区分账号和工作区；切换、导入和续期回存保留凭据版本检查，避免旧凭据覆盖新登录。
-- **操作范围明确**：切换只处理登录凭据，不迁移聊天记录、项目清单或模型 / MCP 配置。「数据清理」仅复制检查指令，不执行删除。
-- **网络按功能使用**：官方登录、续期与额度查询需要访问平台服务；应用更新访问 GitHub Releases。AGS 不是离线工具，本地加密也不能保护已被控制的操作系统或官方客户端中的凭据。
-
-协作场景中的账号需由账号持有人授权使用。当前账号池保存在本机，AGS 不提供跨设备同步、共享额度分配或多人并发协调。
-
-账号池与设置位于 `~/.agent-switcher/`，应用标识为 `com.agent-switcher.app`。自动续期与外部登录仍可能受服务端 Token 撤销策略影响，明确失效时需要重新登录。[完整安全与删除流程 →](docs/account-management.md)
-
-## 首版支持范围
-
-| 平台 | 首版能力 | 当前边界 |
-| --- | --- | --- |
-| **Codex** | 独立登录、文件凭据保存与切换、当前 / 备用账号订阅额度 | 使用 `CODEX_HOME` 或 `~/.codex/auth.json`；Keychain-only 登录未适配，API Key 不显示订阅额度 |
-| **Antigravity** | macOS 2.x 个人账号独立授权、Keychain 切换、套餐与模型组额度 | 需要官方 `agy` CLI；企业认证及其他系统的新认证未验证 |
-| **Claude Code** | 保留已有数据与底层适配代码 | 首版 GUI 暂不开放，入口置灰 |
-
-首发安装包仅面向 Apple Silicon Mac。Intel Mac、Windows、Linux 未做安装验收；当前也没有单独接入 Gemini CLI。已有真实账号验证范围见 [账号管理流程](docs/account-management.md)，不代表所有官方客户端版本均兼容。
-
-## 从源码运行与 CLI
-
-需要 Node.js 22.12+、npm 和图形桌面环境。
+需要 **Node.js 22.12+**、npm 与图形桌面环境（DMG 不自动安装终端命令，需 `ags` 可在构建后执行 `npm link`）：
 
 ```bash
-git clone https://github.com/xjzc-mt/agent-switcher.git
-cd agent-switcher
-npm ci
-npm run build
-npm run gui
+git clone https://github.com/xjzc-mt/agent-switcher.git && cd agent-switcher
+npm ci && npm run build && npm run gui
+
+# 常用 CLI（切换前请先手动关闭对应桌面客户端；未保存的当前账号需加 --save-current 或 --discard-current）
+ags save codex work      # 保存当前登录
+ags list                 # 查看已保存账号
+ags status               # 查看当前激活状态
+ags use codex work       # 切换至指定账号
+ags use agy work --allow-file-storage  # 同意将长凭据保存到桌面与 CLI 各自的私有登录文件
+ags rm codex work        # 预览移除范围（加 --yes 执行，加 --logout 同步登出）
+
+# 回归使用演示凭据，真实钥匙串集成测试默认跳过
+npm run lint && npm test && npm run test:ui
+npm run screenshots      # 重新生成演示截图
+npm run site:build       # 生成 GitHub Pages 静态站点到 out/site
+npm run dist             # 本地构建 DMG
 ```
 
-DMG 不安装终端命令。需要 `ags` 时，在源码目录执行 `npm link`，保留源码目录与依赖：
+文档索引：[账号管理流程](docs/account-management.md) · [额度刷新](docs/refresh-behavior.md) · [Session 导入](docs/session-import.md) · [界面设计约定](docs/ui-design.md) · [应用内更新](docs/app-updates.md) · [构建与发布](docs/releasing.md) · [打包与体积](docs/package-size.md) · [截图说明](docs/images/README.md) · [MIT License](LICENSE)
 
-```bash
-ags save codex work      # 保存本机当前登录
-ags list                # 查看已保存账号
-ags status              # 查看当前状态
-ags use codex work       # 先手动退出对应桌面客户端
-ags rm codex old-account # 预览移除范围；确认后加 --yes
-ags gui
-```
+</details>
 
-CLI 平台标识为 `codex`、`agy`、`claude`，受各平台实际适配范围限制。当前账号未入池时，`use` 需要明确选择 `--save-current` 或 `--discard-current`；删除默认保留客户端登录，受支持场景可另加 `--logout`。源码 CLI 与桌面安装包分别更新。
+---
 
-## 开发与反馈
+## 门后的彩蛋
 
-```bash
-npm run lint
-npm test
-npm run test:ui
-npm run screenshots     # 用演示数据重新采集 README 截图
-npm run dist            # 本机架构安装包，仅构建，不发布
-npm run size:audit
-```
+<p>
+  <img src="assets/gate-mark.png" width="24" align="absmiddle" alt="AGS 门标" />
+  <strong>顶部那扇「AGI 之门」下，人与众 Agent 并肩、人与人彼此托举——AgentSwitcher v1.0 只是序章。</strong>
+</p>
 
-业务测试使用临时账号目录与假凭据；UI 测试使用隔离浏览器数据和模拟 preload。回归截图写入忽略目录 `test-results/ui/`，README 演示图位于 `docs/images/`。打包仅收录应用代码、资源和运行依赖。
+一款围绕 **私密信任圈 · 额度零浪费 · 彼此互助** 打造的**划时代个人微中转产品**已进入发布倒计时，即将揭晓。
 
-问题反馈请附应用版本、系统版本、对应客户端版本及复现步骤；截图中隐去账号信息，不提交凭据 JSON、Token 或备份密码。
+<details>
+<summary><strong>🔮 点击推开高门 · 解锁「终局形态」预言</strong></summary>
 
-[发布流程](docs/releasing.md) · [打包与体积](docs/package-size.md) · [MIT License](LICENSE)
+今天朋友借号还得导凭据，深夜里大量订阅窗口又在倒计时中白白清零。而在终局形态里，**每个人都可以是一座自主受控的「个人小中转」**（并非公共商业号池或账号倒卖，而是熟人与小团队的私密互助工具）：
 
-## 下一站，让闲置的能力流动起来
+- **借力免交凭据**：账号空闲时，本机即可化作轻量微中转节点，搭档按需借力，无需交出密码或明文 JSON。
+- **信任圈私密默认，开关全权在己**：默认仅对认可的熟人与小团队开放；谁能连、用多少、外部限制开关均由你本机实时掌控、随时撤回。
+- **闲置余量零浪费**：队友赶工借你空闲窗口顶上，你冲刺时也有伙伴余量接力，让每一份订阅物尽其用。
 
-一个关于**互联互通、按需取用、彼此互助的个人中转产品**即将揭晓。让暂时闲置的资源遇见真正需要它的人，让每一份能力少些浪费，让个人之间的连接更有价值。
+> 先点亮右上角 **`Star`** 并在 **`Watch → Custom → Releases`** 订阅通知——当那扇门真正敞开时，第一时间见。
 
-这是下一款产品的预告；本版 AGS 专注于你本机的账号与额度管理。更多细节，后续见。
+</details>
+
+<sub>注：彩蛋为下一代独立产品预言；AgentSwitcher 仅提供纯本机账号与额度管理，不含联网中转或共享功能。</sub>

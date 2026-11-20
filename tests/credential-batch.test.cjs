@@ -12,6 +12,8 @@ const {codexAgent}=require('../dist/agents/codex');
 const {atomicWrite}=require('../dist/utils');
 Object.defineProperty(codexAgent,'homeDir',{value:path.join(root,'live')});
 const auth=(workspace,email=`${workspace}@example.test`,subject=workspace)=>Buffer.from(JSON.stringify({tokens:{access_token:'secret-access-fixture',refresh_token:'secret-refresh-fixture',account_id:workspace,id_token:`h.${Buffer.from(JSON.stringify({email,sub:subject})).toString('base64url')}.s`}}));
+const native=id=>JSON.parse(auth(id));
+const document=value=>Buffer.from(JSON.stringify(value));
 const put=(name,data)=>atomicWrite(path.join(store.profileDir('codex',name),'auth.json'),data);
 const parse=(value,fileName,agent='codex')=>batchImport.parseCredentialBatch(Buffer.isBuffer(value)?value:Buffer.from(JSON.stringify(value)),agent,fileName);
 const namesFor=(batch,rename={})=>Object.fromEntries(batch.items.filter(x=>x.state==='ready').map(x=>[x.key,rename[x.profile]||x.profile]));
@@ -24,33 +26,10 @@ test('a single document derives editable names from filename and identity, witho
   assert.equal(single.items[0].profile,'工作主力');
   const generic=await parse(auth('alice'),'auth (1).json');
   assert.equal(generic.items[0].profile,'alice');
-  const batch=await parse([JSON.parse(auth('one','alice@example.test')),JSON.parse(auth('two','alice@other.test'))]);
+  const batch=await parse([{name:'../../escape',...JSON.parse(auth('one','alice@example.test'))},JSON.parse(auth('two','alice@other.test'))]);
   assert.deepEqual(batch.items.map(x=>x.profile),['alice','alice (2)']);
   assert.equal(new Set(batch.items.map(x=>x.key)).size,2);
   assert.doesNotMatch(JSON.stringify(batch.items),/secret-access|secret-refresh|id_token/);
-});
-
-test('existing and within-batch duplicates are previewed without renaming or replacing saved credentials',async()=>{
-  const original=auth('existing');put('已保存',original);
-  const batch=await parse([JSON.parse(original),JSON.parse(auth('new')),JSON.parse(auth('new')),null,JSON.parse(auth('second'))]);
-  assert.deepEqual(batch.items.map(x=>x.state),['duplicate','ready','duplicate','error','ready']);
-  assert.deepEqual(batch.items[0].duplicate,{key:'codex/已保存',profile:'已保存',source:'pool'});
-  assert.equal(batch.items[2].duplicate.source,'batch');
-  assert.equal(batch.items[2].duplicate.key,batch.items[1].key);
-  const names={[batch.items[1].key]:'重命名后的主力'};
-  atomicWrite(path.join(codexAgent.homeDir,'auth.json'),auth('live-A'));
-  const result=await commit(batch,names);
-  assert.deepEqual(result.imported,['codex/重命名后的主力']);assert.equal(result.skipped.length,2);assert.equal(result.failed.length,1);
-  assert.deepEqual(store.listProfiles('codex').sort(),['已保存','重命名后的主力'].sort());
-  assert.deepEqual(readCredentialFile(path.join(store.profileDir('codex','已保存'),'auth.json')),original);
-  assert.equal(codexAgent.identity().id,'live-A:live-A');
-});
-
-test('email alone does not merge distinct workspaces or different members',async()=>{
-  put('个人',auth('personal','same@example.test','member'));
-  const batch=await parse([JSON.parse(auth('team','same@example.test','member')),JSON.parse(auth('team','same@example.test','other-member'))]);
-  assert.deepEqual(batch.items.map(x=>x.state),['ready','ready']);
-  assert.equal((await commit(batch)).imported.length,2);
 });
 
 test('names are validated in the main process and cannot bypass identity-based deduplication',async()=>{
@@ -72,35 +51,6 @@ test('late name collision rolls back only this batch, then permits retry with a 
   assert.deepEqual(store.listProfiles('codex'),['冲突']);
   const result=await commit(batch,{[batch.items[0].key]:'可用',[batch.items[1].key]:'改好了'});
   assert.deepEqual(result.imported,['codex/可用','codex/改好了']);
-});
-
-test('duplicates introduced after preview are skipped using current pool identities',async()=>{
-  const batch=await parse(auth('late'));
-  put('刚保存',auth('late'));
-  const result=await commit(batch);
-  assert.deepEqual(result.imported,[]);assert.equal(result.skipped[0].existing,'codex/刚保存');
-});
-
-test('all-duplicate batches complete without writes, and deselected accounts stay out of the pool',async()=>{
-  put('已保存',auth('one'));
-  const duplicates=await parse(auth('one'));
-  assert.equal((await commit(duplicates)).skipped.length,1);
-  const batch=await parse([JSON.parse(auth('two')),JSON.parse(auth('three'))]);
-  const result=await commit(batch,{});assert.deepEqual(result.imported,[]);
-  assert.deepEqual(store.listProfiles('codex'),['已保存']);
-});
-
-const native=id=>JSON.parse(auth(id));
-const document=value=>Buffer.from(JSON.stringify(value));
-test('one JSON file contains independently named native, wrapped, malformed and duplicate records',async()=>{
-  const batch=await parse(document([{name:'日常',...native('a')},{name:'长任务',credentials:native('b')},null,{tokens:{refresh_token:'incomplete'}},{...native('a')} ]));
-  assert.deepEqual(batch.items.map(x=>x.state),['ready','ready','error','error','duplicate']);
-  assert.deepEqual(batch.items.map(x=>x.sourceIndex),[1,2,3,4,5]);
-  assert.deepEqual(batch.items.slice(0,2).map(x=>x.profile),['日常','长任务']);
-  const result=await commit(batch,{[batch.items[0].key]:'可修改名称',[batch.items[1].key]:'长任务'});
-  assert.equal(result.imported.length,2);assert.equal(result.failed.length,2);assert.equal(result.skipped.length,1);
-  assert.equal(codexAgent.identity(store.profileDir('codex','可修改名称')).id,'a:a');
-  assert.equal(codexAgent.identity(store.profileDir('codex','长任务')).id,'b:b');
 });
 
 test('unknown exporters: nested wrappers, JSON strings, object maps and extra metadata are accepted',async()=>{
@@ -153,15 +103,6 @@ test('metadata and cached credential histories are not mistaken for new accounts
   assert.equal(batch.items.length,1);assert.equal(batch.items[0].email,'current@example.test');
 });
 
-test('single credential compatibility, invalid names and bundle filenames fall back to identity',async()=>{
-  const single=await parse(auth('single'),'我的工作.json');
-  assert.equal(single.items[0].profile,'我的工作');assert.equal(single.items[0].sourceIndex,undefined);
-  const batch=await parse(document({accounts:[{name:'../../escape',...native('one')},{name:123,...native('two')}]}));
-  assert.deepEqual(batch.items.map(x=>x.profile),['one','two']);
-  const encoded=await parse(document(JSON.stringify(native('encoded'))));
-  assert.equal(encoded.items[0].state,'ready');
-});
-
 test('malformed, oversized and deeply nested documents fail safely without partial installation',async()=>{
   const {parseCredentialDocument}=require('../dist/credential-document');
   assert.throws(()=>parseCredentialDocument(Buffer.from('{"secret":"never-display" broken')),/JSON/);
@@ -181,6 +122,11 @@ test('native Claude and Antigravity credential fields survive extraction; select
   assert.equal(saved.claudeAiOauth.expiresAt,123);assert.equal(saved.claudeAiOauth.junk,undefined);
   const agy=await parse(document({token:{access_token:'a',refresh_token:'r',expiry:'2026-12-01'},auth_method:'oauth',junk:'remove'}),undefined,'agy');
   assert.equal(agy.items[0].state,'ready');
+  const agyConsumer=await parse(document({auth_method:'consumer',id_token_email:'consumer@example.test',token:{access_token:'a2',refresh_token:'r2'}}),undefined,'agy');
+  assert.equal(agyConsumer.items[0].state,'ready');
+  assert.equal(JSON.parse(agyConsumer.parsed.groups.get(agyConsumer.items[0].key).get('jetski-standalone-oauth-token')).id_token_email,'consumer@example.test');
+  const caseBatch=await parse([JSON.parse(auth('c1','Alice@example.test')),JSON.parse(auth('c2','alice@other.test'))]);
+  assert.deepEqual(caseBatch.items.map(x=>x.profile),['Alice','alice (2)']);
   const wrong=await parse(document({claudeAiOauth:{refreshToken:'r'}}));assert.equal(wrong.items[0].state,'error');
 });
 

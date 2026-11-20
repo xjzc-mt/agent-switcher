@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentSwitcher · AGS — AI 编程 Agent 多账号与额度管理工具</title>
+    <meta
+      name="description"
+      content="把多个个人号、团队号或朋友临时借用的 Codex、Antigravity 账号放进同一个 macOS 桌面窗口：谁还有余量一眼看清，点一下顺手切换，零自建后端，本地 AES-256-GCM 加密。"
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="AgentSwitcher · AGS" />
+    <meta
+      property="og:description"
+      content="与 Agent 并肩，与伙伴同行，携手走向 AGI 之门。Codex 与 Antigravity 多账号额度总览与安全切换桌面工具。"
+    />
+    <meta
+      property="og:image"
+      content="https://xjzc-mt.github.io/agent-switcher/images/01-codex-cards.png"
+    />
+    <meta property="og:url" content="https://xjzc-mt.github.io/agent-switcher/" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="AgentSwitcher · AGS" />
+    <meta
+      name="twitter:description"
+      content="Multi-account & quota manager for Codex and Antigravity on macOS. Local-first, AES-256-GCM encrypted, zero backend."
+    />
+    <meta
+      name="twitter:image"
+      content="https://xjzc-mt.github.io/agent-switcher/images/01-codex-cards.png"
+    />
+    <link rel="icon" type="image/png" href="./assets/app-icon.png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container topbar-inner">
+        <a class="brand" href="#top" aria-label="AgentSwitcher">
+          <img src="./assets/app-icon.png" alt="AgentSwitcher 图标" width="30" height="30" />
+          <span class="brand-name">AgentSwitcher</span>
+          <span class="brand-tag">AGS</span>
+        </a>
+
+        <nav class="nav" aria-label="Primary">
+          <a href="#features" data-i18n="nav.features">核心场景</a>
+          <a href="#security" data-i18n="nav.security">安全与支持</a>
+          <a href="#install" data-i18n="nav.install">快速安装</a>
+          <a href="#gate" data-i18n="nav.gate">门后彩蛋</a>
+        </nav>
+
+        <div class="topbar-actions">
+          <div class="lang-switch" role="group" aria-label="Language">
+            <button type="button" class="lang-btn is-active" data-lang="zh" aria-pressed="true">中文</button>
+            <button type="button" class="lang-btn" data-lang="en" aria-pressed="false">EN</button>
+          </div>
+          <a
+            class="icon-link"
+            href="https://github.com/xjzc-mt/agent-switcher"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              />
+            </svg>
+            <span>GitHub</span>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="container">
+          <div class="hero-card">
+            <img class="hero-wind" src="./assets/wind-trace.svg" alt="" aria-hidden="true" />
+            <div class="hero-head">
+              <img
+                class="hero-icon"
+                src="./assets/app-icon.png"
+                alt="AgentSwitcher · AGI 之门与五个 Agent 搭档"
+                width="76"
+                height="76"
+              />
+              <div class="hero-copy">
+                <p class="hero-motto" data-i18n="hero.motto">与 Agent 并肩，与伙伴同行，携手走向 AGI 之门。</p>
+                <h1 data-i18n="hero.title">多个 AI Agent 账号，一眼看清余量，点一下顺手切换</h1>
+                <p class="hero-lead" data-i18n="hero.lead">
+                  不管你手头攒了多个个人号与团队号，还是搭档、朋友临时借你一个 Codex 或 Antigravity 账号救急——放进同一个 macOS 桌面窗口，谁还有余量一目了然，既不打断心流，也不误覆盖原有主号。
+                </p>
+              </div>
+            </div>
+
+            <div class="hero-actions">
+              <a
+                id="heroDownloadBtn"
+                class="btn btn-primary"
+                href="https://github.com/xjzc-mt/agent-switcher/releases"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <span id="heroActionLabel" data-i18n="hero.releaseHistory">查看发布记录</span>
+                <span id="heroReleaseTag" class="btn-badge" hidden></span>
+              </a>
+              <a
+                class="btn btn-secondary"
+                href="https://github.com/xjzc-mt/agent-switcher"
+                target="_blank"
+                rel="noopener noreferrer"
+                data-i18n="hero.source"
+              >
+                查看 GitHub 源码
+              </a>
+              <a class="btn btn-ghost" href="#install" data-i18n="hero.installGuide">首次打开指引</a>
+            </div>
+
+            <ul class="hero-facts">
+              <li data-i18n="hero.fact1">macOS Apple Silicon</li>
+              <li data-i18n="hero.fact2">支持 Codex 与 Antigravity</li>
+              <li data-i18n="hero.fact3">零自建后端 · 本地 AES-256-GCM</li>
+              <li data-i18n="hero.fact4">MIT 许可证</li>
+            </ul>
+          </div>
+
+          <div class="stage" aria-label="界面预览">
+            <div class="stage-bar">
+              <div class="window-dots" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </div>
+              <div class="stage-tabs" role="tablist" aria-label="界面视图">
+                <button
+                  type="button"
+                  role="tab"
+                  class="stage-tab is-active"
+                  aria-selected="true"
+                  data-stage="cards"
+                  data-i18n="stage.tabCards"
+                >
+                  Codex 卡片总览
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  class="stage-tab"
+                  aria-selected="false"
+                  data-stage="rows"
+                  data-i18n="stage.tabRows"
+                >
+                  Codex 单行对比
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  class="stage-tab"
+                  aria-selected="false"
+                  data-stage="agy"
+                  data-i18n="stage.tabAgy"
+                >
+                  Antigravity 模型组
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  class="stage-tab"
+                  aria-selected="false"
+                  data-stage="settings"
+                  data-i18n="stage.tabSettings"
+                >
+                  偏好与更新
+                </button>
+              </div>
+              <button type="button" class="zoom-trigger" id="stageZoomBtn" data-i18n="common.zoom">
+                查看大图
+              </button>
+            </div>
+
+            <figure class="stage-frame">
+              <img
+                id="stageImage"
+                src="./images/01-codex-cards.png"
+                alt="Codex 账号总览：当前账号、套餐分组和备用额度"
+                loading="eager"
+              />
+              <figcaption>
+                <span id="stageCaption" data-i18n="stage.capCards">
+                  当前账号置顶，备用账号按套餐归组并按可用余量排序，右侧点一下即可切换。
+                </span>
+                <span class="stage-note" data-i18n="stage.demoNote">
+                  真实桌面界面截图（使用虚构账号与模拟额度，不含真实凭据）
+                </span>
+              </figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section id="features" class="section">
+        <div class="container">
+          <div class="section-head">
+            <h2 data-i18n="features.title">顺手完成三件高频小事</h2>
+            <p data-i18n="features.subtitle">
+              界面刻意保持紧凑与克制，所有操作围绕识别账号、比较余量与安全切换展开，不堆多余装饰。
+            </p>
+          </div>
+
+          <div class="feature-list">
+            <article class="feature-row" data-switcher="quota">
+              <div class="feature-copy">
+                <h3 data-i18n="f1.title">看余量，不盲猜</h3>
+                <p data-i18n="f1.desc">
+                  当前账号置顶，备用账号按套餐归组、按可用余量排好序，支持卡片与单行两种视图。Codex 分列 5h / 7d 与 Credits；Antigravity 以 Gemini 为主并独立展示 Claude / GPT 等模型组，缺失值如实显示「—」，不混算总比例。
+                </p>
+                <div class="pill-tabs" role="tablist">
+                  <button
+                    type="button"
+                    role="tab"
+                    class="pill-tab is-active"
+                    aria-selected="true"
+                    data-shot="02-codex-rows.png"
+                    data-cap-key="f1.cap1"
+                    data-i18n="f1.tab1"
+                  >
+                    Codex 单行对比
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    class="pill-tab"
+                    aria-selected="false"
+                    data-shot="03-antigravity.png"
+                    data-cap-key="f1.cap2"
+                    data-i18n="f1.tab2"
+                  >
+                    Antigravity 主次分层
+                  </button>
+                </div>
+              </div>
+              <figure class="feature-media">
+                <img
+                  src="./images/02-codex-rows.png"
+                  alt="单行视图：按套餐比较多个账号的额度"
+                  loading="lazy"
+                  data-zoomable="true"
+                />
+                <figcaption data-i18n="f1.cap1">密集对齐的单行视图，适合账号较多时快速横比 5h / 7d 与 Credits。</figcaption>
+              </figure>
+            </article>
+
+            <article class="feature-row is-reversed" data-switcher="onboarding">
+              <div class="feature-copy">
+                <h3 data-i18n="f2.title">添账号，不掉线</h3>
+                <p data-i18n="f2.desc">
+                  拉起官方浏览器（支持无痕窗口与连续添加）独立完成授权，不踢掉当前正在工作的客户端。多账号 JSON 可先预览、改名、按身份去重再导入；过期账号支持原位更新并保留昵称，替换文件凭据前先校验归属。
+                </p>
+                <div class="pill-tabs" role="tablist">
+                  <button
+                    type="button"
+                    role="tab"
+                    class="pill-tab is-active"
+                    aria-selected="true"
+                    data-shot="04-add-account.png"
+                    data-cap-key="f2.cap1"
+                    data-i18n="f2.tab1"
+                  >
+                    独立浏览器授权
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    class="pill-tab"
+                    aria-selected="false"
+                    data-shot="05-import-preview.png"
+                    data-cap-key="f2.cap2"
+                    data-i18n="f2.tab2"
+                  >
+                    批量导入预览
+                  </button>
+                </div>
+              </div>
+              <figure class="feature-media">
+                <img
+                  src="./images/04-add-account.png"
+                  alt="添加账号：官方浏览器登录与连续添加"
+                  loading="lazy"
+                  data-zoomable="true"
+                />
+                <figcaption data-i18n="f2.cap1">仅放行 OpenAI 与 Google 官方授权域名，支持无痕登录与连续入池。</figcaption>
+              </figure>
+            </article>
+
+            <article class="feature-row" data-switcher="safety">
+              <div class="feature-copy">
+                <h3 data-i18n="f3.title">留备份，不伤现场</h3>
+                <p data-i18n="f3.desc">
+                  勾选账号并设置独立密码即可导出 .ags 加密备份，方便跨机迁移。移除账号前先核对同身份范围，默认只删除 AGS 内的备份，完整保留官方客户端登录、聊天历史与项目文件。
+                </p>
+                <div class="pill-tabs" role="tablist">
+                  <button
+                    type="button"
+                    role="tab"
+                    class="pill-tab is-active"
+                    aria-selected="true"
+                    data-shot="06-encrypted-backup.png"
+                    data-cap-key="f3.cap1"
+                    data-i18n="f3.tab1"
+                  >
+                    .ags 加密备份
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    class="pill-tab"
+                    aria-selected="false"
+                    data-shot="07-remove-confirmation.png"
+                    data-cap-key="f3.cap2"
+                    data-i18n="f3.tab2"
+                  >
+                    移除范围确认
+                  </button>
+                </div>
+              </div>
+              <figure class="feature-media">
+                <img
+                  src="./images/06-encrypted-backup.png"
+                  alt="加密备份：选择账号并设置独立密码"
+                  loading="lazy"
+                  data-zoomable="true"
+                />
+                <figcaption data-i18n="f3.cap1">用独立密码派生密钥加密导出，避免明文凭据散落在本地或传输途中。</figcaption>
+              </figure>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="security" class="section section-tinted">
+        <div class="container">
+          <div class="section-head">
+            <h2 data-i18n="security.title">安全边界与支持范围</h2>
+            <p data-i18n="security.subtitle">
+              涉及账号凭据的工具先讲清楚边界：零自建服务器、源码公开可审，只动登录凭据，不碰聊天记录与项目配置。
+            </p>
+          </div>
+
+          <div class="spec-grid">
+            <div class="panel">
+              <h3 class="panel-title" data-i18n="security.pillarsTitle">本地安全保障</h3>
+              <dl class="spec-list">
+                <div class="spec-item">
+                  <dt data-i18n="security.p1Title">零自建后端，透明可审</dt>
+                  <dd data-i18n="security.p1Desc">
+                    登录仅放行 OpenAI 与 Google 官方授权域名。故障记录保存在本机，可在设置中导出脱敏报告并自行转交维护者。
+                  </dd>
+                </div>
+                <div class="spec-item">
+                  <dt data-i18n="security.p2Title">本机强加密与钥匙串托管</dt>
+                  <dd data-i18n="security.p2Desc">
+                    池内凭据经 <code>AES-256-GCM</code> 加密（文件权限 <code>0600</code>），主密钥由 macOS Keychain 托管；<code>.ags</code> 备份由你设置的独立密码派生密钥。
+                  </dd>
+                </div>
+                <div class="spec-item">
+                  <dt data-i18n="security.p3Title">不丢号、不越界</dt>
+                  <dd data-i18n="security.p3Desc">
+                    未入池的当前登录在切换前会弹窗提醒保护；只替换登录凭据，不动聊天历史与项目配置，也不会在后台偷偷自动切号。
+                  </dd>
+                </div>
+                <div class="spec-item">
+                  <dt data-i18n="security.p4Title">使用边界明确</dt>
+                  <dd data-i18n="security.p4Desc">
+                    放入他人账号须事先获持有人授权；本版仅限本机使用，不含联网中转或多人共享服务。
+                  </dd>
+                </div>
+              </dl>
+            </div>
+
+            <div class="panel">
+              <h3 class="panel-title" data-i18n="support.title">平台支持现状</h3>
+              <div class="table-wrap">
+                <table class="support-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="support.colPlatform">平台</th>
+                      <th data-i18n="support.colStatus">状态</th>
+                      <th data-i18n="support.colDetail">支持范围与条件</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        <strong>Codex</strong>
+                        <span class="code-sub">codex</span>
+                      </td>
+                      <td><span class="status-badge status-ready" data-i18n="support.ready">已支持</span></td>
+                      <td data-i18n="support.codexDesc">
+                        独立登录、auth.json 切换、5h / 7d 额度与 Credits（需本机 Codex 客户端；Keychain-only 未适配，API Key 无订阅额度）。
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>
+                        <strong>Antigravity</strong>
+                        <span class="code-sub">agy</span>
+                      </td>
+                      <td><span class="status-badge status-ready" data-i18n="support.ready">已支持</span></td>
+                      <td data-i18n="support.agyDesc">
+                        macOS 2.x 个人 Google 账号独立登录、Keychain 或官方文件切换与模型组额度（需官方 agy CLI；企业认证暂未验证）。
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>
+                        <strong>Claude Code</strong>
+                        <span class="code-sub">claude</span>
+                      </td>
+                      <td><span class="status-badge status-planned" data-i18n="support.planned">规划中</span></td>
+                      <td data-i18n="support.claudeDesc">
+                        保留底层兼容代码，首版 GUI 入口暂置灰，待补齐激活与额度能力后开放。
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="panel-foot" data-i18n="support.foot">
+                1.0.1 候选源码面向 macOS Apple Silicon，包含桌面版和 ags 命令行工具。Windows Codex 兼容性仍待实机验收。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="install" class="section">
+        <div class="container">
+          <div class="section-head">
+            <h2 data-i18n="install.title">下载与快速安装</h2>
+            <p data-i18n="install.subtitle">
+              拥有候选源码的用户可通过 Node.js 22.12+ 直接运行。已公开的正式安装包可在 GitHub Releases 查看。
+            </p>
+          </div>
+
+          <div class="install-grid">
+            <div class="panel install-primary">
+              <div class="install-head">
+                <div>
+                  <h3 class="panel-title" data-i18n="install.dmgTitle">桌面版安装包（DMG）</h3>
+                  <p class="install-meta" id="releaseMeta" data-i18n="install.dmgMeta">
+                    尚未确认可下载的 Apple Silicon 正式安装包。
+                  </p>
+                </div>
+                <span class="version-pill" id="installVersionPill" hidden></span>
+              </div>
+
+              <div class="install-actions">
+                <a
+                  id="installDownloadBtn"
+                  class="btn btn-primary"
+                  hidden
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-i18n="install.downloadDirect"
+                >
+                  下载 Apple Silicon DMG
+                </a>
+                <a
+                  class="btn btn-secondary"
+                  href="https://github.com/xjzc-mt/agent-switcher/releases"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-i18n="install.allReleases"
+                >
+                  所有版本与说明
+                </a>
+              </div>
+
+              <div class="notice-box">
+                <strong data-i18n="install.gatekeeperTitle">首次打开提示「无法验证开发者」？</strong>
+                <p data-i18n="install.gatekeeperDesc">
+                  首发包采用 ad-hoc 签名（尚未接入 Apple 公证）。核对下载来源后，打开「系统设置 → 隐私与安全性」，滑到底部点击「仍要打开」即可放行。
+                </p>
+              </div>
+
+              <div class="code-box">
+                <div class="code-box-head">
+                  <span data-i18n="install.verifyLabel">可选：校验 DMG 完整性</span>
+                  <button
+                    type="button"
+                    class="copy-btn"
+                    data-copy="shasum -a 256 -c SHA256SUMS"
+                    data-i18n="common.copy"
+                  >
+                    复制
+                  </button>
+                </div>
+                <pre><code>shasum -a 256 -c SHA256SUMS</code></pre>
+              </div>
+            </div>
+
+            <div class="panel">
+              <h3 class="panel-title" data-i18n="install.cliTitle">源码运行与 ags CLI</h3>
+              <p class="panel-desc" data-i18n="install.cliDesc">
+                适合想直接审计源码、打包最新工作区，或在终端用 ags 命令快速切换的开发者（需 Node.js 22.12+）。
+              </p>
+
+              <div class="code-box">
+                <div class="code-box-head">
+                  <span data-i18n="install.sourceLabel">克隆并启动桌面窗口</span>
+                  <button
+                    type="button"
+                    class="copy-btn"
+                    data-copy="git clone https://github.com/xjzc-mt/agent-switcher.git && cd agent-switcher && npm ci && npm run build && npm run gui"
+                    data-i18n="common.copy"
+                  >
+                    复制
+                  </button>
+                </div>
+                <pre><code>git clone https://github.com/xjzc-mt/agent-switcher.git
+cd agent-switcher
+npm ci &amp;&amp; npm run build &amp;&amp; npm run gui</code></pre>
+              </div>
+
+              <div class="code-box">
+                <div class="code-box-head">
+                  <span data-i18n="install.cliLabel">常用 ags 命令（构建后 npm link 安装）</span>
+                  <button
+                    type="button"
+                    class="copy-btn"
+                    data-copy="ags save codex work&#10;ags list&#10;ags status&#10;ags use codex work"
+                    data-i18n="common.copy"
+                  >
+                    复制
+                  </button>
+                </div>
+                <pre><code>ags save codex work   # 保存当前登录
+ags list              # 查看已保存账号
+ags status            # 查看当前激活状态
+ags use codex work    # 切换至指定账号</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="gate" class="section section-gate">
+        <div class="container">
+          <div class="gate-card">
+            <div class="gate-header">
+              <img src="./assets/gate-mark.png" alt="AGS 门标" width="32" height="32" />
+              <div>
+                <h2 data-i18n="gate.title">门后的彩蛋</h2>
+                <p class="gate-lead" data-i18n="gate.lead">
+                  顶部那扇「AGI 之门」下，人与众 Agent 并肩、人与人彼此托举——AgentSwitcher v1.0 只是序章。
+                </p>
+              </div>
+            </div>
+
+            <p class="gate-teaser" data-i18n="gate.teaser">
+              一款围绕「私密信任圈 · 额度零浪费 · 彼此互助」打造的个人微中转产品已进入发布倒计时，即将揭晓。
+            </p>
+
+            <details class="gate-details">
+              <summary data-i18n="gate.summary">推开高门 · 解锁「终局形态」预言</summary>
+              <div class="gate-body">
+                <p data-i18n="gate.story">
+                  今天朋友借号还得导凭据，深夜里大量订阅窗口又在倒计时中白白清零。而在终局形态里，每个人都可以是一座自主受控的「个人小中转」（并非公共商业号池或账号倒卖，而是熟人与小团队的私密互助工具）：
+                </p>
+                <ul>
+                  <li data-i18n="gate.b1">
+                    <strong>借力免交凭据</strong>：账号空闲时，本机即可化作轻量微中转节点，搭档按需借力，无需交出密码或明文 JSON。
+                  </li>
+                  <li data-i18n="gate.b2">
+                    <strong>信任圈私密默认，开关全权在己</strong>：默认仅对认可的熟人与小团队开放；谁能连、用多少、外部限制开关均由你本机实时掌控、随时撤回。
+                  </li>
+                  <li data-i18n="gate.b3">
+                    <strong>闲置余量零浪费</strong>：队友赶工借你空闲窗口顶上，你冲刺时也有伙伴余量接力，让每一份订阅物尽其用。
+                  </li>
+                </ul>
+              </div>
+            </details>
+
+            <div class="gate-actions">
+              <a
+                class="btn btn-primary"
+                href="https://github.com/xjzc-mt/agent-switcher"
+                target="_blank"
+                rel="noopener noreferrer"
+                data-i18n="gate.cta"
+              >
+                去 GitHub 点 Star 并订阅 Releases
+              </a>
+              <p class="gate-footnote" data-i18n="gate.footnote">
+                彩蛋介绍下一代独立产品。AgentSwitcher 在本机管理账号与额度。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer-inner">
+        <div class="footer-brand">
+          <img src="./assets/gate-mark.png" alt="" width="20" height="20" aria-hidden="true" />
+          <span>AgentSwitcher · AGS</span>
+          <span class="footer-sep">·</span>
+          <span data-i18n="footer.license">MIT 开源协议</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/xjzc-mt/agent-switcher" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://github.com/xjzc-mt/agent-switcher/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+          <a href="https://github.com/xjzc-mt/agent-switcher/issues" target="_blank" rel="noopener noreferrer">Issues</a>
+          <a
+            href="https://github.com/xjzc-mt/agent-switcher/blob/main/docs/account-management.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            data-i18n="footer.docs"
+          >
+            账号管理文档
+          </a>
+        </div>
+      </div>
+    </footer>
+
+    <div id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="截图放大预览" hidden>
+      <div class="lightbox-backdrop" data-close-lightbox="true"></div>
+      <div class="lightbox-dialog">
+        <button
+          type="button"
+          class="lightbox-close"
+          id="lightboxClose"
+          aria-label="关闭预览"
+          data-close-lightbox="true"
+        >
+          ×
+        </button>
+        <img id="lightboxImg" alt="" />
+        <p id="lightboxCaption"></p>
+      </div>
+    </div>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

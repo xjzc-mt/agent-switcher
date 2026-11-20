@@ -5,11 +5,24 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ags-provider-test-'));
 os.homedir=()=>root;
 const { readCredentialFile } = require('./vault-fixture.cjs');
 const {atomicWrite}=require('../dist/utils');
-const {AntigravityAgent}=require('../dist/agents/antigravity');
+const {AntigravityAgent,detectAntigravityRuntime}=require('../dist/agents/antigravity');
 const {ClaudeAgent,parseClaudeAuthStatus}=require('../dist/agents/claude');
 const accounts=require('../dist/accounts');
 const store=require('../dist/store');
 const policy=require('../renderer/account-policy');
+test('installed Antigravity metadata identifies both adapter generations with a binary plist', {skip:process.platform!=='darwin'}, () => {
+  const contents=path.join(root,'Applications/Antigravity.app/Contents');
+  fs.mkdirSync(contents,{recursive:true});
+  try {
+    for(const [version,expected] of [['1.9','legacy'],['2.3','unified']]) {
+      const binary=require('node:child_process').execFileSync('/usr/bin/plutil',['-convert','binary1','-o','-','-'],{
+        input:`<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>${version}</string></dict></plist>`,
+      });
+      fs.writeFileSync(path.join(contents,'Info.plist'),binary);
+      assert.equal(detectAntigravityRuntime(),expected);
+    }
+  } finally {fs.rmSync(path.join(root,'Applications'),{recursive:true,force:true});}
+});
 after(()=>fs.rmSync(root,{recursive:true,force:true}));
 const credentials=JSON.stringify({refresh_token:'fake-refresh',access_token:'fake-access',id_token:`x.${Buffer.from(JSON.stringify({sub:'test-person',email:'test@example.test'})).toString('base64url')}.x`});
 

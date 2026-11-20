@@ -1,3 +1,4 @@
+const { accessToken } = require('./codex-token-fixture.cjs');
 const { test, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -13,6 +14,7 @@ require('./vault-fixture.cjs');
 const clients = require('../dist/clients');
 clients.runningClients = async () => [];
 const logout = require('../dist/client-logout');
+logout.runningCodexSessions = async () => [];
 let unsupported, onReady, clearCalls;
 logout.logoutSupport = () => unsupported;
 logout.assertLogoutReady = async () => {
@@ -34,7 +36,7 @@ const dir = name => store.profileDir('codex', name);
 const file = directory => path.join(directory, 'auth.json');
 const auth = (workspace, generation = 1, user = 'member') => JSON.stringify({
   auth_mode: 'chatgpt', last_refresh: `2026-11-${String(generation).padStart(2, '0')}T00:00:00Z`,
-  tokens: { account_id: workspace, access_token: `access-${workspace}-${generation}`,
+  tokens: { account_id: workspace, access_token: accessToken(workspace, user, 'shared@example.test', generation),
     refresh_token: `refresh-${workspace}-${generation}`,
     id_token: 'header.' + Buffer.from(JSON.stringify({ sub: user, email: 'shared@example.test' })).toString('base64url') + '.signature' },
 });
@@ -146,25 +148,99 @@ test('deleted current account is not silently restored by switching; discard req
   assert.deepEqual(store.listProfiles('codex'), ['B']);
 });
 
-test('explicitly saving an unmanaged account still preserves it before switching', async () => {
-  put(agent.homeDir, 'A'); put(dir('B'), 'B'); put(dir('C'), 'C');
-  await accounts.useAccount(agent, 'B', { saveUnmanaged: true });
-  const backup = store.listProfiles('codex').find(name => name.startsWith('backup-'));
-  assert.ok(backup);
-  assert.equal(version(dir(backup)), 'refresh-A-1');
-  assert.equal(version(agent.homeDir), 'refresh-B-1');
-  assert.equal(version(dir('C')), 'refresh-C-1');
+test('a named save prunes only exact backups, after credentials and metadata are durable', async () => {
+  put(agent.homeDir, 'A', 1);
+  for (const name of ['backup-1', 'backup-2', 'backup-3', 'backup-4']) put(dir(name), 'A', 1);
+  put(dir('backup-2'), 'A', 2);
+  atomicWrite(path.join(dir('backup-3'), 'auth.json.pending'), auth('A', 3));
+  fs.writeFileSync(path.join(dir('backup-4'), 'notes.txt'), 'keep me');
+  const rename = fs.renameSync;
+  for (const failingFile of ['auth.json', '_meta.json']) {
+    fs.renameSync = (from, to) => {
+      if (to === path.join(dir('named'), failingFile)) throw new Error('disk write failed');
+      return rename(from, to);
+    };
+    try { await assert.rejects(accounts.saveAccount(agent, 'named'), /disk write failed/); }
+    finally { fs.renameSync = rename; }
+    assert.equal(version(dir('backup-1')), 'refresh-A-1');
+    assert.equal(version(dir('backup-2')), 'refresh-A-2');
+  }
+  await accounts.saveAccount(agent, 'named');
+  assert.equal(version(dir('named')), 'refresh-A-1');
+  assert.equal(fs.existsSync(dir('backup-1')), false);
+  assert.equal(version(dir('backup-2')), 'refresh-A-2');
+  assert.deepEqual(readBuffer(path.join(dir('backup-3'), 'auth.json.pending')), Buffer.from(auth('A', 3)));
+  assert.equal(fs.readFileSync(path.join(dir('backup-4'), 'notes.txt'), 'utf8'), 'keep me');
 });
 
-for (const duringInspection of [false, true]) test(`discard choice rejects login changes ${duringInspection ? 'during' : 'before'} client inspection`, async () => {
+test('ordinary save preserves a damaged same-name card and a pending replacement', async () => {
+  put(agent.homeDir, 'A');
+  const saved = file(dir('named')), pending = path.join(dir('named'), 'auth.json.pending');
+  const unsupported = Buffer.from('{"tokens":{},"previous_format":"recoverable"}');
+  atomicWrite(saved, unsupported);
+  await assert.rejects(accounts.saveAccount(agent, 'named'), /原凭据/);
+  assert.deepEqual(readBuffer(saved), unsupported);
+  put(dir('named'), 'A'); atomicWrite(pending, auth('A', 2));
+  await assert.rejects(accounts.saveAccount(agent, 'named'), /待验证/);
+  assert.deepEqual(readBuffer(pending), Buffer.from(auth('A', 2)));
+});
+
+test('saving uses the identity and bytes captured before an external account change', async t => {
+  put(agent.homeDir, 'A', 2); put(dir('named'), 'A'); put(dir('B'), 'B');
+  store.setActiveProfile('codex', 'B');
+  const read = agent.readCredentials.bind(agent);
+  let changed = false;
+  t.mock.method(agent, 'readCredentials', (location = agent.homeDir) => {
+    const captured = read(location);
+    if (!changed && location === agent.homeDir) {
+      changed = true;
+      put(agent.homeDir, 'B');
+    }
+    return captured;
+  });
+  await accounts.saveAccount(agent, 'named');
+  assert.equal(changed, true);
+  assert.equal(version(dir('named')), 'refresh-A-2');
+  assert.equal(version(agent.homeDir), 'refresh-B-1');
+  assert.equal(store.getActiveProfile('codex'), 'B');
+});
+
+test('syncing an alias cannot read a new live account after its generation was checked', async t => {
+  put(agent.homeDir, 'A', 2); put(dir('backup-1'), 'A');
+  const save = agent.save.bind(agent);
+  let changed = false;
+  t.mock.method(agent, 'save', (name, ...args) => {
+    if (name === 'backup-1') { changed = true; put(agent.homeDir, 'B'); }
+    return save(name, ...args);
+  });
+  await accounts.saveAccount(agent, 'backup-2');
+  assert.equal(changed, true);
+  assert.equal(version(dir('backup-1')), 'refresh-A-2');
+  assert.equal(version(dir('backup-2')), 'refresh-A-2');
+  assert.equal(version(agent.homeDir), 'refresh-B-1');
+});
+
+test('an official re-login updates the pool but preserves a new live account appearing during the write', async t => {
+  put(agent.homeDir, 'A'); put(dir('named'), 'A');
+  store.writeProfileMeta('codex', 'named', { snapshot: { available: true, state: 'expired', authExpired: true,
+    credentialRevision: credentialState(agent, dir('named')).revision } });
+  const target = accounts.credentialUpdateTarget(agent, 'named');
+  const login = path.join(root, 'official-login'); put(login, 'A', 2);
+  const rename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    rename(from, to);
+    if (to === file(dir('named'))) put(agent.homeDir, 'B');
+  });
+  await accounts.updateAccountCredentials(target, login, undefined, { trusted: true });
+  assert.equal(version(dir('named')), 'refresh-A-2');
+  assert.equal(version(agent.homeDir), 'refresh-B-1');
+});
+
+test('discard choice rejects a login changed during client inspection', async t => {
   put(agent.homeDir, 'A'); put(dir('B'), 'B');
   const expectedCurrentRevision = credentialState(agent).revision;
-  const original = clients.runningClients;
-  if (duringInspection) clients.runningClients = async () => { put(agent.homeDir, 'C'); return []; };
-  else put(agent.homeDir, 'C');
-  try {
-    await assert.rejects(accounts.useAccount(agent, 'B', { saveUnmanaged: false, expectedCurrentRevision }), /确认期间/);
-  } finally { clients.runningClients = original; }
+  t.mock.method(clients, 'runningClients', async () => { put(agent.homeDir, 'C'); return []; });
+  await assert.rejects(accounts.useAccount(agent, 'B', { saveUnmanaged: false, expectedCurrentRevision }), /确认期间/);
   assert.equal(version(agent.homeDir), 'refresh-C-1');
   assert.deepEqual(store.listProfiles('codex'), ['B']);
 });
@@ -193,6 +269,22 @@ test('explicit logout removes only the approved credentials and pool while leavi
   assert.deepEqual(store.listProfiles('codex'), ['B']);
   assert.equal(fs.readFileSync(history, 'utf8'), 'history stays');
   assert.equal(clearCalls.length, 1);
+});
+
+test('deletion confirmation binds the pending credential and the exact live login approved for logout', async () => {
+  put(agent.homeDir, 'A'); put(dir('A'), 'A');
+  const pending = path.join(dir('A'), 'auth.json.pending');
+  atomicWrite(pending, auth('A', 2));
+  const first = await accounts.previewRemoveAccount(agent, 'A');
+  atomicWrite(pending, auth('A', 3));
+  await assert.rejects(accounts.removeAccount(agent, 'A', { preview: first }), /范围已变化/);
+  const second = await accounts.previewRemoveAccount(agent, 'A');
+  onReady = () => put(agent.homeDir, 'A', 4);
+  await assert.rejects(accounts.removeAccount(agent, 'A', { preview: second, logout: true }), /当前账号已变化/);
+  assert.equal(clearCalls.length, 0);
+  assert.equal(version(agent.homeDir), 'refresh-A-4');
+  assert.equal(version(dir('A')), 'refresh-A-1');
+  assert.deepEqual(readBuffer(pending), Buffer.from(auth('A', 3)));
 });
 
 test('a preview for another caller target cannot authorize removal', async () => {

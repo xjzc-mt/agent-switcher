@@ -1,5 +1,5 @@
 import { BaseAgent } from '../agents/base';
-import { listProfiles } from '../store';
+import { listProfiles, profileDir } from '../store';
 import { activeProfile } from '../accounts';
 
 export async function runList(agents: BaseAgent[], filterAgentId?: string): Promise<void> {
@@ -17,7 +17,7 @@ export async function runList(agents: BaseAgent[], filterAgentId?: string): Prom
   let anyProfiles = false;
 
   for (const agent of targets) {
-    const profiles = listProfiles(agent.id);
+    const profiles = listProfiles(agent.id, { includeInvalid: true });
     const active = activeProfile(agent);
 
     console.log(chalk.bold.cyan(`\n${agent.label}  `) + chalk.dim(`(${agent.id})`));
@@ -29,6 +29,16 @@ export async function runList(agents: BaseAgent[], filterAgentId?: string): Prom
 
     anyProfiles = true;
     for (const p of profiles) {
+      let brokenReason: string | undefined;
+      try {
+        if (!agent.identity(profileDir(agent.id, p))) brokenReason = '凭据不可用';
+      } catch (error) {
+        brokenReason = (error as Error).message || '凭据读取失败';
+      }
+      if (brokenReason) {
+        console.log(`  ${chalk.red('✖ ')}${p} ${chalk.yellow(`(${brokenReason})`)}`);
+        continue;
+      }
       const isActive = p === active;
       const marker = isActive ? chalk.green('● ') : chalk.dim('○ ');
       const name = isActive ? chalk.bold.green(p) : p;

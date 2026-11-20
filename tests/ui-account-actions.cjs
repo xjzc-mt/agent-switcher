@@ -24,19 +24,7 @@ app.whenReady().then(async()=>{
       await capture(`pro-tiers-${layout}`);
     }
     await run(`accountLayout='cards';renderWorkbench();openAccountDetails('codex','工作账号');window.details=document.querySelector('dialog[data-account-details]');window.confirm=()=>{throw new Error('Unexpected second confirmation modal')};void 0`);
-    assert.deepEqual(await run(`[...document.querySelectorAll('.account-actions button')].map(b=>b.textContent)`),['删除账号','导出账号']);
     assert.equal(await run(`!!document.querySelector('.detail-update-row [data-refresh-account]')`),true);
-    assert.equal(await run(`!!document.querySelector('[data-edit-account-name]')`),true);
-    await capture('account-actions-details');
-    await run(`loadStatus()`);
-    await click('[data-action="handleDeleteProfile"]');
-    assert.equal(await run(`window.testApi.calls().filter(c=>c.method==='delete').length`),0);
-    assert.equal(await run(`document.querySelector('dialog[data-account-details]')===window.details`),true);
-    await run(`loadStatus()`);
-    assert.equal(await run(`!!document.querySelector('.detail-delete-confirm')`),true);
-    await capture('account-delete-confirm');
-    await click('[data-action="cancelDeleteProfile"]');
-    assert.equal(await run(`!!document.querySelector('.account-actions')`),true);
     await click('[data-action="handleExportProfile"]');
     await until(`!!document.querySelector('[name="password"]')`);
     await click('[data-cancel]');

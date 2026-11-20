@@ -163,8 +163,10 @@ app.whenReady().then(async () => {
     await capture('07-remove-confirmation.png', ['从 AGS 移除「我的日常账号」', '客户端登录、历史记录和项目文件将保留']);
 
     await reset();
+    const version = JSON.stringify(require('../package.json').version);
+    await run(`window.appUpdateTestApi.setState({ currentVersion: ${version} })`);
     await run(`selectTab('settings')`);
-    await until(`document.querySelector('#appUpdateVersion').textContent === '1.0.0'`);
+    await until(`document.querySelector('#appUpdateVersion').textContent === ${version}`);
     await run(`document.querySelector('.app-update-mark').decode()`);
     assert.ok(await run(`document.querySelector('.app-update-mark').naturalWidth > 0`), 'Settings brand mark must load');
     await capture('08-settings.png', ['尚未检查新版', '无痕登录入口']);

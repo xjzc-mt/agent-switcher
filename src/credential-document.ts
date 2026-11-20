@@ -117,9 +117,11 @@ function normalize(value: ObjectValue, selectedAgent?: string): ObjectValue | un
   const source = token ? nestedObject(value.token) : value;
   const fields = oauthFields(source);
   if (!fields.access_token && !fields.refresh_token) throw new Error('凭据不完整，缺少登录所需的 Token');
-  // Antigravity has a native outer id_token; it belongs to this same credential record.
+  const idTokenEmail = stringField(value, ['id_token_email', 'idTokenEmail']) || (token ? optionalText(value, ['email']) : undefined);
+  // Antigravity has a native outer id_token / id_token_email; it belongs to this same credential record.
   return { ...(token ? { token: { ...fields, expiry: optionalText(source, ['expiry']) } } : fields),
     ...(token ? { id_token: stringField(value, idKeys) } : {}),
+    ...(idTokenEmail ? { id_token_email: idTokenEmail } : {}),
     expiry: optionalText(value, ['expiry']), auth_method: optionalText(value, ['auth_method']),
   };
 }

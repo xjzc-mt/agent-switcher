@@ -1,3 +1,4 @@
+const { accessToken } = require('./codex-token-fixture.cjs');
 const { test, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -8,6 +9,8 @@ os.homedir = () => root;
 const { readCredentialFile } = require('./vault-fixture.cjs');
 const clients = require('../dist/clients');
 clients.runningClients = async () => [];
+const logout = require('../dist/client-logout');
+logout.runningCodexSessions = async () => [];
 const store = require('../dist/store');
 const { codexAgent: agent } = require('../dist/agents/codex');
 Object.defineProperty(agent, 'homeDir', { value: path.join(root, 'live'), configurable: true });
@@ -18,15 +21,59 @@ async function importBackup(data, password) {
   const parsed = await backup.parseBackup(data, password);
   return backup.installBackup(parsed, parsed.items.map(item => item.key));
 }
-const auth = (id, token = 'refresh-' + id) => JSON.stringify({ tokens: { account_id: id, access_token: 'fake-access', refresh_token: token, id_token: `header.${Buffer.from(JSON.stringify({ sub: id, email: `${id}@example.test` })).toString('base64url')}.signature` } });
+const auth = (id, token = 'refresh-' + id) => JSON.stringify({ tokens: { account_id: id, access_token: accessToken(id,id,id+'@example.test'), refresh_token: token, id_token: `header.${Buffer.from(JSON.stringify({ sub: id, email: `${id}@example.test` })).toString('base64url')}.signature` } });
 const putLive = (id, token) => atomicWrite(path.join(agent.homeDir, 'auth.json'), auth(id, token));
 const putProfile = (name, id) => atomicWrite(path.join(store.profileDir('codex', name), 'auth.json'), auth(id));
 const readProfile = name => readCredentialFile(path.join(store.profileDir('codex', name), 'auth.json'), 'utf8');
 beforeEach(() => {
   for (const dir of [store.STORE_DIR, agent.homeDir]) fs.rmSync(dir, { recursive: true, force: true });
-  agent.queryLiveRpc = async () => ({ account: { email: 'A@example.test', planType: 'plus' }, rates: { rateLimits: { primary: { usedPercent: 35, windowDurationMins: 300, resetsAt: 2000000000 } } } });
+  agent.queryLiveRpc = async home => ({ account: { email: agent.identity(home).email, planType: 'plus' }, rates: { rateLimits: { primary: { usedPercent: 35, windowDurationMins: 300, resetsAt: 2000000000 } } } });
 });
 after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+test('a linked store is rejected before locking or changing permissions on its destination', {skip: process.platform === 'win32'}, async () => {
+  const external = fs.mkdtempSync(path.join(root, 'unmanaged-'));
+  fs.chmodSync(external, 0o750);
+  fs.symlinkSync(external, store.STORE_DIR, 'dir');
+  await assert.rejects(store.withStoreLock(async () => assert.fail('unexpected lock')), /符号链接/);
+  assert.equal(fs.statSync(external).mode & 0o777, 0o750);
+  assert.deepEqual(fs.readdirSync(external), []);
+});
+
+test('interrupted rename keeps both profiles when the destination has been taken', () => {
+  const hop = 'work.rename-' + require('node:crypto').randomUUID();
+  putProfile(hop, 'original');
+  fs.mkdirSync(store.profileDir('codex', 'Work'));
+  const unrelated = path.join(store.STORE_DIR, 'codex', 'Work');
+  const externalInode = fs.statSync(unrelated).ino;
+  fs.writeFileSync(store.PENDING_RENAME_FILE, JSON.stringify({
+    agentId: 'codex', oldName: 'work', newName: 'Work', hopName: hop, wasPreferred: true, hadLabel: false,
+  }));
+  assert.ok(store.listProfiles('codex').includes(hop));
+  assert.equal(fs.statSync(unrelated).ino, externalInode);
+  assert.equal(readProfile(hop), auth('original'));
+  assert.equal(store.getActiveProfile('codex'), undefined);
+  assert.ok(fs.readdirSync(store.STORE_DIR).some(p => p.startsWith('.retained-rename-')));
+  fs.writeFileSync(store.PENDING_RENAME_FILE, JSON.stringify({ agentId: 'codex', oldName: null, newName: 'Work', hopName: hop }));
+  assert.ok(store.listProfiles('codex').includes(hop));
+});
+
+test('import names agree on Unicode equivalents and a long profile can change capitalization', async () => {
+  const {parseCredentialBatch, installCredentialBatch} = require('../dist/credential-import');
+  const composed = 'Café', decomposed = composed.normalize('NFD');
+  putProfile(composed, 'first');
+  const batch = await parseCredentialBatch(Buffer.from(auth('second')), 'codex', decomposed + '.json');
+  const item = batch.items[0];
+  assert.equal(item.profile, decomposed + ' (2)');
+  await assert.rejects(installCredentialBatch(batch, [item.key], {[item.key]: decomposed}), /名称.*使用/);
+  assert.equal(readProfile(composed), auth('first'));
+  const long = '栈'.repeat(72) + 'abc';
+  putProfile(long, 'third');
+  await assert.rejects(accounts.renameAccount(agent, long, composed.toUpperCase()), /已被使用/);
+  await accounts.renameAccount(agent, long, long.toUpperCase());
+  assert.ok(store.listProfiles('codex').includes(long.toUpperCase()));
+  assert.equal(readProfile(long.toUpperCase()), auth('third'));
+});
 
 test('current quota plan wins over older login claims and missing plans fall back', async () => {
   putLive('A');
@@ -42,9 +89,8 @@ test('incomplete profiles fail without changing live credentials or active metad
   await assert.rejects(accounts.useAccount(agent, 'partial', { saveUnmanaged: true }), /认证/);
   assert.equal(agent.identity().id, 'A:A'); assert.equal(store.getActiveProfile('codex'), 'A');
 });
-test('failed save leaves active state unchanged; other identity cannot overwrite a name', async () => {
-  putLive('A'); await accounts.saveAccount(agent, 'A'); putLive('B');
-  await assert.rejects(accounts.saveAccount(agent, 'A'), /另一个账号/);
+test('saving without a login leaves the active profile unchanged', async () => {
+  putLive('A'); await accounts.saveAccount(agent, 'A');
   fs.rmSync(path.join(agent.homeDir, 'auth.json'));
   await assert.rejects(accounts.saveAccount(agent, 'empty'), /登录凭据/);
   assert.equal(store.getActiveProfile('codex'), 'A'); assert.equal(store.profileExists('codex', 'empty'), false);
@@ -61,7 +107,6 @@ test('switch and isolated login preserve configuration and live account', async 
 });
 test('profile aliases share refreshed tokens and same-account switch never restores stale auth', async () => {
   putLive('A'); await accounts.saveAccount(agent, 'one');
-  await assert.rejects(accounts.saveAccount(agent, 'two'), /已存在于「one」/);
   putProfile('two', 'A');
   // Real rotations carry a generation timestamp; an undated different token
   // must no longer be assumed newer simply because it is in the live file.
@@ -95,6 +140,34 @@ test('renaming a profile preserves credentials, snapshot and active selection', 
   await assert.rejects(accounts.renameAccount(agent, 'new', 'other'), /已被使用/);
   await assert.rejects(accounts.renameAccount(agent, 'new', '../bad'), /账号名称/);
   assert.equal(store.getActiveProfile('codex'), 'new');
+});
+
+test('portable profile names protect existing accounts and allow correction of legacy backups', async () => {
+  putLive('A'); await accounts.saveAccount(agent, 'work');
+  await assert.rejects(accounts.saveAccount(agent, 'CON'), /保留名/);
+  await assert.rejects(accounts.renameAccount(agent, 'work', 'Team:A'), /账号名称/);
+  assert.equal(readProfile('work'), auth('A'));
+  assert.throws(() => store.validateName('lpt².txt'), /保留名/);
+  if (process.platform === 'win32') {
+    assert.throws(() => store.profileDir('codex', 'work.'), /以点结尾/);
+    return;
+  }
+  fs.renameSync(store.profileDir('codex', 'work'), path.join(store.STORE_DIR, 'codex', 'work.'));
+  store.writeProfileMeta('codex', 'work.', { snapshot: { state: 'expired', authExpired: true, available: true } });
+  const update = await backup.previewCredentialUpdate(Buffer.from(auth('A', 'renewed')), 'codex', 'work.');
+  assert.equal((await backup.installCredentialUpdate(update.parsed, update.target)).profile, 'work.');
+  assert.equal(readProfile('work.'), auth('A')); // Session updates wait for verification.
+  const archive = await backup.exportBackup([{ agent: 'codex', profile: 'work.' }], 'test-passphrase');
+  await accounts.renameAccount(agent, 'work.', 'restored');
+  assert.equal(readProfile('restored'), auth('A'));
+  fs.rmSync(store.profileDir('codex', 'restored'), { recursive: true });
+  const parsed = await backup.parseBackup(archive, 'test-passphrase');
+  const key = parsed.items[0].key;
+  await assert.rejects(backup.installBackup(parsed, [key]), /以点结尾/);
+  const imports = require('../dist/credential-import');
+  const preview = imports.editableBackup(parsed);
+  await imports.installCredentialBatch(preview, [key], { [key]: 'team' });
+  assert.equal(readProfile('team'), auth('A'));
 });
 test('live credentials roll back when active metadata commit fails', async () => {
   putLive('A'); await accounts.saveAccount(agent, 'A'); putProfile('B', 'B');
@@ -131,17 +204,26 @@ test('credential expiry preserves historical quota and plan but stops automatic 
   assert.deepEqual(result.quota,JSON.parse(JSON.stringify(previous.quota)));assert.equal(result.plan,previous.plan);assert.equal(result.fetchedAt,previous.fetchedAt);
   await accounts.refreshAccount(agent,'expired');assert.equal(calls,1);
 });
-test('encrypted backup roundtrip preserves existing profiles and rejects wrong passwords', async () => {
+test('encrypted backups normalize passphrases and reject changed ciphertext', async () => {
   putProfile("O'Reilly & team", 'A');
-  const data = await backup.exportBackup([{ agent: 'codex', profile: "O'Reilly & team" }], 'test-passphrase');
+  const password = 'café-passphrase';
+  const data = await backup.exportBackup([{ agent: 'codex', profile: "O'Reilly & team" }], password.normalize('NFD'));
   assert.equal(fs.statSync(store.STORE_DIR).mode & 0o777, 0o700);
-  assert.equal(data.subarray(0, 4).toString(), 'AGS1'); assert.equal(data.includes(Buffer.from('fake-access')), false);
-  await assert.rejects(importBackup(data, 'incorrect'), /密码/);
-  const imported = await importBackup(data, 'test-passphrase');
-  assert.deepEqual(imported, {imported:[],skipped:[{key:"codex/O'Reilly & team",existing:"codex/O'Reilly & team"}]});
-  assert.equal(store.profileExists('codex',"O'Reilly & team-import-1"),false);
+  assert.equal(data.subarray(0, 4).toString(), 'AGS2'); assert.equal(data.includes(Buffer.from('fake-access')), false);
+  const parsed = await backup.parseBackup(data, password);
+  const [entry] = parsed.items;
+  assert.equal(JSON.parse(parsed.groups.get(entry.key).get('_meta.json')).email, 'A@example.test');
   const tampered = Buffer.from(data); tampered[tampered.length - 1] ^= 1;
-  await assert.rejects(importBackup(tampered, 'test-passphrase'), /损坏/);
+  await assert.rejects(importBackup(tampered, password), /损坏/);
+});
+
+test('export only accepts selections and native JSON that the same backup reader can restore', async () => {
+  const profile = { agent: 'codex', profile: 'work' };
+  putProfile(profile.profile, 'account');
+  await assert.rejects(backup.exportBackup([profile, profile], 'test-passphrase'), /重复选择/);
+  const file = path.join(store.profileDir('codex', profile.profile), 'auth.json');
+  atomicWrite(file, auth('account').replace('"account_id":', '"account_id":"account","account_id":'));
+  await assert.rejects(backup.exportBackup([profile], 'test-passphrase'), /重复字段/);
 });
 // Small stored ZIP builder, preserving malicious paths instead of archiver normalizing them.
 function zip(entries) {
@@ -211,19 +293,6 @@ test('preferences migrate legacy files and preserve the private-login option on 
   assert.deepEqual(settings.readSettings(), value);
 });
 
-test('saving named profile cleans up duplicate backup-* profiles and activeProfile prefers named profiles', async () => {
-  putLive('A');
-  await accounts.saveAccount(agent, 'backup-1234567890');
-  assert.ok(store.listProfiles('codex').includes('backup-1234567890'));
-
-  // Saving a user-named profile with the same identity should remove backup-1234567890
-  await accounts.saveAccount(agent, 'my-account');
-  assert.ok(store.listProfiles('codex').includes('my-account'));
-  assert.ok(!store.listProfiles('codex').includes('backup-1234567890'));
-  assert.equal(accounts.activeProfile(agent), 'my-account');
-});
-
-
 test('refresh deadlines honor active/pool intervals and query once after each reset', () => {
   const { quotaRefreshAt } = require('../dist/quota-refresh');
   const checked = 2000000000000;
@@ -255,4 +324,321 @@ test('reset refresh bypasses ordinary cache but never invents restored quota', a
   const second=await accounts.refreshAccount(agent,'reset'); assert.equal(calls,2); assert.equal(second.quota.primaryWindow.usedPercent,100);
   await accounts.refreshAccount(agent,'reset'); assert.equal(calls,2);
   assert.equal(first.quota.primaryWindow.usedPercent,100);
+});
+
+test('large AGS2 backups restore and historical AGS1 archives parse within KDF and ZIP bounds', async () => {
+  const { scryptSync, randomBytes, createCipheriv } = require('node:crypto');
+  const { ZipFile } = require('yazl');
+  const unzipper = require('unzipper');
+
+  // 1. 201 accounts exported with current AGS2 format can be completely restored!
+  const items = [];
+  for (let i = 0; i < 201; i++) {
+    const name = `acct-${String(i).padStart(3, '0')}`;
+    putProfile(name, `id-${i}`);
+    items.push({ agent: 'codex', profile: name });
+  }
+  const blob201 = await backup.exportBackup(items, 'large-backup-pass');
+  assert.equal(blob201.subarray(0, 4).toString(), 'AGS2');
+  fs.rmSync(store.STORE_DIR, { recursive: true, force: true });
+  const restored = await importBackup(blob201, 'large-backup-pass');
+  assert.equal(restored.imported.length, 201);
+  assert.equal(store.listProfiles('codex').length, 201);
+
+  // AGS1 used the original scrypt defaults and authenticated only its magic header.
+  const oldZipBytes = zip(items.map(({ profile }) => [`codex/${profile}/auth.json`, readProfile(profile)]));
+  const magic1 = Buffer.from('AGS1'), salt = randomBytes(16), iv = randomBytes(12);
+  const k1 = scryptSync('hist-pass', salt, 32);
+  const c1 = createCipheriv('aes-256-gcm', k1, iv); c1.setAAD(magic1);
+  const body1 = Buffer.concat([c1.update(oldZipBytes), c1.final()]);
+  const oldBlob = Buffer.concat([magic1, salt, iv, c1.getAuthTag(), body1]);
+  const historical = await backup.parseBackup(oldBlob, 'hist-pass');
+  assert.deepEqual(historical.items.map(item => item.profile), items.map(item => item.profile));
+
+  // 3. Unauthenticated excessive scrypt parameters in AGS2 are rejected BEFORE key derivation!
+  const badCost = Buffer.concat([Buffer.from('AGS2'), Buffer.from([1, 20, 16, 8]), randomBytes(44)]);
+  const t0 = Date.now();
+  await assert.rejects(backup.decryptBackup(badCost, 'large-backup-pass'), /版本或参数不受支持/);
+  assert.ok(Date.now() - t0 < 100, 'excessive scrypt parameters must fail immediately before deriving');
+
+  // 4. C1 & C2: Export enforces single-file, _meta.json, uncompressed total, and final encrypted package bounds; ZIP pre-check matches unzipper on multi-disk, ZIP64, and tail comment!
+  putProfile('meta-huge', 'meta-u');
+  fs.writeFileSync(path.join(store.profileDir('codex', 'meta-huge'), '_meta.json'), JSON.stringify({ label: 'x'.repeat(1024 * 1024 + 50), email: 'm@example.test' }));
+  await assert.rejects(backup.exportBackup([{ agent: 'codex', profile: 'meta-huge' }], 'large-backup-pass'), /文件过大/);
+  fs.rmSync(store.profileDir('codex', 'meta-huge'), { recursive: true, force: true });
+
+  // C1: Oversized uncompressed total AND final encrypted .ags > 32MB are rejected at exportBackup; any accepted export can be imported!
+  fs.rmSync(store.STORE_DIR, { recursive: true, force: true });
+  const overItems = [];
+  for (let i = 0; i < 37; i++) {
+    const name = `rnd-${i}`;
+    const pad = randomBytes(700 * 1024).toString('base64');
+    const dirPath = store.profileDir('codex', name);
+    fs.mkdirSync(dirPath, { recursive: true });
+    require('../dist/utils').atomicWrite(path.join(dirPath, 'auth.json'), Buffer.from(JSON.stringify({ tokens: { access_token: `a-${i}`, refresh_token: pad, email: `u${i}@example.test` } })));
+    overItems.push({ agent: 'codex', profile: name });
+  }
+  await assert.rejects(backup.exportBackup(overItems, 'large-backup-pass'), /备份.*过大/);
+
+  // Final encrypted package length > 32MB even when uncompressed sum <= 32MB is also rejected at exportBackup:
+  const origAddBuffer = ZipFile.prototype.addBuffer;
+  ZipFile.prototype.addBuffer = function (buf, name) { return origAddBuffer.call(this, buf, name, { compress: false }); };
+  try {
+    fs.rmSync(store.STORE_DIR, { recursive: true, force: true });
+    const exactPkgOverflow = [];
+    for (let i = 0; i < 34; i++) {
+      const name = `pkg-${i}`;
+      const dirPath = store.profileDir('codex', name);
+      fs.mkdirSync(dirPath, { recursive: true });
+      // Each account auth + _meta.json ~986,880B (< 1MB MAX_FILE); 34 * 986,880 = 33,553,920B <= 33,554,432B (32MB), but + ZIP headers + 52B AGS2 > 32MB!
+      const pad = 'P'.repeat(986750);
+      require('../dist/utils').atomicWrite(path.join(dirPath, 'auth.json'), Buffer.from(JSON.stringify({ tokens: { access_token: `a-${i}`, refresh_token: pad, email: 'x@y.z' } })));
+      exactPkgOverflow.push({ agent: 'codex', profile: name });
+    }
+    await assert.rejects(backup.exportBackup(exactPkgOverflow, 'large-backup-pass'), /备份文件过大/);
+  } finally { ZipFile.prototype.addBuffer = origAddBuffer; }
+
+  fs.rmSync(store.STORE_DIR, { recursive: true, force: true });
+  const baseZip = zip([['codex/zip-check/auth.json', auth('zip-check')]]);
+  const cdPos = baseZip.readUInt32LE(baseZip.length - 6);
+  const nameLen = baseZip.readUInt16LE(cdPos + 28);
+  const zip64Extra = Buffer.from([0x01, 0x00, 0x00, 0x00]);
+  const zipWith64Extra = Buffer.concat([
+    baseZip.subarray(0, cdPos + 46 + nameLen),
+    zip64Extra,
+    baseZip.subarray(cdPos + 46 + nameLen),
+  ]);
+  zipWith64Extra.writeUInt16LE(zip64Extra.length, cdPos + 30);
+  zipWith64Extra.writeUInt32LE(baseZip.readUInt32LE(baseZip.length - 10) + zip64Extra.length, zipWith64Extra.length - 10);
+
+  // C2: ZIP pre-check rejects excessive entries, diskNumber=0xffff (ZIP64 trigger in unzipper!), multi-disk, ZIP64 extra field, and fake EOCD in comment BEFORE unzipper.Open.buffer runs!
+  const eocdTooMany = Buffer.alloc(22);
+  eocdTooMany.writeUInt32LE(0x06054b50, 0);
+  eocdTooMany.writeUInt16LE(10001, 8);
+  eocdTooMany.writeUInt16LE(10001, 10);
+
+  const zipDisk64 = Buffer.from(baseZip);
+  zipDisk64.writeUInt16LE(0xffff, zipDisk64.length - 22 + 4); // diskNumber = 0xffff while totalEntries = 1!
+
+  const zipMultiDisk = Buffer.from(baseZip);
+  zipMultiDisk.writeUInt16LE(1, zipMultiDisk.length - 22 + 6); // diskStart = 1
+
+  const fakeComment = Buffer.alloc(30, 0x41);
+  fakeComment.writeUInt32LE(0x06054b50, 4); // Fake EOCD signature inside comment!
+  const zipFakeComment = Buffer.concat([baseZip, fakeComment]);
+  zipFakeComment.writeUInt16LE(fakeComment.length, baseZip.length - 2);
+
+  // Valid ZIP with 160-byte comment (> unzipper's default 80-byte tailSize) must succeed cleanly!
+  const cleanComment = Buffer.alloc(160, 0x42);
+  const zipLongComment = Buffer.concat([baseZip, cleanComment]);
+  zipLongComment.writeUInt16LE(cleanComment.length, baseZip.length - 2);
+  const parsedLongComment = await backup.parseBackup(zipLongComment);
+  assert.equal(parsedLongComment.items[0].profile, 'zip-check');
+
+  const origOpenBuffer = unzipper.Open.buffer;
+  let openBufferCalls = 0;
+  unzipper.Open.buffer = (...args) => { openBufferCalls++; return origOpenBuffer(...args); };
+  try {
+    await assert.rejects(backup.parseBackup(eocdTooMany), /过多条目/);
+    await assert.rejects(backup.parseBackup(zipDisk64), /分卷或 ZIP64/);
+    await assert.rejects(backup.parseBackup(zipMultiDisk), /分卷或 ZIP64/);
+    await assert.rejects(backup.parseBackup(zipWith64Extra), /分卷或 ZIP64/);
+    await assert.rejects(backup.parseBackup(zipFakeComment), /格式无效或已损坏/);
+    assert.equal(openBufferCalls, 0, 'unzipper.Open.buffer must never be called on rejected ZIP headers');
+  } finally { unzipper.Open.buffer = origOpenBuffer; }
+});
+
+test('store lock serializes writers, protects a successor from a paused reaper and bounds retries', async () => {
+  const { spawn } = require('node:child_process');
+  const vault = require('../dist/credential-vault');
+  const lockDir = path.join(store.STORE_DIR, '.lock');
+  fs.rmSync(store.STORE_DIR, { recursive: true, force: true });
+  fs.mkdirSync(store.STORE_DIR, { recursive: true });
+
+  // 1. Two contenders competing on a dead legacy lock both complete mutually exclusively.
+  fs.writeFileSync(lockDir, '2147483647\ndead-race');
+  const order = [];
+  await Promise.all([
+    store.withStoreLock(async () => { order.push(1); await new Promise(r => setTimeout(r, 40)); order.push(2); }),
+    store.withStoreLock(async () => { order.push(3); await new Promise(r => setTimeout(r, 40)); order.push(4); }),
+  ]);
+  assert.ok(JSON.stringify(order) === '[1,2,3,4]' || JSON.stringify(order) === '[3,4,1,2]');
+  assert.equal(fs.existsSync(lockDir), false);
+
+  const successor = vault.tryAcquireAtomicLock(lockDir, String(process.pid));
+  assert.ok(successor);
+  assert.equal(vault.releaseAtomicLock(lockDir, 'stale-owner'), false);
+  assert.equal(vault.releaseAtomicLock(lockDir, successor), true);
+
+  if (process.platform !== 'win32') {
+    fs.mkdirSync(lockDir, { mode: 0o700 });
+    fs.writeFileSync(path.join(lockDir, '2147483647-dead-owner'), '2147483647\ndead');
+    // Pause the first reaper just before unlink; this process reaps and acquires a new lock.
+    const reaper = spawn(process.execPath, ['-e', `
+      const fs = require('node:fs'), path = require('node:path');
+      const lock = process.argv[1], unlink = fs.unlinkSync;
+      fs.unlinkSync = file => {
+        if (path.dirname(file) === lock) {
+          fs.writeSync(1, 'ready\\n');
+          fs.readSync(0, Buffer.alloc(1), 0, 1, null);
+        }
+        return unlink(file);
+      };
+      require('./dist/credential-vault').evictDeadLock(lock);
+    `, lockDir], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const { once } = require('node:events');
+    const closed = once(reaper, 'close');
+    try {
+      const ready = await Promise.race([once(reaper.stdout, 'data'), closed]);
+      assert.equal(String(ready[0]).trim(), 'ready');
+      assert.equal(vault.evictDeadLock(lockDir), true);
+      const newOwner = vault.tryAcquireAtomicLock(lockDir, String(process.pid));
+      assert.ok(newOwner);
+      reaper.stdin.end('g');
+      assert.deepEqual(await closed, [0, null]);
+      assert.deepEqual(fs.readdirSync(lockDir), [newOwner]);
+      assert.equal(vault.releaseAtomicLock(lockDir, newOwner), true);
+    } finally {
+      if (reaper.exitCode === null && reaper.signalCode === null) reaper.kill('SIGKILL');
+    }
+  }
+
+  // 5. Undeletable dead lock backs off cleanly and respects bounded deadline (never spins infinitely!).
+  fs.mkdirSync(lockDir, { mode: 0o700 });
+  const stuckEntry = path.join(lockDir, '2147483647-stuck');
+  fs.writeFileSync(stuckEntry, '2147483647\nstuck');
+  const origUnlink = fs.unlinkSync;
+  let unlinkAttempts = 0;
+  const realNow = Date.now;
+  let fakeElapsed = 0;
+  Date.now = () => realNow() + fakeElapsed;
+  fs.unlinkSync = target => {
+    if (target === stuckEntry) {
+      unlinkAttempts++;
+      fakeElapsed += 7000;
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    }
+    return origUnlink(target);
+  };
+  try {
+    await assert.rejects(store.withStoreLock(async () => {}), /仍在进行/);
+    assert.ok(unlinkAttempts >= 1 && unlinkAttempts <= 5, 'must back off and exit at deadline rather than busy-spinning');
+  } finally {
+    fs.unlinkSync = origUnlink;
+    Date.now = realNow;
+    fs.rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test('P2 #12 & C4: corrupted pool profile does not block CLI, sync step-2 failure rolls back, and mid-rename crash recovers cleanly on restart', async () => {
+  const { execFileSync, spawnSync } = require('node:child_process');
+
+  // 1. Failed 2nd step of case-only rename ('work' -> hop -> 'Work') restores 'work' cleanly with consistent metadata & active pointer!
+  putLive('rename-user');
+  await accounts.saveAccount(agent, 'work');
+  store.writeProfileMeta('codex', 'work', { label: 'work', email: 'rename-user@example.test' });
+  const origRename = fs.renameSync;
+  let renameCount = 0;
+  fs.renameSync = (from, to) => {
+    if (String(from).includes('.rename-') && String(to).endsWith(`${path.sep}Work`)) {
+      renameCount++;
+      throw new Error('simulated second rename failure');
+    }
+    return origRename(from, to);
+  };
+  try {
+    await assert.rejects(accounts.renameAccount(agent, 'work', 'Work'), /second rename failure/);
+  } finally { fs.renameSync = origRename; }
+  assert.equal(renameCount, 1);
+  assert.deepEqual(store.listProfiles('codex'), ['work']);
+  assert.equal(store.getActiveProfile('codex'), 'work');
+  assert.equal(store.readProfileMeta('codex', 'work').label, 'work');
+  assert.equal(readProfile('work'), auth('rename-user'));
+
+  // A second AGS process listing accounts while the writer owns the journal must leave it alone.
+  const reader = `
+    require('os').homedir = () => process.env.AGS_TEST_HOME;
+    const store = require('./dist/store');
+    store.listProfiles('codex');
+    process.stdout.write(String(require('fs').existsSync(store.PENDING_RENAME_FILE)));
+  `;
+  const readFromChild = () => execFileSync(process.execPath, ['-e', reader], {
+    env: { ...process.env, AGS_TEST_HOME: root }, encoding: 'utf8',
+  });
+  let observed = 0;
+  fs.renameSync = (from, to) => {
+    if (from === path.join(store.STORE_DIR, 'codex', 'work') || String(from).includes('.rename-') && to.endsWith(path.sep + 'Work')) {
+      assert.equal(readFromChild(), 'true');
+      observed++;
+    }
+    return origRename(from, to);
+  };
+  try {
+    await accounts.renameAccount(agent, 'work', 'Work');
+  } finally { fs.renameSync = origRename; }
+  assert.equal(observed, 2);
+  await accounts.renameAccount(agent, 'Work', 'work');
+
+  // 1b. C4: Process hard-aborts (SIGKILL/exit) right between rename step 1 ('work' -> '.rename-*') and step 2 ('Work')!
+  // On restart, account is deterministically accessible as 'Work' with consistent active reference, metadata, and dashboard list!
+  const crashRes = spawnSync(process.execPath, ['-e', `
+    const fs = require('fs'), path = require('path'), os = require('os');
+    os.homedir = () => process.env.AGS_TEST_HOME;
+    require('./tests/vault-fixture.cjs');
+    const accounts = require('./dist/accounts');
+    const { codexAgent } = require('./dist/agents/codex');
+    const orig = fs.renameSync;
+    fs.renameSync = (from, to) => {
+      if (String(from).includes('.rename-') && String(to).endsWith(path.sep + 'Work')) {
+        process.kill(process.pid, 'SIGKILL');
+      }
+      return orig(from, to);
+    };
+    accounts.renameAccount(codexAgent, 'work', 'Work');
+  `], { cwd: path.join(__dirname, '..'), env: { ...process.env, AGS_TEST_HOME: root } });
+  assert.equal(crashRes.signal, 'SIGKILL');
+  // Before restart reconciliation, the intermediate .rename-* directory was left on disk; now access in fresh/restarted state reconciles cleanly!
+  assert.deepEqual(store.listProfiles('codex'), ['Work']);
+  assert.equal(store.profileExists('codex', 'Work'), true);
+  assert.equal(store.getActiveProfile('codex'), 'Work');
+  assert.equal(store.readProfileMeta('codex', 'Work').label, 'Work');
+  assert.equal(readProfile('Work'), auth('rename-user'));
+  const codexDash = accounts.dashboard().find(a => a.id === 'codex');
+  assert.equal(codexDash.active, 'Work');
+  assert.deepEqual(codexDash.profiles.map(p => p.name), ['Work']);
+  putProfile('team.rename-production', 'independent');
+  assert.ok(store.listProfiles('codex').includes('team.rename-production'));
+
+  // 2. Corrupted pool profile does NOT block CLI list / use / save / rm, is identified in `ags list`, and can be removed!
+  putProfile('healthy-b', 'user-b');
+  const badDir = store.profileDir('codex', 'broken-card');
+  fs.mkdirSync(badDir, { recursive: true });
+  fs.writeFileSync(path.join(badDir, 'auth.json'), '{corrupted-plaintext');
+  const invalidName = 'trailing space ';
+  fs.mkdirSync(path.join(store.STORE_DIR, 'codex', invalidName));
+  assert.equal(accounts.dashboard().find(a => a.id === 'codex').profiles.find(p => p.name === invalidName).meta.snapshot.state, 'error');
+  // Even if broken-card has _meta.json with same email as a new account, saving new account still works!
+  store.writeProfileMeta('codex', 'broken-card', { email: 'new-save@example.test' });
+  putLive('new-save');
+  await accounts.saveAccount(agent, 'fresh-saved');
+  assert.equal(store.profileExists('codex', 'fresh-saved'), true);
+
+  // Exercise actual CLI entry (`src/index.ts` preAction -> maintainCredentialStorage + list + rm) in a child process!
+  const cliOut = execFileSync(process.execPath, [
+    '-e',
+    'const os=require("os");os.homedir=()=>process.env.AGS_TEST_HOME;require("./tests/vault-fixture.cjs");require("./dist/clients").runningClients=async()=>[];require("./dist/index.js");',
+    'node', 'list', 'codex',
+  ], { cwd: path.join(__dirname, '..'), env: { ...process.env, AGS_TEST_HOME: root }, encoding: 'utf8' });
+  assert.match(cliOut, /healthy-b/);
+  assert.match(cliOut, /broken-card.*格式异常/);
+  assert.match(cliOut, /trailing space .*账号名称/);
+
+  // Removing the corrupted profile works cleanly via actual CLI `ags rm codex broken-card --yes`!
+  const rmOut = execFileSync(process.execPath, [
+    '-e',
+    'const os=require("os");os.homedir=()=>process.env.AGS_TEST_HOME;require("./tests/vault-fixture.cjs");require("./dist/index.js");',
+    'node', 'rm', 'codex', 'broken-card', '--yes',
+  ], { cwd: path.join(__dirname, '..'), env: { ...process.env, AGS_TEST_HOME: root }, encoding: 'utf8' });
+  assert.match(rmOut, /已移除 1 条备份/);
+  assert.equal(store.profileExists('codex', 'broken-card'), false);
 });

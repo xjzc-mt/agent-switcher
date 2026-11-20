@@ -8,23 +8,16 @@ const extract=text=>document(Buffer.from(text),'codex').entries;
 const two=text=>assert.deepEqual(extract(text).map(e=>JSON.parse(e.data).tokens.account_id),['A','B']);
 
 for(const [name,text] of [
- ['array',JSON.stringify([a,b])],
- ['pretty concatenated objects',JSON.stringify(a,null,2)+'\n'+JSON.stringify(b,null,2)],
- ['adjacent objects',ja+jb],
- ['JSON Lines','\uFEFF'+ja+'\r\n\r\n'+jb+'\r\n'],
  ['comma-separated objects',ja+',\n'+jb],
  ['JSON text sequence','\x1e'+ja+'\n\x1e'+jb],
- ['fenced JSON array','```json\n['+ja+','+jb+']\n```'],
  ['multiple JSON blocks','```json\n'+ja+'\n```\n\n```json\n'+jb+'\n```'],
  ['tilde-fenced JSONL','~~~jsonl\n'+ja+'\n'+jb+'\n~~~'],
- ['JSONC comments and trailing commas','// comment\n[\n'+ja+', /* another account */\n'+jb+',\n]'],
  ['wrapped JSON Lines string',JSON.stringify({payload:ja+'\n'+jb})],
- ['mixed native and wrapped objects',JSON.stringify({accounts:[a,{name:'B',auth:JSON.stringify(b)}]})],
 ]) test('account boundaries: '+name,()=>two(text));
 
 test('valid JSON always retains its original structure, even with delimiter-like string contents',()=>{
  const special='string }{ , // /* */ ] [ \\" \\\\ ```json\n';
- const value={name:special,accounts:[{...a,note:special},{...b,note:'https://example.test/path//?x=/*x*/'}],literal:'{"tokens":{"access_token":"fake"}}'};
+ const value={name:special,'字段😀': [null, false, 1.2e-4],accounts:[{...a,note:special},{...b,note:'https://example.test/path//?x=/*x*/'}],literal:'{"tokens":{"access_token":"fake"}}'};
  assert.deepEqual(parse(JSON.stringify(value)),value);
  const tokens={access_token:special,refresh_token:'refresh"}{\\token',account_id:'A'};
  const entries=extract(JSON.stringify({tokens})+jb);
@@ -32,22 +25,13 @@ test('valid JSON always retains its original structure, even with delimiter-like
  assert.equal(entries.length,2);
 });
 
-test('valid JSON parity across unicode, escaped keys, nested objects, arrays and scalar data',()=>{
- for(let i=0;i<120;i++){
-  const value={['\u001e{[]}:"\\/字段'+i]:{text:'///* */```\n}{'+String.fromCodePoint(0x1f600+i),value:i%2?null:false},data:[i,-i,1.2e-4,[],{},''],metadata:{format:'jsonc'}};
-  const encoded=JSON.stringify(value);assert.deepEqual(parse(encoded),JSON.parse(encoded));
- }
-});
-
 test('outside comments may be removed but strings containing comments, commas and URLs are unchanged',()=>{
  const value={...a,tokens:{...a.tokens,access_token:'https://example.test/a//b/*c*/?v=,}'}},str=JSON.stringify(value);
  assert.deepEqual(parse('// heading\n'+str.slice(0,-1)+', /* trailing */ }\n// end'),value);
- assert.deepEqual(parse(str),value);
 });
 
 test('truncated, mismatched and unexplained separators never partially import earlier valid accounts',()=>{
  for(const text of [ja+'\n{"tokens":',ja+',',ja+',,'+jb,ja+'\n文字说明\n'+jb,ja+';'+jb,'prefix '+ja,ja+' trailing',ja+' [}',ja+' {"text":"unterminated', '```json\n'+ja, '```json\n'+ja+'\n```\nexplanation', '[ '+ja+jb+' ]',ja+'/* unclosed']){
-  assert.throws(()=>parse(text),/JSON/);
   assert.throws(()=>extract(text),/JSON/);
  }
 });

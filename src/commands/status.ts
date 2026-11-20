@@ -1,4 +1,4 @@
-import { BaseAgent } from '../agents/base';
+import { BaseAgent, type QuotaWindow } from '../agents/base';
 import { activeProfile, refreshAccount } from '../accounts';
 
 export async function runStatus(agents: BaseAgent[]): Promise<void> {
@@ -13,16 +13,21 @@ export async function runStatus(agents: BaseAgent[]): Promise<void> {
   console.log(chalk.dim(' ' + '─'.repeat(100)));
 
   for (const agent of agents) {
-    const profile = activeProfile(agent) ?? chalk.dim('(none)');
+    let profile = chalk.dim('(none)');
     let accountStr = chalk.dim('—');
     let extraStr = '';
 
     try {
+      profile = activeProfile(agent) ?? profile;
       const result = await refreshAccount(agent);
       if (result.available) {
         const planBadge = result.plan ? chalk.magenta(` [${result.plan.toUpperCase()}]`) : '';
         accountStr = (result.account ?? chalk.dim('—')) + planBadge;
-        extraStr = chalk.dim(result.extra || [result.quota?.primaryWindow, result.quota?.secondaryWindow].filter(Boolean).map(w => `${w!.windowMins ?? '?'}分钟: 剩余 ${100 - w!.usedPercent}%`).join(' | '));
+        const format = (w: QuotaWindow) => `${w.windowMins ?? '?'}分钟: 剩余 ${100 - w.usedPercent}%`;
+        const quota = result.quota;
+        const usage = agent.id === 'agy' && quota?.buckets ? quota.buckets.map(group => [group.label, ...group.windows.map(format)].join(' ')) :
+          [quota?.primaryWindow, quota?.secondaryWindow].filter((w): w is QuotaWindow => !!w).map(format);
+        extraStr = chalk.dim(result.extra || usage.join(' | '));
       } else {
         accountStr = chalk.dim('未识别文件凭据');
         extraStr = chalk.dim(result.extra || '未登录或暂不支持此认证方式');

@@ -44,6 +44,7 @@ let credentialBatch,credentialPreviewId=0;
 let blockNextRefresh = false, releaseRefresh, failNextRefresh = false, nextRefreshCredit;
 let refreshBarrier, releaseRefreshBarrier;
 let reuseNextRefresh = false;
+let deferredRefreshNote;
 let blockNextRename=false,releaseRename;
 let pendingCredentialUpdate;
 let failNextDelete=false,blockNextDelete=false,releaseDelete;
@@ -51,13 +52,14 @@ let failNextDeletePreview=false,blockNextDeletePreview=false,releaseDeletePrevie
 const deletionPreviews=new Map(),fixtureAliases=new Map();
 let deletePreviewId=0;
 contextBridge.exposeInMainWorld('providerTestApi', {
-  native:()=>{
+  native:(activeSnapshotAt=now)=>{
     const make=(email,plan)=>({available:true,account:email,plan,state:'ok',checkedAt:now,fetchedAt:now,quota:{buckets:
       ['Gemini','Claude / GPT','Gemini 4 Argon'].map((label,i)=>({id:label,label,windows:(i===2?[10080]:[300,10080]).map(windowMins=>({windowMins,usedPercent:i===1?51:0,resetsAt:Math.floor(Date.now()/1000)+7200}))}))}});
     data[2].management={quota:true,storage:'keychain',canSaveCurrent:true,isolatedLogin:true};
     delete data[2].switchUnsupported;
     data[2].profiles=['Google A','Google B'].map((name,i)=>({name,isActive:!i,meta:{email:`google-${i}@example.test`,snapshot:make(`google-${i}@example.test`,i?'Google AI Pro':'Google AI Ultra')}}));
     data[2].active='Google A';data[2].status=data[2].profiles[0].meta.snapshot;
+    Object.assign(data[2].status, { fetchedAt: activeSnapshotAt, checkedAt: activeSnapshotAt });
   },
   setup:()=>{
     data[1].management={quota:false,storage:'keychain',canSaveCurrent:false,notice:'登录由 Claude Code 管理，已保存的文件凭据可导入、导出；暂不支持 Keychain 账号切换。',loginLabel:'在 Claude Code 登录',loginHint:'运行官方 auth login，会改变当前配置目录的登录账号。'};
@@ -83,12 +85,23 @@ contextBridge.exposeInMainWorld('nameTestApi',{
   blockNext:()=>{blockNextRename=true;},
   release:()=>releaseRename?.(),
 });
-let statusReads = 0;
+let statusReads = 0, failStatusReads = false;
 contextBridge.exposeInMainWorld('refreshTestApi', {
   blockAll:()=>{refreshBarrier=new Promise(resolve=>{releaseRefreshBarrier=resolve;});},
   releaseAll:()=>{refreshBarrier=undefined;releaseRefreshBarrier?.();releaseRefreshBarrier=undefined;},
   reuseNext:()=>{reuseNextRefresh=true;},
+  deferNext:(note='客户端正在运行，暂不验证新凭据')=>{deferredRefreshNote=note;},
   statusReads:()=>statusReads,
+  failStatusReads:value=>{failStatusReads=value;},
+  stageCurrent:(candidateAge,liveAge)=>{
+    const agent=data[0], profile=agent.profiles.find(p=>p.isActive);
+    agent.status={...agent.status,checkedAt:new Date(Date.now()-liveAge).toISOString()};
+    profile.meta.snapshot={available:true,state:'unverified',stagedReplacement:true,extra:'等待验证新凭据',
+      checkedAt:new Date(Date.now()-candidateAge).toISOString()};
+  },
+  unreadableCurrent:()=>{
+    data[0].profiles.find(p=>p.isActive).meta.snapshot={available:false,state:'error'};
+  },
   expireAll:()=>{for(const p of data[0].profiles)p.meta.snapshot.checkedAt=new Date(Date.now()-600000).toISOString();data[0].status.checkedAt=new Date(Date.now()-600000).toISOString();},
   ageSnapshots:()=>{for(const p of data[0].profiles){p.meta.snapshot.fetchedAt=new Date(Date.now()-600000).toISOString();p.meta.snapshot.checkedAt=p.meta.snapshot.fetchedAt;}},
   failNext:()=>{failNextRefresh=true;},
@@ -96,8 +109,18 @@ contextBridge.exposeInMainWorld('refreshTestApi', {
 });
 contextBridge.exposeInMainWorld('testApi', {calls:()=>calls, clearInjection:()=>{profiles[2].meta.snapshot.plan='plus';}, setImportMode:value=>{importMode=value;}, blockNextRefresh:()=>{blockNextRefresh=true;}, releaseRefresh:()=>releaseRefresh?.(), spendingCredits:()=>{ const activity={lastDecreaseAt:new Date().toISOString(),previousBalance:'12.5',currentBalance:'11.5'}; profiles[0].meta.snapshot.creditActivity=activity; profiles[0].meta.snapshot.quota.credits.balance='11.5'; profiles[1].meta.snapshot.creditActivity={...activity,previousBalance:'4.2',currentBalance:'3.2'}; profiles[1].meta.snapshot.quota.credits.balance='3.2'; }, rename:()=>{data[0].profiles[2].name="O'Reilly & <team>";}, inject:()=>{data[0].profiles[2].meta.snapshot.plan='<img src=x onerror="window.injected=true">';}});
 contextBridge.exposeInMainWorld('api', {
+ ...(process.argv.includes('--test-tray-menu') && {
+   updateTray: state => ipcRenderer.send('fixture-tray-state', state),
+   onTrayCommand: callback => { ipcRenderer.on('tray-command', (_event, command) => callback(command)); },
+   trayReady: () => {},
+ }),
  setSidebarLayout:async(collapsed,width)=>process.argv.includes('--test-window-layout')?ipcRenderer.invoke('test-window-layout',collapsed,width):contextBridge.executeInMainWorld({func:sidebarWidth=>({minWidth:AccountLayout.minimumWidth(sidebarWidth),minHeight:620}),args:[collapsed?56:width]}),
- getStatus:async()=>{statusReads++; return data.map(a=>({...a,refreshAt:a.id==='codex'?Date.parse(a.status.checkedAt||now)+60000:Infinity,profiles:a.profiles.map(p=>({...p,refreshAt:Date.parse(p.meta.snapshot?.checkedAt||now)+300000}))}));},
+ getStatus:async()=>{
+   statusReads++;
+   if(failStatusReads)throw new Error('模拟账号列表读取失败');
+   return data.map(a=>({...a,refreshAt:a.id==='codex'||a.management?.quota?Date.parse(a.status.checkedAt||now)+60000:Infinity,
+     profiles:a.profiles.map(p=>({...p,refreshAt:p.meta.snapshot?.available===false?Infinity:Date.parse(p.meta.snapshot?.checkedAt||now)+(p.isActive?60000:300000)}))}));
+ },
  getSettings:async()=>settings,
  saveSettings:async(value)=>{
    if(failNextSettings){failNextSettings=false;throw new Error('模拟设置保存失败');}
@@ -134,11 +157,10 @@ contextBridge.exposeInMainWorld('api', {
      for(const key of updated){const p=data[0].profiles.find(p=>p.name===key.slice(6));p.meta.snapshot={...p.meta.snapshot,state:'unverified',authExpired:false};}
      return {imported:keys.filter(key=>credentialBatch.find(x=>x.key===key)?.state!=='update').map(key=>'codex/'+names[key]),updated,skipped:credentialBatch.filter(x=>x.state==='duplicate').map(x=>({key:x.key,existing:x.duplicate.key})),failed:credentialBatch.filter(x=>x.state==='error')};
    }
-   const duplicateKeys=importMode==='duplicates'?keys:importMode==='mixed'?keys.slice(0,1):[];return {imported:keys.filter(key=>!duplicateKeys.includes(key)),skipped:duplicateKeys.map(key=>({key,existing:'codex/already-saved'}))};
+   const duplicateKeys=importMode==='duplicates'?keys:[];return {imported:keys.filter(key=>!duplicateKeys.includes(key)),skipped:duplicateKeys.map(key=>({key,existing:'codex/already-saved'}))};
  },
  previewCredentialUpdate:async(id,name,text)=>{
    calls.push({method:'preview-update',id,name,source:text===undefined?'file':'paste'});
-   if(text===undefined&&importMode==='canceled')return {canceled:true};
    if(text!==undefined){try{const value=JSON.parse(text);if(value.tokens?.account_id!=='matching')return {ok:false,error:'凭据不属于此账号或工作区，未进行更新'};}catch{return {ok:false,error:'请提供完整的客户端凭据 JSON'};}}
    pendingCredentialUpdate={id,name};return {id:'update-preview',updating:true,profile:name,items:[{key:`${id}/${name}`,agent:id,profile:name}]};
  },
@@ -149,7 +171,27 @@ contextBridge.exposeInMainWorld('api', {
    pendingCredentialUpdate=undefined;return {ok:true,agent:id,profile:name};
  },
  cancelImport:async()=>{calls.push({method:'cancel-import'});},
- refreshAccount:async(id,name,force)=>{if(typeof force!=='boolean')throw new Error('force must be a boolean');calls.push({method:'refresh',id,name,force}); if(refreshBarrier)await refreshBarrier; if(blockNextRefresh){blockNextRefresh=false; await new Promise(resolve=>{releaseRefresh=resolve;}); releaseRefresh=undefined;} if(failNextRefresh){failNextRefresh=false;return {ok:false,error:'fixture query failed'};} const status=data.find(a=>a.id===id)?.profiles.find(p=>p.name===name)?.meta.snapshot || data[0].status; if(reuseNextRefresh){reuseNextRefresh=false;return status;} if(status.state==='unverified'){status.state='ok';status.authExpired=false;}status.checkedAt=new Date().toISOString();status.fetchedAt=status.checkedAt;if(nextRefreshCredit!==undefined){status.quota.credits={balance:nextRefreshCredit};nextRefreshCredit=undefined;} return status;},
+ refreshAccount:async(id,name,force)=>{
+   if(typeof force!=='boolean')throw new Error('force must be a boolean');
+   calls.push({method:'refresh',id,name,force});
+   if(refreshBarrier)await refreshBarrier;
+   if(blockNextRefresh){blockNextRefresh=false;await new Promise(resolve=>{releaseRefresh=resolve;});releaseRefresh=undefined;}
+   if(failNextRefresh){failNextRefresh=false;return {ok:false,error:'fixture query failed'};}
+   const agent=data.find(a=>a.id===id);
+   const status=agent.profiles.find(p=>p.name===name)?.meta.snapshot || agent.status;
+   if(reuseNextRefresh){reuseNextRefresh=false;return status;}
+   status.checkedAt=new Date().toISOString();
+   if(deferredRefreshNote){
+     status.state='unverified';
+     status.extra=deferredRefreshNote;
+     deferredRefreshNote=undefined;
+     return status;
+   }
+   if(status.state==='unverified'){status.state='ok';status.authExpired=false;delete status.extra;}
+   status.fetchedAt=status.checkedAt;
+   if(nextRefreshCredit!==undefined){status.quota.credits={balance:nextRefreshCredit};nextRefreshCredit=undefined;}
+   return status;
+ },
  loginStatus:async id=>{
    const status=((id==='codex'||data.find(a=>a.id===id)?.management?.isolatedLogin) && browserLogin) || {ready:true,account:'new@example.test'};
    if(!status.updateProfile){

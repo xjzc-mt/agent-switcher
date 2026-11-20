@@ -1,11 +1,19 @@
 import os from 'os';
-import { queryIsolatedUsage, AntigravityLoginRequired } from '../antigravity-cli';
-import { CredentialChangedError } from '../credential-state';
+import { queryAccessTokenUsage, queryIsolatedUsage, AntigravityLoginRequired } from '../antigravity-cli';
+import { stepDiagnostic } from '../diagnostics';
+import { CredentialChangedError, credentialStateFromFiles } from '../credential-state';
 import path from 'path';
 import fs from 'fs';
-import { BaseAgent, Identity, StatusResult, AccountManagement, CredentialQuery } from './base';
+import { execFileSync } from 'child_process';
+import { BaseAgent, Identity, AuxiliaryCredential, StatusResult, AccountManagement, CredentialQuery, QueryOptions, LiveMutationJournal, UseOptions, UseResult, type CredentialFiles } from './base';
 import { readJsonFile, jwtInfo, fingerprint } from '../utils';
-import { readNativeToken, writeNativeToken, parseNativeToken, sharedAntigravitySessions, quotaFromUsage } from '../antigravity-native';
+import { profileDir } from '../store';
+import { releaseTemporaryCredentials } from '../temporary-credentials';
+import {
+  readNativeToken, writeNativeToken, readAuxiliaryNativeTokens, parseNativeToken, findQuotaBearer,
+  isRecoverableNativeError, hasPendingNativeCleanup, nativeSwitchFingerprint,
+  createNativeMutationJournal, recoverInterruptedNativeSwitch, sharedAntigravitySessions, quotaFromUsage,
+} from '../antigravity-native';
 
 interface TokenPayload {
   access_token?: string;
@@ -17,14 +25,19 @@ interface TokenPayload {
   auth_method?: string;
 }
 
+export const antigravityRenewalHint = 'Antigravity 更新登录状态后，额度会自动刷新。';
+
 export type AntigravityRuntime = 'legacy' | 'unified' | 'unknown';
 /** Inspect installed app metadata, never token contents, to choose the adapter. */
 export function detectAntigravityRuntime(): AntigravityRuntime {
   if (process.platform === 'darwin') {
     for (const apps of [path.join(os.homedir(), 'Applications'), '/Applications']) {
       try {
-        const plist = fs.readFileSync(path.join(apps, 'Antigravity.app/Contents/Info.plist'), 'utf8');
-        const version = plist.match(/<key>CFBundleShortVersionString<\/key>\s*<string>(\d+)\./)?.[1];
+        const plist = fs.readFileSync(path.join(apps, 'Antigravity.app/Contents/Info.plist'));
+        const version = plist.subarray(0, 8).toString() === 'bplist00'
+          ? /^(\d+)(?:\.|$)/.exec(execFileSync('/usr/bin/plutil', ['-extract', 'CFBundleShortVersionString', 'raw', '-o', '-', '-'],
+              { input: plist, encoding: 'utf8', timeout: 1500, stdio: ['pipe', 'pipe', 'ignore'] }).trim())?.[1]
+          : plist.toString().match(/<key>CFBundleShortVersionString<\/key>\s*<string>(\d+)(?:\.|<)/)?.[1];
         if (version) return Number(version) >= 2 ? 'unified' : 'legacy';
       } catch { /* Continue to other install locations. */ }
     }
@@ -43,31 +56,78 @@ export class AntigravityAgent extends BaseAgent {
   constructor(private readonly runtime: () => AntigravityRuntime = detectAntigravityRuntime,
     private readonly nativeEnabled = process.platform === 'darwin' && runtime() === 'unified') { super(); }
 
-  readCredentials(dir = this.homeDir): Record<string, Buffer | null> {
+  readCredentials(dir = this.homeDir, quotaCopies?: Buffer[]): Record<string, Buffer | null> {
     return this.nativeEnabled && dir === this.homeDir
-      ? { [this.authFiles[0]]: readNativeToken() } : super.readCredentials(dir);
+      ? { [this.authFiles[0]]: readNativeToken(quotaCopies) } : super.readCredentials(dir);
+  }
+  readSwitchableCredentials(): { files: Record<string, Buffer | null>; corrupted?: boolean } {
+    if (!this.nativeEnabled) return super.readSwitchableCredentials();
+    try { return { files: this.readCredentials() }; }
+    catch (error) {
+      if (isRecoverableNativeError(error)) return { files: { [this.authFiles[0]]: null }, corrupted: true };
+      throw error;
+    }
+  }
+  hasPendingSwitchCleanup(): boolean {
+    return this.nativeEnabled && hasPendingNativeCleanup();
+  }
+  switchFingerprint(): string | undefined {
+    return this.nativeEnabled ? nativeSwitchFingerprint() : undefined;
+  }
+  canVerifyReplacement(targetBytes: Buffer | null): boolean {
+    return Boolean(this.nativeEnabled && targetBytes && this.identityFromBytes(targetBytes)?.email);
+  }
+  createMutationJournal(): LiveMutationJournal {
+    if (!this.nativeEnabled) return super.createMutationJournal();
+    return createNativeMutationJournal() ?? super.createMutationJournal();
+  }
+  async recoverInterruptedSwitch(): Promise<void> {
+    if (this.nativeEnabled) await recoverInterruptedNativeSwitch();
+  }
+  auxiliaryCredentials(): AuxiliaryCredential[] {
+    if (!this.nativeEnabled) return [];
+    let primaryBytes: Buffer | null = null;
+    try { primaryBytes = this.readCredentials()[this.authFiles[0]]; }
+    catch (error) { if (!isRecoverableNativeError(error)) throw error; }
+    return readAuxiliaryNativeTokens(primaryBytes).flatMap(bytes => {
+      const identity = this.identityFromBytes(bytes);
+      return identity ? [{ identity, files: { [this.authFiles[0]]: bytes } }] : [];
+    });
   }
   writeCredentials(dir: string, files: Record<string, Buffer | null>): void {
     if (!this.nativeEnabled || dir !== this.homeDir) return super.writeCredentials(dir, files);
     const bytes = files[this.authFiles[0]];
     writeNativeToken(bytes);
   }
-  async use(name: string) {
-    if (this.nativeEnabled && (await sharedAntigravitySessions()).length) throw new Error('请先关闭共用认证的 agy 或 IDE 会话');
-    return super.use(name);
+  async use(name: string, options: UseOptions = {}): Promise<UseResult> {
+    if (!this.nativeEnabled) return super.use(name, options);
+    const unsupported = this.switchSupport();
+    if (unsupported) throw new Error(unsupported);
+    if ((await sharedAntigravitySessions()).length) throw new Error('请先关闭共用认证的 agy 或 IDE 会话');
+    const files = this.credentials(profileDir(this.id, name));
+    const targetBytes = files[this.authFiles[0]];
+    options.journal?.beginWrite?.(credentialStateFromFiles(this.id, Object.entries(files)).revision);
+    const storage = writeNativeToken(targetBytes, {
+      clearFallbacks: 'all',
+      expectedFingerprint: options.expectedSwitchFingerprint,
+      allowFileMigration: options.allowFileMigration,
+      journal: options.journal,
+    });
+    options.journal?.markWriteCompleted?.();
+    const warnings = ['已更新本地凭据；已打开的终端会话需要重新启动。'];
+    if (storage === 'files') warnings.push('桌面和 CLI 各使用一份仅当前用户可读写的官方登录文件。');
+    return { ok: true, files: Object.keys(files).filter(f => files[f]), warnings };
   }
 
-  identityFromBytes(bytes: Buffer | null): Identity | undefined {
-    if (!this.nativeEnabled) return super.identityFromBytes(bytes);
+  identityFromBytes(bytes: Buffer | null, live = false): Identity | undefined {
+    if (!this.nativeEnabled) return super.identityFromBytes(bytes, live);
     if (!bytes) return undefined;
     try { return this.identityFromAuth(parseNativeToken(bytes)); }
     catch { return undefined; }
   }
-  identity(dir = this.homeDir): Identity | undefined {
-    if (this.nativeEnabled) return this.identityFromBytes(this.readCredentials(dir)[this.authFiles[0]]);
-    if (dir === this.homeDir && this.runtime() !== 'legacy') return undefined;
-    const raw = readJsonFile<TokenPayload>(path.join(dir, 'jetski-standalone-oauth-token'));
-    return this.identityFromAuth(raw, dir === this.homeDir);
+  identity(dir = this.homeDir, files?: CredentialFiles): Identity | undefined {
+    if (!this.nativeEnabled && dir === this.homeDir && this.runtime() !== 'legacy') return undefined;
+    return super.identity(dir, files);
   }
   identityFromAuth(raw: TokenPayload | null, live = false): Identity | undefined {
     if (!raw) return undefined;
@@ -78,7 +138,8 @@ export class AntigravityAgent extends BaseAgent {
 
     const idToken = raw.id_token || token.id_token;
     const info = jwtInfo(idToken);
-    let email = raw.id_token_email || info.email;
+    let email = typeof raw.id_token_email === 'string' && raw.id_token_email.trim() ? raw.id_token_email.trim()
+      : typeof info.email === 'string' && info.email.trim() ? info.email.trim() : undefined;
 
     // Fallback: check app_storage.json if checking live home directory and JWT email is missing
     if (!email && live) {
@@ -91,7 +152,9 @@ export class AntigravityAgent extends BaseAgent {
       } catch {}
     }
 
-    const id = (this.nativeEnabled && email?.toLowerCase()) || info.sub || email || (refreshToken ? fingerprint(refreshToken) : undefined);
+    const normalizedEmail = email?.trim().toLowerCase();
+    const sub = typeof info.sub === 'string' && info.sub ? info.sub : undefined;
+    const id = (this.nativeEnabled && normalizedEmail) || sub || normalizedEmail || (typeof refreshToken === 'string' && refreshToken ? fingerprint(refreshToken) : undefined);
     if (!id) return undefined;
     return { id, email };
   }
@@ -120,10 +183,72 @@ export class AntigravityAgent extends BaseAgent {
       state: identity ? 'unverified' : 'signed-out',
     };
   }
-  async queryCredential(original: Buffer | null): Promise<CredentialQuery> {
+  async queryCredential(original: Buffer | null, options: QueryOptions & { quotaCopies?: Buffer[]; allowUndatedBearer?: boolean } = {}): Promise<CredentialQuery> {
     if (!original) return { status: { available: false, state: 'signed-out' } };
-    const identity = this.identityFromAuth(parseNativeToken(original))!;
-    const result = await queryIsolatedUsage(original);
+    const parsedOriginal = parseNativeToken(original);
+    const identity = this.identityFromAuth(parsedOriginal)!;
+    if (options.allowRefresh === false) {
+      const bearer = findQuotaBearer(parsedOriginal, options.quotaCopies, options.allowUndatedBearer);
+      if (bearer?.expiry) stepDiagnostic('access-valid');
+      else if (!bearer) {
+        const access = parsedOriginal.token.access_token, expiry = parsedOriginal.token.expiry ?? parsedOriginal.expiry;
+        if (typeof access !== 'string' || !access.trim()) stepDiagnostic('access-missing');
+        else if (typeof expiry === 'string' && Date.parse(expiry) <= Date.now()) stepDiagnostic('access-expired');
+      }
+      if (options.verifyTarget === undefined && bearer) {
+        try {
+          const data = await queryAccessTokenUsage(identity.email!, bearer.accessToken, bearer.expiry);
+          if (!bearer.expiry) stepDiagnostic('access-valid');
+          return { status: quotaFromUsage(data, identity.email!) };
+        } catch (error) {
+          return { status: { available: true, account: identity.email, state: 'error', extra: (error as Error).message } };
+        }
+      }
+      return {
+        status: {
+          available: true, account: identity.email, state: 'unverified',
+          extra: antigravityRenewalHint,
+        },
+      };
+    }
+    if (options.verifyTarget !== undefined) {
+      const expected = options.verifyTarget ? this.identityFromBytes(options.verifyTarget) : undefined;
+      if (!expected) {
+        return {
+          status: { available: true, account: identity.email, state: 'error', extra: '原账号缺少可验证身份，已保留原凭据；请使用「重新登录」完成官方授权' },
+          verifiedReplacement: false,
+        };
+      }
+      const stripped = Buffer.from(JSON.stringify({ auth_method: 'consumer', token: { refresh_token: parsedOriginal.token.refresh_token } }));
+      const result = await queryIsolatedUsage(stripped, expected.id, parsedOriginal.token.refresh_token);
+      const didRotate = !stripped.equals(result.rotated);
+      let verifiedIdentity: Identity | undefined;
+      try { verifiedIdentity = this.identityFromAuth(parseNativeToken(result.rotated)); } catch {}
+      let quotaStatus: StatusResult | undefined;
+      let usageError = result.error;
+      if (!usageError && verifiedIdentity && verifiedIdentity.id === expected.id) {
+        try { quotaStatus = { ...quotaFromUsage(result.data || {}, verifiedIdentity.email!), plan: result.plan }; }
+        catch (error) { usageError = error as Error; }
+      }
+      if (!verifiedIdentity || verifiedIdentity.id !== expected.id || usageError || !quotaStatus) {
+        if (!didRotate && result.temporaryDirectory) releaseTemporaryCredentials(result.temporaryDirectory);
+        const expired = usageError instanceof AntigravityLoginRequired;
+        const baseExtra = !verifiedIdentity ? '未能通过官方刷新核实凭据归属，已保留原凭据；请使用「重新登录」更新'
+          : verifiedIdentity.id !== expected.id ? '新凭据经官方验证不属于此账号，已保留原凭据；请使用「重新登录」更新'
+          : `${usageError!.message}（已保留原凭据；可使用「重新登录」更新）`;
+        const extra = didRotate && result.temporaryDirectory
+          ? `${baseExtra}；未写回的凭据已保留在 ${result.temporaryDirectory}，恢复前请勿清理该目录`
+          : baseExtra;
+        return {
+          status: { available: true, account: expected.email, state: expired ? 'expired' : 'error', authExpired: expired, extra },
+          rotated: didRotate ? result.rotated : undefined,
+          temporaryDirectory: didRotate ? result.temporaryDirectory : undefined,
+          verifiedReplacement: false,
+        };
+      }
+      return { status: quotaStatus, rotated: result.rotated, temporaryDirectory: result.temporaryDirectory, verifiedReplacement: true };
+    }
+    const result = await queryIsolatedUsage(original, identity.id, parsedOriginal.token.refresh_token);
     try {
       if (this.identityFromAuth(parseNativeToken(result.rotated))?.id !== identity.id) throw new CredentialChangedError();
     } catch (error) {
@@ -149,4 +274,3 @@ export class AntigravityAgent extends BaseAgent {
 }
 
 export const antigravityAgent = new AntigravityAgent();
-

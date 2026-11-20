@@ -1,6 +1,6 @@
 {
   "name": "agent-switcher",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Multi-account & quota manager for AI coding agents",
   "main": "dist/main.js",
   "bin": {
@@ -17,8 +17,9 @@
     "size:audit": "node scripts/size-audit.cjs",
     "release:checksums": "node scripts/release-checksums.cjs",
     "screenshots": "electron scripts/capture-screenshots.cjs",
+    "site:build": "node scripts/build-site.cjs",
     "dev": "npm run build && node dist/index.js",
-    "lint": "tsc --noEmit && node --check renderer/app.js && node --check renderer/account-policy.js && node --check renderer/tooltips.js && node --check renderer/refresh-queue.js && node --check renderer/layout.js && node --check scripts/release-checksums.cjs && node --check scripts/size-audit.cjs && node --check scripts/capture-screenshots.cjs",
+    "lint": "tsc --noEmit && node --check renderer/app.js && node --check renderer/tray.js && node --check renderer/logos.js && node --check renderer/account-policy.js && node --check renderer/tooltips.js && node --check renderer/refresh-queue.js && node --check renderer/layout.js && node --check scripts/release-checksums.cjs && node --check scripts/size-audit.cjs && node --check scripts/capture-screenshots.cjs && node --check scripts/build-site.cjs && node --check site/app.js",
     "test": "npm run build && node --test tests/*.test.cjs",
     "test:ui": "npm run build && electron tests/ui-smoke.cjs && electron tests/ui-layout.cjs && electron tests/ui-account-groups.cjs && electron tests/ui-refresh.cjs && electron tests/ui-interactions.cjs && electron tests/ui-chrome.cjs && electron tests/ui-rename.cjs && electron tests/ui-account-errors-import.cjs && electron tests/ui-account-actions.cjs && electron tests/ui-cleanup.cjs && electron tests/ui-credential-batch.cjs && electron tests/ui-providers.cjs && electron tests/ui-app-updates.cjs"
   },
@@ -34,6 +35,7 @@
   "dependencies": {
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
+    "smol-toml": "1.9.1",
     "unzipper": "^0.12.3",
     "yazl": "^3.3.1"
   },
@@ -74,9 +76,11 @@
       "zh_TW_NEUTER"
     ],
     "files": [
+      "LICENSE",
       "dist/**/*.js",
       "renderer/**/*",
-      "assets/**/*"
+      "assets/**/*",
+      "!assets/icon-candidates/**/*"
     ],
     "directories": {
       "output": "release"

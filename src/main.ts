@@ -2,12 +2,15 @@ import { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, clipboard
 import path from 'path';
 import fs from 'fs';
 import { pathToFileURL } from 'url';
-import { ALL_AGENTS, resolveAgent, dashboard, saveAccount, useAccount, removeAccount, previewRemoveAccount, needsUnmanagedChoice, renameAccount, refreshAccount, prepareLogin, loginStatus, cancelLogin, RemovalPreview } from './accounts';
+import { ALL_AGENTS, resolveAgent, dashboard, saveAccount, useAccount, removeAccount, previewRemoveAccount, needsUnmanagedChoice, clientSwitchRevision, setCriticalCommitTracker, renameAccount, refreshAccount, prepareLogin, loginStatus, cancelLogin, RemovalPreview } from './accounts';
 import { antigravityLogin } from './antigravity-login';
+import { assertNativeSwitchReady, retryNativeKeychainAccess } from './antigravity-native';
+import { profileDir, withStoreLock } from './store';
+import { hasPendingAntigravitySwitch } from './antigravity-switch-recovery';
 import { codexLogin } from './codex-login';
 import { runningClients, quitClients, openClients, loginInTerminal, findClaudeBinary } from './clients';
 import { exportBackup, parseBackup, parseImport, isEncryptedBackup, installBackup, ParsedBackup, BackupItem, previewCredentialUpdate, installCredentialUpdate } from './backup';
-import { CredentialBatch, parseCredentialBatch, installCredentialBatch } from './credential-import';
+import { CredentialBatch, editableBackup, parseCredentialBatch, installCredentialBatch } from './credential-import';
 import type { CredentialUpdateTarget } from './accounts';
 import { atomicWrite } from './utils';
 import { readSettings, saveSettings } from './settings';
@@ -16,13 +19,19 @@ import { minimumWidth, defaultWidth, updateWindowSidebarLayout } from './window-
 import { openPrivateBrowser } from './private-browser';
 import { CODEX_CLEANUP_PROMPT } from './cleanup-prompt';
 import { maintainCredentialStorage } from './storage-maintenance';
-import { credentialState } from './credential-state';
 import { AppUpdates } from './app-updates';
 import { createQuitGuard } from './app-quit';
-const deletePreviews = new Map<string, { preview: RemovalPreview; expires: number }>();
+import { createTrayPanel, type TraySnapshot, type TrayCommand } from './tray-menu';
+import { initializeDiagnostics, runDiagnostic, resultDiagnostic, stepDiagnostic, exportDiagnostics, sourceDiagnosticVersion } from './diagnostics';
+import type { StatusResult } from './agents/base';
+const deletePreviews = new Map<string, { id: string; preview: RemovalPreview; expires: number }>();
 let pendingImport: { id: string; parsed?: ParsedBackup; encrypted?: Buffer; target?: CredentialUpdateTarget; batch?: CredentialBatch } | undefined;
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let trayPanel: ReturnType<typeof createTrayPanel> | undefined;
+let traySnapshot: TraySnapshot | undefined;
+let trayReady = false;
+let pendingTrayCommand: TrayCommand | undefined;
 let appUpdates: AppUpdates | undefined;
 const projectUrl = 'https://github.com/xjzc-mt/agent-switcher';
 const rendererFile = path.join(__dirname, '..', 'renderer', 'index.html');
@@ -53,11 +62,15 @@ const quitGuard = createQuitGuard({
   },
   quit: () => app.quit(),
   onError: error => dialog.showErrorBox('暂时无法退出 AgentSwitcher', error.message),
+  onWaiting: waiting => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app-quit-state', { waiting }); },
 });
+setCriticalCommitTracker(work => quitGuard.trackCritical(work));
 // ── Window ───────────────────────────────────────────────────────────────────
 
-function createWindow() {
+function createWindow(show = true) {
   mainWindow = new BrowserWindow({
+    show,
+    paintWhenInitiallyHidden: false,
     width: defaultWidth,
     height: 700,
     minWidth: minimumWidth(152),
@@ -77,19 +90,53 @@ function createWindow() {
   mainWindow.loadFile(rendererFile);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', event => event.preventDefault());
-  mainWindow.webContents.on('render-process-gone', endWindowLogin);
+  mainWindow.webContents.on('did-start-loading', () => { trayReady = false; });
+  mainWindow.webContents.on('render-process-gone', () => { resetTrayWindow(); void endWindowLogin(); });
   mainWindow.on('close', event => {
     if (quitGuard.isClosing() && !quitGuard.canQuit()) event.preventDefault();
   });
   mainWindow.on('closed', () => {
     mainWindow = null;
+    resetTrayWindow();
     pendingImport = undefined;
     deletePreviews.clear();
     void endWindowLogin();
   });
+  return mainWindow;
 }
 
 // ── Tray ─────────────────────────────────────────────────────────────────────
+
+function resetTrayWindow() {
+  pendingTrayCommand = undefined;
+  trayReady = false;
+  if (traySnapshot) {
+    traySnapshot = { ...traySnapshot, refreshing: false, switching: false, windowClosed: true };
+    trayPanel?.update();
+  }
+}
+
+function revealMainWindow() {
+  trayPanel?.hide();
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function dispatchTrayCommand(command: TrayCommand) {
+  if (quitGuard.isClosing()) return;
+  if (command.action === 'quit') { app.quit(); return; }
+  const show = command.action !== 'refresh' && command.action !== 'switch';
+  const win = mainWindow ?? createWindow(show);
+  if (win.webContents.isCrashed()) win.webContents.reload();
+  if (show) revealMainWindow();
+  if (command.action === 'open') return;
+  if (trayReady) win.webContents.send('tray-command', command);
+  else if (!pendingTrayCommand || command.action !== 'refresh') {
+    pendingTrayCommand = command.action === 'add' && !command.agent ? { ...command, agent: traySnapshot?.selectedAgent } : command;
+  }
+}
 
 function createTray() {
   const iconPath = path.join(__dirname, '..', 'assets', 'trayTemplate.png');
@@ -102,6 +149,11 @@ function createTray() {
   img.setTemplateImage(true);
 
   tray = new Tray(img);
+  if (process.platform === 'darwin') {
+    tray.setToolTip('AgentSwitcher');
+    trayPanel = createTrayPanel(tray, () => traySnapshot, dispatchTrayCommand);
+    return;
+  }
   tray.setToolTip('AgentSwitcher — AI Agent Quota & Account Manager');
   tray.setContextMenu(
     Menu.buildFromTemplate([
@@ -123,8 +175,10 @@ function createTray() {
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 
 if (!app.requestSingleInstanceLock()) app.quit();
-app.on('second-instance', () => mainWindow?.focus());
+app.on('second-instance', () => { if (tray) dispatchTrayCommand({ action: 'open' }); });
 app.whenReady().then(async () => {
+  const version = app.getVersion();
+  initializeDiagnostics(path.join(app.getPath('userData'), 'diagnostics'), app.isPackaged ? version : sourceDiagnosticVersion(version));
   if (!app.isPackaged) app.dock?.setIcon(path.join(app.getAppPath(), 'packaging', 'app-icon.png'));
   try { await maintainCredentialStorage(); }
   catch (error) { dialog.showErrorBox('账号池安全存储需要处理', (error as Error).message + '\n已有文件已保留；请解锁系统安全存储或恢复备份后重试。'); }
@@ -137,7 +191,7 @@ app.whenReady().then(async () => {
   createTray();
   if (app.isPackaged) appUpdates.start();
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    dispatchTrayCommand({ action: 'open' });
   });
 });
 
@@ -153,7 +207,7 @@ app.on('before-quit', event => {
 
 // IPC validates its sender once; domain logic is shared with the CLI.
 const accountOperations = new Set([
-  'refresh-account', 'save-profile', 'update-from-login', 'delete-profile', 'rename-profile', 'use-profile',
+  'save-profile', 'update-from-login', 'delete-profile', 'rename-profile', 'use-profile',
   'export-profiles', 'preview-import', 'unlock-import', 'preview-credentials',
   'preview-credential-update', 'commit-import', 'commit-credential-update', 'launch-login', 'cancel-import', 'cancel-login',
   'save-settings', 'restart-client',
@@ -162,10 +216,49 @@ function handle(channel: string, callback: (...args: any[]) => unknown) {
   ipcMain.handle(channel, async (event, ...args) => {
     if (event.senderFrame?.url !== pathToFileURL(rendererFile).href) throw new Error('非法调用来源');
     try {
-      if (accountOperations.has(channel)) return await quitGuard.run(() => callback(...args));
-      return await callback(...args);
+      const invoke = async () => {
+        const result = await callback(...args);
+        if (result && typeof result === 'object' && 'canceled' in result && result.canceled) resultDiagnostic('canceled');
+        return result;
+      };
+      const execute = async () => accountOperations.has(channel) ? quitGuard.run(invoke) : invoke();
+      switch (channel) {
+        case 'refresh-account': {
+          const trigger = args[3] === 'tray' ? 'tray' : (args[2] || args[3] === 'manual') ? 'manual' : 'automatic';
+          return await runDiagnostic('refresh', args[0], trigger, args[1], execute);
+        }
+        case 'use-profile': return await runDiagnostic('switch', args[0], args[2] === 'tray' ? 'tray' : 'manual', args[1], execute);
+        case 'save-profile': return await runDiagnostic('save', args[0], 'manual', args[1], execute);
+        case 'update-from-login': return await runDiagnostic('update', args[0], 'manual', args[1], execute);
+        case 'commit-credential-update': return await runDiagnostic('update', pendingImport?.target?.agent, 'manual', pendingImport?.target?.profile, execute);
+        case 'launch-login': return await runDiagnostic('login', args[0], 'manual', undefined, execute);
+        case 'commit-import': return await runDiagnostic('import', undefined, 'manual', undefined, execute);
+        case 'export-profiles': return await runDiagnostic('export', undefined, 'manual', undefined, execute);
+        case 'delete-profile': return await runDiagnostic('remove', args[0], 'manual', args[1], execute);
+        default: return await execute();
+      }
     }
     catch (error) { return { ok: false, error: (error as Error).message }; }
+  });
+}
+if (process.platform === 'darwin') {
+  function fromMainWindow(event: Electron.IpcMainInvokeEvent) {
+    return mainWindow && event.sender === mainWindow.webContents && event.senderFrame === event.sender.mainFrame &&
+      event.senderFrame.url === pathToFileURL(rendererFile).href;
+  }
+  ipcMain.handle('tray-reveal-main', event => {
+    if (fromMainWindow(event) && !quitGuard.isClosing()) revealMainWindow();
+  });
+  ipcMain.handle('tray-state', (event, snapshot: TraySnapshot) => {
+    if (!fromMainWindow(event)) return;
+    traySnapshot = snapshot;
+    trayPanel?.update();
+  });
+  ipcMain.handle('tray-ready', event => {
+    if (!fromMainWindow(event)) return;
+    trayReady = true;
+    if (pendingTrayCommand && !quitGuard.isClosing()) event.sender.send('tray-command', pendingTrayCommand);
+    pendingTrayCommand = undefined;
   });
 }
 function updates() {
@@ -206,9 +299,32 @@ handle('login-status', async (id: string) => {
   if (id === 'claude') await agent.status();
   return loginStatus(agent);
 });
-handle('refresh-account', (id: string, name?: string, force = false) => refreshAccount(resolveAgent(id), name, force));
-handle('save-profile', (id: string, name: string, attempt?: number) =>
-  isolatedLogin(id)?.save(name, attempt) ?? saveAccount(resolveAgent(id), name));
+handle('refresh-account', async (id: string, name?: string, force = false) => {
+  if (quitGuard.isClosing()) throw new Error('正在准备退出 AgentSwitcher，请稍后重试');
+  const result: StatusResult = await refreshAccount(resolveAgent(id), name, force);
+  if (result.authFailure) stepDiagnostic(result.authFailure);
+  const outcome = result.state === 'ok' ? 'ok' : result.state === 'unsupported' ? 'unsupported' :
+    result.state === 'expired' ? 'expired' : result.state === 'unverified' ? 'waiting' : 'failed';
+  resultDiagnostic(outcome, result.fetchedAt);
+  return result;
+});
+handle('export-diagnostics', async () => {
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow!, {
+    title: '导出故障报告', defaultPath: 'AGS-故障报告.json', filters: [{ name: 'JSON', extensions: ['json'] }],
+    message: '保存后可将这份脱敏报告发给维护者。',
+  });
+  if (canceled || !filePath) return { canceled: true };
+  const temporary = path.join(path.dirname(filePath), `.ags-report-${randomUUID()}.tmp`);
+  try {
+    await fs.promises.writeFile(temporary, JSON.stringify(exportDiagnostics(), null, 2), { flag: 'wx', mode: 0o600 });
+    await fs.promises.rename(temporary, filePath);
+  } finally { await fs.promises.rm(temporary, { force: true }); }
+  return { ok: true };
+});
+handle('save-profile', (id: string, name: string, attempt?: number) => {
+  if (id === 'agy') retryNativeKeychainAccess();
+  return isolatedLogin(id)?.save(name, attempt) ?? saveAccount(resolveAgent(id), name);
+});
 handle('update-from-login', (id: string, name: string, attempt: number) => {
   const login = isolatedLogin(id);
   if (!login) throw new Error('此平台暂不支持通过重新登录更新凭据');
@@ -217,19 +333,21 @@ handle('update-from-login', (id: string, name: string, attempt: number) => {
 handle('preview-delete-profile', async (id: string, name: string) => {
   const preview = await previewRemoveAccount(resolveAgent(id), name);
   for (const [key, item] of deletePreviews) if (item.expires < Date.now()) deletePreviews.delete(key);
-  if (deletePreviews.size >= 200) deletePreviews.delete(deletePreviews.keys().next().value!);
-  const key = randomUUID();
-  deletePreviews.set(key, { preview, expires: Date.now() + 5 * 60000 });
-  return { id: key, profiles: preview.profiles, current: preview.current, logoutUnsupported: preview.logoutUnsupported };
+  // Keep the most recent confirmation for each selected account, including large restored pools.
+  const previewId = randomUUID();
+  deletePreviews.set(`${id}/${name}`, { id: previewId, preview, expires: Date.now() + 5 * 60000 });
+  return { id: previewId, profiles: preview.profiles, current: preview.current, logoutUnsupported: preview.logoutUnsupported };
 });
 handle('delete-profile', async (id: string, name: string, options: { previewId: string; logout: boolean }) => {
-  const pending = deletePreviews.get(options?.previewId);
-  if (!pending || pending.expires < Date.now() || typeof options.logout !== 'boolean' ||
+  const key = `${id}/${name}`, pending = deletePreviews.get(key);
+  if (!pending || pending.id !== options?.previewId || pending.expires < Date.now() || typeof options.logout !== 'boolean' ||
       pending.preview.agent !== id || pending.preview.profile !== name) throw new Error('删除预览已失效，请重新核对');
   const agent = resolveAgent(id);
+  let closedClients: string[] = [];
   if (options.logout) {
     const fresh = await previewRemoveAccount(agent, name);
-    if (fresh.signature !== pending.preview.signature || !pending.preview.current || !fresh.current || fresh.logoutUnsupported) {
+    if (fresh.signature !== pending.preview.signature || fresh.liveRevision !== pending.preview.liveRevision ||
+        !pending.preview.current || !fresh.current || fresh.logoutUnsupported) {
       throw new Error(fresh.logoutUnsupported || '账号或删除范围已变化，请重新核对');
     }
     const clients = await runningClients(id);
@@ -240,10 +358,18 @@ handle('delete-profile', async (id: string, name: string, options: { previewId: 
       });
       if (response !== 1) return { canceled: true };
       await quitClients(clients);
+      closedClients = clients;
     }
   }
-  const result = await removeAccount(agent, name, { preview: pending.preview, logout: options.logout });
-  deletePreviews.delete(options.previewId);
+  let result;
+  try { result = await removeAccount(agent, name, { preview: pending.preview, logout: options.logout }); }
+  catch (error) {
+    try {
+      if (closedClients.length && agent.identity()?.id === pending.preview.identity) await openClients(closedClients);
+    } catch { /* Identity reads and relaunches are best effort after removal fails. */ }
+    throw error;
+  }
+  if (deletePreviews.get(key) === pending) deletePreviews.delete(key);
   // Do not discard an unsaved authorization when an obsolete removal fails.
   try { await isolatedLogin(id)?.cancelIdentity(pending.preview.identity); }
   catch { return { ...result, warning: '账号已移除；独立登录临时副本尚未清理，请关闭添加窗口或重启 AGS 后复查' }; }
@@ -255,37 +381,79 @@ handle('use-profile', async (id: string, name: string) => {
   // Reject unsupported adapters before prompting to quit or touching a client.
   const unsupported = agent.switchSupport();
   if (unsupported) throw new Error(unsupported);
-  let saveUnmanaged: boolean | undefined;
-  let expectedCurrentRevision: string | undefined;
-  if (needsUnmanagedChoice(agent, name)) {
-    expectedCurrentRevision = credentialState(agent).revision;
-    const { response } = await dialog.showMessageBox(mainWindow!, {
-      type: 'question', buttons: ['取消', '不保存并切换', '保存后切换'], defaultId: 2, cancelId: 0,
-      message: '当前账号未保存在 AGS，是否先保存？',
-      detail: '包括曾从 AGS 移除的账号；只有选择保存才会加入账号池。不保存可能需要重新登录才能再次使用。',
-    });
-    if (response === 0) return { canceled: true };
-    saveUnmanaged = response === 2;
+  if (id === 'agy') retryNativeKeychainAccess();
+  const native = id === 'agy' && agent.management().storage === 'keychain';
+  const closed = new Set<string>();
+  function confirmSwitch(options: Electron.MessageBoxOptions) {
+    stepDiagnostic('confirm');
+    revealMainWindow();
+    return mainWindow ? dialog.showMessageBox(mainWindow, options) : dialog.showMessageBox(options);
   }
-  const clients = await runningClients(id);
-  if (clients.length) {
-    const { response } = await dialog.showMessageBox(mainWindow!, {
-      type: 'question', buttons: ['取消', '退出并切换'], defaultId: 0, cancelId: 0,
-      message: `需要退出 ${clients.join('、')} 才能切换账号`,
-      detail: '请先完成或停止正在运行的任务。切换完成后会重新打开客户端。',
-    });
-    if (response !== 1) return { canceled: true };
+  async function closeForSwitch(clients: string[]) {
     await quitClients(clients);
+    for (const client of clients) closed.add(client);
+  }
+  async function switchFromWindow() {
+    if (native && hasPendingAntigravitySwitch()) {
+      const clients = await runningClients(id, { failClosed: true });
+      if (clients.length) {
+        const { response } = await confirmSwitch({
+          type: 'question', buttons: ['取消', '退出并恢复'], defaultId: 0, cancelId: 0,
+          message: '上次 Antigravity 切换中断，需要先核对登录',
+          detail: '请先完成正在运行的任务。核对后会继续本次切换，结束时重新打开桌面客户端。',
+        });
+        if (response !== 1) return { canceled: true };
+        await closeForSwitch(clients);
+      }
+      await withStoreLock(async () => {
+        if ((await runningClients(id, { failClosed: true })).length) throw new Error('Antigravity 已重新打开，请先退出后重试');
+        await agent.recoverInterruptedSwitch?.();
+      });
+    }
+
+    const expectedCurrentRevision = clientSwitchRevision(agent);
+    let saveUnmanaged: boolean | undefined;
+    if (needsUnmanagedChoice(agent, name)) {
+      const { response } = await confirmSwitch({
+        type: 'question', buttons: ['取消', '不保存并切换', '保存后切换'], defaultId: 2, cancelId: 0,
+        message: '当前账号未保存在 AGS，是否先保存？',
+        detail: '包括曾从 AGS 移除的账号；只有选择保存才会加入账号池。不保存可能需要重新登录才能再次使用。',
+      });
+      if (response === 0) return { canceled: true };
+      saveUnmanaged = response === 2;
+    }
+    const clients = await runningClients(id, { failClosed: native });
+    const allowFileMigration = native && assertNativeSwitchReady(agent.credentials(profileDir(id, name))[agent.authFiles[0]]) === 'files';
+    if (clients.length || allowFileMigration) {
+      const details = [];
+      if (clients.length) details.push('请先完成或停止正在运行的任务。切换完成后会重新打开客户端。');
+      if (allowFileMigration) details.push('完整凭据将保存到 Antigravity 桌面和 CLI 的两个本机认证文件（权限 0600）。两份文件核对成功后，AGS 才会移除该平台原有的个人登录钥匙串项。');
+      const { response } = await confirmSwitch({
+        type: 'question', buttons: ['取消', clients.length ? '退出并切换' : '使用文件并切换'], defaultId: 0, cancelId: 0,
+        message: clients.length ? `需要退出 ${clients.join('、')} 才能切换账号` : '使用官方文件保存长凭据并切换账号？',
+        detail: details.join('\n'),
+      });
+      if (response !== 1) return { canceled: true };
+      if (clients.length) await closeForSwitch(clients);
+    }
+    return useAccount(agent, name, { saveUnmanaged, expectedCurrentRevision, allowFileMigration });
   }
   let result;
-  try { result = await useAccount(agent, name, { saveUnmanaged, expectedCurrentRevision }); }
+  try { result = await switchFromWindow(); }
   catch (error) {
-    if (clients.length) { try { await openClients(clients); } catch { /* Preserve the original switch error. */ } }
+    if (closed.size) { try { await openClients([...closed]); } catch { /* Preserve the original switch error. */ } }
     throw error;
   }
-  if (!clients.length) return result;
-  try { await openClients(clients); }
-  catch { return { ...result, clientRestartError: `账号已切换；自动重试 2 次后仍无法打开 ${clients.join('、')}，请手动启动` }; }
+  if (closed.size) {
+    stepDiagnostic('client-restart');
+    try { await openClients([...closed]); }
+    catch {
+      const message = `自动重试 2 次后仍无法打开 ${[...closed].join('、')}，请手动启动`;
+      if ('canceled' in result) throw new Error(`已取消切换。${message}`);
+      revealMainWindow();
+      return { ...result, clientRestartError: `账号已切换。${message}` };
+    }
+  }
   return result;
 });
 handle('restart-client', async (id: string) => {
@@ -315,6 +483,11 @@ async function exportItems(items: BackupItem[], password: string) {
 handle('export-profiles', exportItems);
 function importPreview(parsed: ParsedBackup, pending: typeof pendingImport) {
   if (pendingImport !== pending) return { canceled: true };
+  const batch = editableBackup(parsed);
+  if (batch) {
+    pendingImport = { id: randomUUID(), batch };
+    return { id: pendingImport.id, kind: 'credentials', items: batch.items };
+  }
   pendingImport = {id:randomUUID(),parsed};
   return {id:pendingImport.id,items:parsed.items};
 }

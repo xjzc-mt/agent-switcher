@@ -10,7 +10,7 @@ const { profileDir, writeProfileMeta, readProfileMeta } = require('../dist/store
 const { credentialState } = require('../dist/credential-state');
 const { atomicWrite } = require('../dist/utils');
 const token = (email, generation = 1) => Buffer.from(JSON.stringify({ auth_method:'consumer', id_token_email:email,
-  token:{ access_token:`fixture-${generation}`, refresh_token:'fixture-refresh', expiry:new Date(1795000000000 + generation * 60000).toISOString() } }));
+  token:{ access_token:`fixture-${generation}`, refresh_token:`fixture-refresh-${email}`, expiry:new Date(1795000000000 + generation * 60000).toISOString() } }));
 let live = token('a@example.test');
 native.readNativeToken = () => live;
 native.writeNativeToken = value => { live = value; };
@@ -24,6 +24,15 @@ try { fs.readFileSync(path.join(realHome,'.gemini/probe'));process.exit(21); } c
 try { fs.writeFileSync(path.join(realHome,'outside'),'unexpected');process.exit(22); } catch {}
 try { cp.execFileSync('/usr/bin/security',['help'],{stdio:'pipe'});process.exit(23); } catch {}
 if(process.env.GEMINI_API_KEY||process.env.SSH_TTY)process.exit(24);
+if(mode==='access-only'||mode==='access-undated') {
+ const auth=JSON.parse(fs.readFileSync(file,'utf8'));
+ const keys=mode==='access-undated'?'access_token,token_type':'access_token,expiry,token_type';
+ if(!process.argv.includes('/usage')||process.env.AGY_LLM_GATEWAY_API_KEY||
+   Object.keys(auth).sort().join()!=='auth_method,id_token_email,token'||
+   Object.keys(auth.token).sort().join()!==keys||
+   auth.id_token_email!=='readonly@example.test'||auth.token.access_token!=='fixture-readonly'||
+   (mode==='access-only'&&!(Date.parse(auth.token.expiry)>Date.now())))process.exit(25);
+}
 if(process.argv.includes('/usage')) {
  if(mode==='usage-error')process.exit(3);
  console.log(JSON.stringify({status:'SUCCESS',num_turns:0,command:{name:'usage',data:{groups:[{name:'Gemini Models',buckets:[{id:'g-5h',name:'Five hours',window:'5h',remaining_fraction:.8}]}]}}}));
@@ -57,15 +66,84 @@ fs.writeFileSync(behaviorFile, 'normal');
 // Install the fixture first so neither a missing nor an older host app selects the adapter.
 const appPlist = path.join(root, 'Applications/Antigravity.app/Contents/Info.plist');
 atomicWrite(appPlist, '<plist><dict><key>CFBundleShortVersionString</key><string>2.0.0</string></dict></plist>');
-const { antigravityAgent: agent } = require('../dist/agents/antigravity');
+const { antigravityAgent: agent, antigravityRenewalHint } = require('../dist/agents/antigravity');
 const { antigravityLogin: login } = require('../dist/antigravity-login');
-const { refreshAccount, dashboard } = require('../dist/accounts');
+const { refreshAccount, saveAccount, dashboard } = require('../dist/accounts');
 afterEach(async () => { await login.cancel(); fs.writeFileSync(behaviorFile, 'normal'); });
 after(() => fs.rmSync(root, { recursive:true, force:true }));
 async function until(fn) {
   for (let i=0;i<300;i++) { const result=fn();if(result)return result;await new Promise(r=>setTimeout(r,10)); }
   throw new Error('Timed out');
 }
+
+test('a running client waits for official renewal and then reads quota with only its access token', { skip: process.platform !== 'darwin' }, async t => {
+  const before = live, previous = process.env.AGY_LLM_GATEWAY_API_KEY;
+  t.after(() => {
+    live = before;
+    if (previous === undefined) delete process.env.AGY_LLM_GATEWAY_API_KEY;
+    else process.env.AGY_LLM_GATEWAY_API_KEY = previous;
+  });
+  process.env.AGY_LLM_GATEWAY_API_KEY = 'unused-fixture';
+  t.mock.method(require('../dist/clients'), 'runningClients', async () => ['Antigravity']);
+  const rotation = t.mock.method(cli, 'queryIsolatedUsage', () => assert.fail('running clients own the refresh token'));
+  const write = t.mock.method(native, 'writeNativeToken');
+  const usage = t.mock.method(cli, 'queryAccessTokenUsage');
+  const name = 'read-only', account = JSON.parse(token('readonly@example.test'));
+  account.id_token = 'fixture-private-field';
+  account.token.other = 'fixture-private-field';
+  account.expiry = new Date(Date.now() + 3600000).toISOString();
+  account.token.expiry = new Date(0).toISOString();
+  live = Buffer.from(JSON.stringify(account));
+  await saveAccount(agent, name);
+  const oldTime = new Date(Date.now() - 86400000).toISOString();
+  const history = { fetchedAt: oldTime, checkedAt: oldTime, state: 'unverified', available: true, plan: 'Ultra',
+    extra: 'Antigravity 客户端正在运行，暂时没有可用于只读查询的有效访问令牌；客户端续期或关闭后可重试',
+    quota: { buckets: [{ id: 'gemini', label: 'Gemini', windows: [{ windowMins: 300, usedPercent: 88 }] }] },
+    credentialRevision: credentialState(agent).revision };
+  writeProfileMeta('agy', name, { ...readProfileMeta('agy', name), snapshot: history });
+  assert.equal(dashboard().find(a => a.id === 'agy').status.extra, antigravityRenewalHint);
+  const diagnostics = require('../dist/diagnostics');
+  diagnostics.initializeDiagnostics(path.join(root, 'diagnostics'), '1.0.1+source');
+  const refresh = force => diagnostics.runDiagnostic('refresh', 'agy', force ? 'manual' : 'automatic', name,
+    () => refreshAccount(agent, name, force));
+  const paused = await refresh(true);
+  assert.equal(paused.state, 'unverified');
+  assert.equal(paused.extra, antigravityRenewalHint);
+  assert.deepEqual(paused.quota, history.quota);
+  assert.equal(paused.fetchedAt, oldTime);
+  assert.ok(require('../dist/quota-refresh').quotaRefreshAt(paused, true) > Date.now());
+  assert.equal(usage.mock.callCount(), 0);
+
+  account.token.access_token = 'fixture-readonly';
+  delete account.token.expiry;
+  const { parseCredentialDocument } = require('../dist/credential-document');
+  const renewed = parseCredentialDocument(Buffer.from(JSON.stringify(account)), 'agy').entries[0].data;
+  live = renewed;
+  fs.writeFileSync(behaviorFile, 'access-only');
+  const updated = await refresh(true);
+  assert.equal(updated.state, 'ok');
+  assert.equal(updated.plan, history.plan);
+  assert.equal(Math.round(updated.quota.buckets[0].windows[0].usedPercent), 20);
+  assert.ok(Date.parse(updated.fetchedAt) > Date.parse(oldTime));
+  assert.equal((await refresh(false)).checkedAt, updated.checkedAt);
+  const [waiting, completed, cached] = diagnostics.exportDiagnostics().operations;
+  assert.equal(waiting.lastQuotaAt, oldTime);
+  assert.deepEqual([waiting, completed, cached].map(op => [op.result, op.steps.map(s => s.step)]), [
+    ['waiting', ['live-session', 'read-only', 'access-expired']], ['ok', ['live-session', 'read-only', 'access-valid', 'query-start', 'query-end']], ['cached', ['cached']],
+  ]);
+  assert.equal(usage.mock.callCount(), 1);
+  assert.deepEqual(live, renewed);
+  delete account.expiry;
+  fs.writeFileSync(behaviorFile, 'access-undated');
+  assert.equal((await agent.queryCredential(Buffer.from(JSON.stringify(account)), { allowRefresh: false })).status.state, 'ok');
+  fs.writeFileSync(behaviorFile, 'usage-error');
+  assert.equal((await agent.queryCredential(renewed, { allowRefresh: false })).status.state, 'error');
+  account.token.access_token = '   ';
+  const incomplete = await agent.queryCredential(Buffer.from(JSON.stringify(account)), { allowRefresh: false });
+  assert.equal(incomplete.status.state, 'unverified');
+  assert.equal(rotation.mock.callCount(), 0);
+  assert.equal(write.mock.callCount(), 0);
+});
 
 test('isolated CLI renews the spare account without reading or writing live credentials', {skip:process.platform!=='darwin'}, async () => {
   const before=live, dir=profileDir('agy','B');atomicWrite(path.join(dir,agent.authFiles[0]),token('b@example.test'));

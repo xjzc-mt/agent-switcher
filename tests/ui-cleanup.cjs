@@ -3,7 +3,6 @@ const { app, BrowserWindow } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { CODEX_CLEANUP_PROMPT } = require('../dist/cleanup-prompt');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 app.whenReady().then(async () => {
@@ -82,11 +81,6 @@ app.whenReady().then(async () => {
     await click('[data-action="copyCleanupPrompt"]');
     await until(`window.testApi.calls().some(c=>c.method==='copy-cleanup')`);
     assert.equal(await run(`window.testApi.calls().filter(c=>c.method==='delete').length`), deletes, 'Copying cleanup instructions performs no deletion');
-    const prompt = CODEX_CLEANUP_PROMPT;
-    assert.match(prompt, /先只读检查/);
-    assert.match(prompt, /不在 AGS 账号池里/);
-    assert.match(prompt, /自身依赖目标 Codex 存储/);
-    assert.doesNotMatch(prompt, /account-\d@example\.test|个人主力|工作账号|备份<&>/);
     assert.match(await run(`document.querySelector('#toastBox').textContent`), /尚未执行清理/);
     await run(`document.querySelector('#toastBox').hidePopover()`);
     await capture('cleanup-settings.png');

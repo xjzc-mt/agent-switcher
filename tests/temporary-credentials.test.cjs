@@ -1,3 +1,4 @@
+const { accessToken } = require('./codex-token-fixture.cjs');
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
@@ -124,7 +125,8 @@ test('cleanup failure cannot discard a successful token rotation', async t => {
   const { CodexAgent } = require('../dist/agents/codex');
   const agent = new CodexAgent();
   const original = Buffer.from(JSON.stringify({ tokens: {
-    account_id: 'fixture-workspace', email: 'fixture@example.test', access_token: 'old', refresh_token: 'old',
+    account_id: 'fixture-workspace', email: 'fixture@example.test', id_token: accessToken('fixture-workspace',undefined,'fixture@example.test'),
+    access_token: accessToken('fixture-workspace',undefined,'fixture@example.test'), refresh_token: 'old',
   } }));
   const rotated = Buffer.from(original.toString().replaceAll('"old"', '"new"'));
   let directory;
@@ -154,7 +156,8 @@ test('an unchanged query is cleaned immediately but an unrecognized new credenti
   const { CredentialChangedError } = require('../dist/credential-state');
   const agent = new CodexAgent();
   const original = Buffer.from(JSON.stringify({ tokens: {
-    account_id: 'workspace', email: 'fixture@example.test', access_token: 'old', refresh_token: 'old',
+    account_id: 'workspace', email: 'fixture@example.test', id_token: accessToken('workspace',undefined,'fixture@example.test'),
+    access_token: accessToken('workspace',undefined,'fixture@example.test'), refresh_token: 'old',
   } }));
   let directory;
   agent.queryLiveRpc = async dir => { directory = dir; return { account: { email: 'fixture@example.test' } }; };

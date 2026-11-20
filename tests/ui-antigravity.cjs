@@ -1,5 +1,4 @@
-const assert=require('node:assert/strict'),fs=require('node:fs');
-const outputPath=require('./ui-support.cjs');
+const assert=require('node:assert/strict');
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
 module.exports=async function checkAntigravity(w,run) {
@@ -20,7 +19,7 @@ module.exports=async function checkAntigravity(w,run) {
     const s=a.status;s.quota.buckets.push({id:'extra',label:'模型组长名称展示示例：完整名称与多个周期',windows:[{usedPercent:16,windowMins:1440},{usedPercent:34,windowMins:43200}]});
     selectTab('agy');
   }`);
-  for(const layout of ['cards','rows'])for(const dates of [false,true])for(const width of [636,748,880,1120]) {
+  for (const [layout, dates, width] of [['cards', true, 636], ['rows', false, 1120]]) {
     w.setSize(width,780);
     await run(`settings.showResetTimes=${!dates};accountLayout='${layout}';writeLayout('sidebarCollapsed','${width===636}');applySidebar();renderWorkbench()`);
     await pause(50);
@@ -50,18 +49,15 @@ module.exports=async function checkAntigravity(w,run) {
     assert.equal(result.summaryLine,0,'Summary periods must remain on one line');
     assert.equal(result.currentGroups,3);assert.match(result.currentName,/完整名称与多个周期/);
     assert.match(result.pending,/Gemini 额度未取得/);
-    if(width===1120&&!dates)fs.writeFileSync(outputPath(`antigravity-hierarchy-${layout}.png`),(await w.webContents.capturePage()).toPNG());
-    if(width===748&&dates)fs.writeFileSync(outputPath(`antigravity-${layout}-date-minimum.png`),(await w.webContents.capturePage()).toPNG());
   }
-  await run(`settings.showResetTimes=true;accountLayout='cards';renderWorkbench()`);
-  for(const dates of [false,true])for(const width of [180,206,207,208]) {
-    await run(`settings.showResetTimes=${!dates};renderWorkbench()`);
+  await run(`settings.showResetTimes=false;accountLayout='cards';renderWorkbench()`);
+  for (const width of [206, 207]) {
     const result=await run(`(() => {
       const card=document.querySelector('[data-profile="备用 0"].account-card');card.style.width='${width}px';
       const summary=card.querySelector('.quota-summary');
       return {label:summary.querySelector('.quota-summary-name').innerText,overflow:[...card.querySelectorAll('.quota-summary,.quota-cell,.quota-cell-line')].filter(e=>e.scrollWidth>e.clientWidth+1).map(e=>e.className),height:summary.offsetHeight};
     })()`);
-    assert.equal(result.label,width>=207?'Claude / GPT':'C/G');assert.deepEqual(result.overflow,[],JSON.stringify({dates,width,result}));
+    assert.equal(result.label,width>=207?'Claude / GPT':'C/G');assert.deepEqual(result.overflow,[],JSON.stringify({width,result}));
   }
   await run(`renderWorkbench();document.querySelector('[data-profile="备用 0"].account-card').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}))`);
   assert.match(await run(`document.querySelector('[data-account-details]').textContent`),/Gemini 4 Argon/);

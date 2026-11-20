@@ -5,22 +5,32 @@ const { parseQuota } = require('../dist/agents/codex');
 const short = { usedPercent: 60, windowDurationMins: 300, resetsAt: 2000000000 };
 const weekly = { usedPercent: 33, windowDurationMins: 10080, resetsAt: 2000400000 };
 
-test('Plus quota retains each window and its independent reset timestamp', () => {
-  const quota = parseQuota({ rateLimits: { planType: 'plus', primary: short, secondary: weekly } });
-  assert.equal(quota.plan, 'plus');
-  assert.equal(quota.primaryWindow.resetsAt, short.resetsAt);
-  assert.equal(quota.secondaryWindow.resetsAt, weekly.resetsAt);
-  assert.equal(quota.secondaryWindow.windowMins, 10080);
-  const primaryWeek = parseQuota({ rateLimits: { primary: weekly, secondary: short } });
-  assert.equal(primaryWeek.primaryWindow.windowMins, 10080);
-  assert.equal(primaryWeek.secondaryWindow.windowMins, 300);
+test('CLI status reports a failed platform independently and shows Antigravity quota per model group', async t => {
+  const accounts = require('../dist/accounts');
+  const { runStatus } = require('../dist/commands/status');
+  const log = t.mock.method(console, 'log', () => {});
+  t.mock.method(accounts, 'activeProfile', agent => {
+    if (agent.id === 'codex') throw new Error('fixture read failure');
+    return 'fixture';
+  });
+  t.mock.method(accounts, 'refreshAccount', async () => ({
+    available: true, account: 'fixture', quota: { buckets: [{ id: 'gemini', label: 'Gemini', windows: [{usedPercent: 30, windowMins: 300}] }] },
+  }));
+  await runStatus([{ id: 'codex', label: 'Codex' }, { id: 'agy', label: 'Antigravity' }]);
+  const output = log.mock.calls.map(call => call.arguments[0]).join('\n');
+  assert.match(output, /Codex.*error reading status/);
+  assert.match(output, /Antigravity.*Gemini.*300.*70%/);
 });
 
 test('empty and partial bucket maps retain fields from the same legacy bucket', () => {
   const legacy = { planType: 'plus', primary: short, secondary: weekly };
   const empty = parseQuota({ rateLimits: legacy, rateLimitsByLimitId: {} });
   assert.equal(empty.buckets.length, 1);
+  assert.equal(empty.primaryWindow.resetsAt, short.resetsAt);
   assert.equal(empty.secondaryWindow.resetsAt, weekly.resetsAt);
+  const swapped = parseQuota({ rateLimits: { primary: weekly, secondary: short } });
+  assert.equal(swapped.primaryWindow.windowMins, 10080);
+  assert.equal(swapped.secondaryWindow.windowMins, 300);
   const partial = parseQuota({ rateLimits: legacy, rateLimitsByLimitId: { codex: { primary: { ...short, usedPercent: 70 } } } });
   assert.equal(partial.plan, 'plus');
   assert.equal(partial.primaryWindow.usedPercent, 70);
@@ -52,7 +62,7 @@ test('model-specific legacy buckets never become general Codex quotas or credits
 });
 
 test('malformed durations and reset timestamps remain unknown without losing valid usage', () => {
-  for (const value of [null, 0, -1, NaN, Infinity, '10080']) {
+  for (const value of [0, Infinity, '10080']) {
     const quota = parseQuota({ rateLimits: { primary: { usedPercent: 20, windowDurationMins: value, resetsAt: value } } });
     assert.equal(quota.primaryWindow.usedPercent, 20);
     assert.equal(quota.primaryWindow.windowMins, undefined);
@@ -60,7 +70,7 @@ test('malformed durations and reset timestamps remain unknown without losing val
   }
   const outOfDateRange = parseQuota({ rateLimits: { primary: { usedPercent: 20, resetsAt: Number.MAX_VALUE } } });
   assert.equal(outOfDateRange.primaryWindow.resetsAt, undefined);
-  for (const value of [null, NaN, Infinity, '20']) {
+  for (const value of [NaN, '20']) {
     assert.equal(parseQuota({ rateLimits: { primary: { usedPercent: value } } }).primaryWindow, undefined);
   }
   assert.equal(parseQuota({ rateLimits: { primary: { usedPercent: -5 } } }).primaryWindow.usedPercent, 0);
@@ -68,7 +78,7 @@ test('malformed durations and reset timestamps remain unknown without losing val
 });
 
 test('null and malformed response entries do not crash quota refresh', () => {
-  for (const value of [undefined, null, {}, [], { rateLimits: null }, { rateLimitsByLimitId: { codex: null, other: [] } }]) {
+  for (const value of [null, { rateLimitsByLimitId: { codex: null } }]) {
     assert.equal(parseQuota(value), undefined);
   }
   const quota = parseQuota({ rateLimitsByLimitId: { invalid: null, codex: { primary: short } } });

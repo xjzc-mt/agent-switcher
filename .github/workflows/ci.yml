@@ -14,7 +14,11 @@ concurrency:
 
 jobs:
   check:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -24,4 +28,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
-      - run: npm test
+      - if: runner.os == 'macOS'
+        run: npm test
+      - if: runner.os == 'Windows'
+        run: |
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-name-pattern="Windows|portable profile names" tests/codex-process.test.cjs tests/codex-query-identity.test.cjs tests/windows-sessions.test.cjs tests/core.test.cjs tests/credential-vault.test.cjs

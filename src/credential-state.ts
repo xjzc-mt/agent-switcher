@@ -50,10 +50,16 @@ export function credentialOrder(source: CredentialState, target: CredentialState
 
 export function snapshotForCredentials(status: StatusResult | undefined, revision?: string): StatusResult | undefined {
   if (!status) return undefined;
-  if (revision && status.credentialRevision === revision) return status;
+  if (revision && status.credentialRevision === revision) {
+    // Older official re-login snapshots copied the previous login's flag onto an unverified replacement.
+    if (status.refreshConsumed && status.state !== 'expired') {
+      return { ...status, refreshConsumed: undefined, consumedRefreshFingerprint: undefined };
+    }
+    return status;
+  }
   // Keep useful quota history and its colors, but recheck this credential version.
   return { ...status, state: status.state === 'ok' ? 'ok' : 'unverified', authExpired: false,
-    checkedAt: undefined, extra: undefined, authFailure: undefined, refreshFailures: undefined,
+    checkedAt: undefined, extra: undefined, authFailure: undefined, refreshConsumed: undefined, consumedRefreshFingerprint: undefined, refreshFailures: undefined,
     creditActivity: undefined, credentialRevision: revision };
 }
 

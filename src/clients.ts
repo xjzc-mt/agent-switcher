@@ -11,13 +11,17 @@ async function isRunning(name: string): Promise<boolean> {
   const { stdout } = await run('osascript', ['-e', `${appReference(name)} is running`], { timeout: 2000 });
   return stdout.trim() === 'true';
 }
-export async function runningClients(id: string): Promise<string[]> {
+export async function runningClients(id: string, options: { failClosed?: boolean } = {}): Promise<string[]> {
   if (process.platform !== 'darwin') return [];
   const running: string[] = [];
   for (const name of MAC_APPS[id] || []) {
     try {
       if (await isRunning(name)) running.push(name);
-    } catch { /* App not installed. */ }
+    } catch (error) {
+      const message = String((error as Error)?.message || '');
+      const notInstalled = /-2700|-1728|-10814|can['’]t get application|unable to find application/i.test(message);
+      if (options.failClosed && !notInstalled) throw error;
+    }
   }
   return running;
 }

@@ -13,7 +13,6 @@ function startServer(binary: string, directory: string, target?: CredentialUpdat
   let loginId: string | undefined;
   let resolveLink!: (url: string) => void, rejectLink!: (reason: Error) => void;
   const link = new Promise<string>((resolve, reject) => { resolveLink = resolve; rejectLink = reject; });
-  let timeout = setTimeout(() => finish('准备登录链接超时，请重试'), 15000);
 
   function finish(reason?: string) {
     if (phase !== 'starting' && phase !== 'waiting') return;
@@ -71,6 +70,7 @@ function startServer(binary: string, directory: string, target?: CredentialUpdat
       }
     },
   });
+  let timeout = setTimeout(() => finish('准备登录链接超时，请重试'), 15000);
   server.send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'agent-switcher', version: require('../package.json').version } } });
   return { attempt: ++nextAttempt, directory, target, link, stop, get phase() { return phase; }, get error() { return error; } };
 }
