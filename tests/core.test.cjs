@@ -206,11 +206,12 @@ test('credential expiry preserves historical quota and plan but stops automatic 
 });
 test('encrypted backups normalize passphrases and reject changed ciphertext', async () => {
   putProfile("O'Reilly & team", 'A');
-  const password = 'café-passphrase';
-  const data = await backup.exportBackup([{ agent: 'codex', profile: "O'Reilly & team" }], password.normalize('NFD'));
+  const password = 'café42';
+  await assert.rejects(backup.encryptBackup(Buffer.alloc(0), '12345'), /至少需要 6 个字符/);
+  const data = await backup.exportBackup([{ agent: 'codex', profile: "O'Reilly & team" }], password);
   assert.equal(fs.statSync(store.STORE_DIR).mode & 0o777, 0o700);
   assert.equal(data.subarray(0, 4).toString(), 'AGS2'); assert.equal(data.includes(Buffer.from('fake-access')), false);
-  const parsed = await backup.parseBackup(data, password);
+  const parsed = await backup.parseBackup(data, password.normalize('NFD'));
   const [entry] = parsed.items;
   assert.equal(JSON.parse(parsed.groups.get(entry.key).get('_meta.json')).email, 'A@example.test');
   const tampered = Buffer.from(data); tampered[tampered.length - 1] ^= 1;

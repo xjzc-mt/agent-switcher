@@ -34,7 +34,7 @@ function unsealAgs(aad: Buffer, iv: Buffer, tag: Buffer, body: Buffer, key: Buff
 }
 
 export async function encryptBackup(zip: Buffer, password: string): Promise<Buffer> {
-  if (typeof password !== 'string' || password.length < 8 || !password.trim()) throw new Error('备份密码至少需要 8 个字符');
+  if (typeof password !== 'string' || password.length < 6 || !password.trim()) throw new Error('备份密码至少需要 6 个字符');
   const salt = randomBytes(16), iv = randomBytes(12), header = Buffer.concat([MAGIC_V2, KDF_PROFILE]);
   const key = await new Promise<Buffer>((resolve, reject) =>
     scrypt(password.normalize('NFC'), salt, 32, { N: 65536, r: 8, p: 1, maxmem: 128 * 1024 * 1024 }, (err, derived) => err ? reject(err) : resolve(derived)));

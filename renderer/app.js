@@ -1524,7 +1524,7 @@ $('addImportPreview').addEventListener('input',event=>{if(event.target.matches('
 function askPassword() {
   return new Promise(resolve => {
     const dialog = document.createElement('dialog'); dialog.className = 'password-dialog';
-    dialog.innerHTML = `<form><strong>加密导出</strong><div class="detail-note">密码至少 8 位，请妥善保存。备份包含账号登录凭据。</div><input class="modal-input" type="password" name="password" autocomplete="new-password" aria-label="备份密码" required minlength="8"><input class="modal-input" type="password" name="repeat" autocomplete="new-password" aria-label="再次输入密码" placeholder="再次输入密码" required><div class="detail-actions"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">选择保存位置</button></div></form>`;
+    dialog.innerHTML = `<form><strong>加密导出</strong><div class="detail-note">备份包含账号登录凭据。请设置至少 6 个字符的密码。</div><input class="modal-input" type="password" name="password" autocomplete="new-password" aria-label="备份密码" required minlength="6"><input class="modal-input" type="password" name="repeat" autocomplete="new-password" aria-label="再次输入密码" placeholder="再次输入密码" required><div class="detail-actions"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">选择保存位置</button></div></form>`;
     const done = value => { dialog.close(); dialog.remove(); resolve(value); };
     dialog.querySelector('[data-cancel]').addEventListener('click', () => done(null));
     dialog.addEventListener('cancel', event => { event.preventDefault(); done(null); });
