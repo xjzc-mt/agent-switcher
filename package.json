@@ -51,6 +51,7 @@
     "appId": "com.agent-switcher.app",
     "productName": "AgentSwitcher",
     "mac": {
+      "artifactName": "AgentSwitcher-${version}-${arch}.${ext}",
       "icon": "packaging/app-icon.png",
       "category": "public.app-category.developer-tools",
       "target": [
