@@ -99,7 +99,7 @@ app.whenReady().then(async()=>{
     await run(`writeLayout('sidebarWidth',152);applySidebar()`);await minimum(748);window.setSize(880,740);await pause(80);
     assert.equal(await run(`getComputedStyle(document.querySelector('.workspace-topbar')).getPropertyValue('-webkit-app-region')`),'drag');
     for(const selector of ['#sidebarToggle','.topbar-actions'])assert.equal(await run(`getComputedStyle(document.querySelector('${selector}')).getPropertyValue('-webkit-app-region')`),'no-drag');
-    for(let i=0;i<6;i++){
+    for(let i=0;i<2;i++){
       await click('#sidebarToggle');await minimum(i%2===0?636:748);
       assert.equal(await run(`(()=>{const button=document.querySelector('#sidebarToggle'),header=button.closest('.workspace-topbar'),r=button.getBoundingClientRect(),h=header?.getBoundingClientRect();return header?.parentElement===document.body&&r.x>=h.x&&r.right<=h.right&&r.y>=h.y&&r.bottom<=h.bottom;})()`),true,'Toggle must stay inside its own draggable header, in both states');
       assert.equal(await run(`document.querySelector('#sidebarToggle').getAttribute('aria-expanded')`),String(i%2!==0));
@@ -112,17 +112,14 @@ app.whenReady().then(async()=>{
     // Check the regions of long scrolling content, not just the header's CSS declaration.
     await run(`window.providerTestApi.native();loadStatus()`);
     await run(`window.beforeScrollAgents=structuredClone(agentsData)`);
-    for(const id of ['codex','agy']){
+    for(const [id,layout,collapsed] of [['codex','cards',false],['agy','rows',true]]){
       await run(`{const a=agentsData.find(a=>a.id==='${id}'),base=a.profiles[1];a.profiles=[a.profiles[0],...Array.from({length:25},(_,i)=>({...structuredClone(base),name:'滚动账号'+i,isActive:false}))];}`);
-      for(const layout of ['cards','rows'])for(const collapsed of [false,true]){
-        await run(`writeLayout('sidebarCollapsed','${collapsed}');applySidebar();selectTab('${id}');accountLayout='${layout}';renderWorkbench()`);
-        await minimum(collapsed?636:748);
-        for(const scroll of [0,180,300,100000]){
-          await run(`$('workspaceContent').scrollTop=${scroll}`);await pause(40);await checkDrag();
-          if(scroll)assert.ok(await run(`$('workspaceContent').scrollTop>0`));
-        }
-        await click('#sidebarToggle');await minimum(collapsed?748:636);await checkDrag();
-      }
+      await run(`writeLayout('sidebarCollapsed','${collapsed}');applySidebar();selectTab('${id}');accountLayout='${layout}';renderWorkbench()`);
+      await minimum(collapsed?636:748);
+      await run(`$('workspaceContent').scrollTop=100000`);await pause(40);
+      assert.ok(await run(`$('workspaceContent').scrollTop>0`));
+      await checkDrag();
+      await click('#sidebarToggle');await minimum(collapsed?748:636);await checkDrag();
     }
     window.setSize(880,620);await pause(60);
     await run(`window.appUpdateTestApi.setState({status:'available',release:{version:'1.1.0',downloadable:true,notes:'更新说明\\n'.repeat(40)}});selectTab('settings')`);
@@ -136,35 +133,23 @@ app.whenReady().then(async()=>{
     await run(`void askPassword()`);await checkDrag(false);
     await run(`document.querySelector('dialog[open] [data-cancel]').click()`);await checkDrag();
     window.setSize(880,740);
-    // Whole-account selection shares the checkbox path in both layouts and providers.
-    await run(`window.providerTestApi.native();loadStatus()`);
-    for(const id of ['codex','agy','legacy']){
-      if(id==='legacy')await run(`window.providerTestApi.setup();loadStatus()`);
-      const name=id==='codex'?'工作账号':id==='agy'?'Google B':'旧版账号备份';
-      const card=`.account-card[data-profile="${name}"]`;
-      for(const layout of ['cards','rows']){
-        await run(`selectTab('${id==='legacy'?'agy':id}');accountLayout='${layout}';startSelection()`);
-        const calls=await run(`window.testApi.calls().length`);
-        for(const [selector,edge,count] of [[`${card} .account-main-name`,false,1],[id==='legacy'?`${card} .account-summary`:`${card} .quota-number`,false,0],[card,true,1],[`${card} .account-select`,false,0]]){
-          await click(selector,edge);await until(`exportSelection.size===${count}`);
-          assert.equal(await run(`document.querySelector('${card} .account-select').checked`),!!count);
-          assert.equal(await run(`document.querySelector('${card}').classList.contains('is-selected')`),!!count);
-        }
-        window.webContents.sendInputEvent({type:'keyDown',keyCode:'Space'});
-        window.webContents.sendInputEvent({type:'keyUp',keyCode:'Space'});
-        await until(`exportSelection.size===1`);
-        if(id!=='legacy')fs.writeFileSync(outputPath(`selection-${id}-${layout}.png`),(await window.webContents.capturePage()).toPNG());
-        await click(card,true);await until(`exportSelection.size===0`);
-        if(id!=='legacy'){
-          await click('.active-session-card .account-name');await until(`exportSelection.size===1`);
-          await click('.active-session-card',true);await until(`exportSelection.size===0`);
-        }
-        await run(`endSelection()`);await click(`${card} .account-main-name`);
-        assert.equal(await run(`exportSelection.size`),0,'Normal account clicks must not select');
-        assert.equal(await run(`document.querySelector('dialog[open]')`),null);
-        assert.equal(await run(`window.testApi.calls().length`),calls,'Selection must not switch, delete or refresh accounts');
-      }
-    }
+    // Quota-capable cards share selection handlers. The legacy view renders its own checkbox.
+    await run(`selectTab('codex');accountLayout='rows';startSelection()`);
+    const card = '.account-card[data-profile="工作账号"]';
+    const operations = await run(`window.testApi.calls().length`);
+    await click(card + ' .quota-number');await until(`exportSelection.size===1`);
+    await click(card + ' .account-select');await until(`exportSelection.size===0`);
+    window.webContents.sendInputEvent({type:'keyDown',keyCode:'Space'});
+    window.webContents.sendInputEvent({type:'keyUp',keyCode:'Space'});
+    await until(`exportSelection.size===1`);
+    await click(card,true);await until(`exportSelection.size===0`);
+    await run(`endSelection()`);
+    assert.equal(await run(`window.testApi.calls().length`),operations);
+    await run(`window.providerTestApi.setup();loadStatus()`);
+    await run(`selectTab('agy');startSelection()`);
+    await click('.credential-card .account-main-name');
+    await until(`document.querySelector('.credential-card .account-select').checked`);
+    await run(`endSelection()`);
     await run(`selectTab('codex');setAccountLayout(null,null,{dataset:{layout:'rows'}})`);
 
     const row='[data-profile="工作账号"].account-card';

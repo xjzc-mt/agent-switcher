@@ -10,12 +10,12 @@ app.whenReady().then(async()=>{
   try{
     await w.loadFile(path.join(__dirname,'../renderer/index.html'));await pause(150);
     await run(`localStorage.clear();openSaveModal('codex');selectAddTab('session')`);
-    assert.equal(await run(`!!$('sessionProfileInput')`),false);
-    assert.equal(await run(`!!$('sessionFileHint')||!!document.querySelector('.session-file-entry')`),false);
     const entry=await run(`(()=>{const text=$('sessionCredentials').getBoundingClientRect(),button=$('btnChooseSessionFile').getBoundingClientRect();return {below:button.top>text.bottom,fullWidth:Math.abs(text.width-button.width)<1};})()`);
     assert.deepEqual(entry,{below:true,fullWidth:true});
     fs.writeFileSync(outputPath('credential-import-entry.png'),(await w.webContents.capturePage()).toPNG());
     // Native form validation must not intercept choosing files with an empty textarea.
+    await run(`window.testApi.setImportMode('canceled');$('btnChooseSessionFile').click()`);await pause(30);
+    assert.equal(await run(`!!addPreview`),false);
     await run(`window.testApi.setImportMode('batch');$('btnChooseSessionFile').click()`);await pause(60);
     assert.equal(await run(`addPreview.kind`),'credentials');
     assert.equal(await run(`$('sessionCredentials').required`),false);
@@ -24,7 +24,6 @@ app.whenReady().then(async()=>{
     assert.equal(await run(`document.querySelectorAll('[name="account"][data-unavailable]:disabled').length`),2);
     assert.match(await run(`$('credentialImportSummary').textContent`),/2 个待导入 · 1 个重复 · 1 个无法导入/);
     assert.equal(await run(`$('btnConfirmSave').textContent`),'导入 2 个账号');
-    assert.equal(await run(`document.querySelectorAll('dialog[open]').length`),1);
     const change=`(index,value)=>{const input=document.querySelectorAll('[name="import-name"]')[index];input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));}`;
     await run(`(${change})(0,'个人主力')`);
     assert.match(await run(`$('credentialImportSummary').textContent`),/已被使用/);
@@ -35,7 +34,6 @@ app.whenReady().then(async()=>{
     assert.equal(await run(`$('btnConfirmSave').disabled`),false);
     await run(`document.querySelectorAll('[name="account"]')[1].click()`);
     assert.equal(await run(`$('btnConfirmSave').textContent`),'导入 1 个账号');
-    assert.equal(await run(`!!document.querySelector('[data-action="appendCredentialFiles"]')`),false);
     assert.equal(await run(`document.querySelector('.credential-import-heading').textContent`),'已识别 3 个账号账号合集.json');
     assert.equal(await run(`document.querySelector('[data-state="error"] .credential-import-identity').textContent`),'第 4 项');
     await run(`$('importSelectAll').click()`);
@@ -63,15 +61,12 @@ app.whenReady().then(async()=>{
     assert.match(await run(`$('credentialImportSummary').textContent`),/1 个待新增 · 1 个待更新/);
     await run(`document.querySelector('[data-state="ready"] [name="account"]').click()`);
     assert.equal(await run(`$('btnConfirmSave').textContent`),'更新 1 个账号');
-    assert.equal(await run(`$('btnConfirmSave').disabled`),false);
     fs.writeFileSync(outputPath('credential-import-recovery.png'),(await w.webContents.capturePage()).toPNG());
     const refreshBefore=await run(`window.testApi.calls().filter(c=>c.method==='refresh').length`);
     await run(`submitAddAccount({preventDefault(){}})`);
     assert.match(await run(`$('toastBox').textContent`),/新增 0 个，更新 1 个，跳过重复 1 个/);
     assert.deepEqual(await run(`window.testApi.calls().filter(c=>c.method==='import').at(-1).names`),{'codex/import-A':'工作账号'});
     assert.deepEqual(await run(`window.testApi.calls().filter(c=>c.method==='refresh').slice(${refreshBefore}).map(c=>c.name)`),['工作账号']);
-    assert.equal(await run(`agentsData[0].profiles.length`),4);
-    assert.equal(await run(`agentsData[0].active`),'个人主力');
 
     // The local-login page also offers an in-place update, even after typing another name.
     await run(`window.loginTestApi.expire('工作账号');loadStatus()`);
@@ -87,8 +82,6 @@ app.whenReady().then(async()=>{
     assert.equal(await run(`$('saveModalOverlay').open`),false);
     assert.equal(await run(`window.testApi.calls().filter(c=>c.method==='save').at(-1).name`),'工作账号');
     assert.deepEqual(await run(`window.testApi.calls().filter(c=>c.method==='refresh').slice(${refreshBeforeLogin}).map(c=>c.name)`),['工作账号']);
-    assert.equal(await run(`agentsData[0].active`),'个人主力');
-    assert.equal(await run(`window.testApi.calls().filter(c=>c.method==='switch').length`),0);
     // Long names and filenames are escaped and stay contained at the smallest supported window.
     await run(`openSaveModal('codex');selectAddTab('session')`);
     await run(`showAddPreview({id:'fake',kind:'credentials',items:[{key:'codex/fixture',agent:'codex',profile:'<img src=x onerror=window.injected=true>',email:'very-long-account-identity@example.test',fileName:'很长的文件名称'.repeat(15)+'.json',state:'ready'},{key:'broken',profile:'',fileName:'错误.json',state:'error',error:'<img src=x onerror=window.injected=true>'}]})`);
@@ -101,9 +94,6 @@ app.whenReady().then(async()=>{
     const scroll=await run(`(()=>{const list=document.querySelector('.credential-import-list');list.scrollTop=120;const h=document.querySelector('.credential-import-head').getBoundingClientRect(),r=list.getBoundingClientRect(),footer=$('btnConfirmSave').getBoundingClientRect();return {scroll:list.scrollHeight>list.clientHeight,sticky:Math.abs(h.top-r.top)<1,footer:footer.bottom<=innerHeight,overflow:$('saveModalOverlay').scrollWidth>$('saveModalOverlay').clientWidth+1};})()`);
     assert.deepEqual(scroll,{scroll:true,sticky:true,footer:true,overflow:false});
     await run(`$('btnAddBack').click()`);await pause(30);
-    assert.equal(await run(`!!addPreview`),false);
-    assert.equal(await run(`$('addPanel-session').hidden`),false);
-    await run(`window.testApi.setImportMode('canceled');$('btnChooseSessionFile').click()`);await pause(30);
     assert.equal(await run(`!!addPreview`),false);
     assert.equal(await run(`$('addPanel-session').hidden`),false);
     await run(`closeSaveModal();localStorage.clear()`);

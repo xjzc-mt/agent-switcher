@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, KeyObject, randomUUID } from 'crypto';
 import { session, shell, DownloadItem, Session } from 'electron';
+import { manifestName, releaseAssetName, ReleaseManifest, trustedReleaseKey, verifyReleaseManifest } from './release-manifest';
 
 const REPO = 'https://github.com/xjzc-mt/agent-switcher';
 const API = 'https://api.github.com/repos/xjzc-mt/agent-switcher/releases/latest';
@@ -26,14 +27,14 @@ export interface UpdateState {
   autoCheck: boolean; lastCheckedAt?: number;
   message?: string; progress?: number; release?: UpdateRelease;
 }
-interface ReleaseRecord { info: UpdateRelease; assetUrl: string; sha256?: string }
+interface ReleaseRecord { info: UpdateRelease; assetUrl: string; manifest?: ReleaseManifest }
 interface Options {
   currentVersion: string; userDataDir: string; downloadsDir: string;
   platform: string; arch: string; onChange: (state: UpdateState) => void;
 }
 interface ActiveDownload {
   record: ReleaseRecord; directory: string; partial: string; destination: string;
-  item?: DownloadItem; timeout?: ReturnType<typeof setTimeout>;
+  receivedBytes: number; item?: DownloadItem; timeout?: ReturnType<typeof setTimeout>;
 }
 
 function releaseUrl(tag: string) { return `${REPO}/releases/tag/${encodeURIComponent(tag)}`; }
@@ -64,7 +65,7 @@ export class AppUpdates {
   private readonly file: string;
   private readonly network: Session;
 
-  constructor(private readonly options: Options) {
+  constructor(private readonly options: Options, private readonly releaseKey: KeyObject | undefined = trustedReleaseKey()) {
     this.file = path.join(options.userDataDir, 'app-updates.json');
     this.state = { currentVersion: options.currentVersion, status: 'idle', autoCheck: true };
     this.readCache();
@@ -104,12 +105,16 @@ export class AppUpdates {
       this.nextAutomaticCheck = Math.min(Number(cached.nextAutomaticCheck) || 0, now + DAY);
       this.retryAt = Math.min(Number(cached.retryAt) || 0, now + DAY);
       const record: ReleaseRecord = cached.record, info = record?.info;
+      if (info && info.name !== releaseAssetName(info.version, this.options.platform, this.options.arch)) {
+        this.nextAutomaticCheck = 0;
+        return;
+      }
       if (!info || !newerVersion(info.version, this.options.currentVersion) ||
         ![`v${info.version}`, info.version].some(tag => info.url === releaseUrl(tag) && record.assetUrl === assetUrl(tag, info.name)) ||
-        info.name !== `AgentSwitcher-${info.version}-arm64.dmg` || !Number.isSafeInteger(info.size) || info.size <= 0 ||
+        typeof info.name !== 'string' || !Number.isSafeInteger(info.size) || info.size <= 0 ||
         typeof info.notes !== 'string' || typeof info.publishedAt !== 'string') return;
-      record.sha256 = /^[a-f\d]{64}$/.test(record.sha256 || '') ? record.sha256 : undefined;
-      info.downloadable = !!record.sha256 && this.supported();
+      if (!verifyReleaseManifest(record.manifest, info, this.releaseKey)) record.manifest = undefined;
+      info.downloadable = !!record.manifest && this.supported();
       this.record = record;
       if (info.downloadable && this.ownedFile(cached.downloadedPath, info.name)) {
         this.downloadedPath = cached.downloadedPath;
@@ -117,7 +122,7 @@ export class AppUpdates {
       } else this.state.status = 'available';
     } catch { /* An absent or stale cache must not block the application. */ }
   }
-  private supported() { return this.options.platform === 'darwin' && this.options.arch === 'arm64'; }
+  private supported() { return this.options.platform === 'darwin' && ['arm64', 'x64'].includes(this.options.arch); }
   start() {
     if (this.timer || this.stopped) return;
     void this.check(false);
@@ -150,10 +155,11 @@ export class AppUpdates {
     return this.checking;
   }
   private async fetchText(url: string, limit: number): Promise<string> {
-    this.request = new AbortController();
-    const timeout = setTimeout(() => this.request?.abort(), 15000);
+    const controller = new AbortController();
+    this.request = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
     try {
-      const response = await this.network.fetch(url, { signal: this.request.signal, credentials: 'omit',
+      const response = await this.network.fetch(url, { signal: controller.signal, credentials: 'omit',
         headers: { Accept: 'application/vnd.github+json', 'User-Agent': `AgentSwitcher/${this.options.currentVersion}` } });
       if (response.status === 404) throw new Error('暂未取得可用版本：项目可能尚未公开或尚未发布 Release');
       if (response.status === 403 || response.status === 429) {
@@ -163,10 +169,22 @@ export class AppUpdates {
         throw new Error('GitHub 暂时限制检查频率，请稍后重试');
       }
       if (!response.ok) throw new Error('暂时无法连接 GitHub，请稍后重试');
-      const text = await response.text();
-      if (Buffer.byteLength(text) > limit) throw new Error('发布信息过大，无法读取');
-      return text;
-    } finally { clearTimeout(timeout); this.request = undefined; }
+      const body = response.body?.getReader();
+      if (!body) throw new Error('未收到发布信息');
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      for (;;) {
+        const { done, value } = await body.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > limit) {
+          controller.abort();
+          throw new Error('发布信息过大，无法读取');
+        }
+        chunks.push(Buffer.from(value));
+      }
+      return Buffer.concat(chunks).toString('utf8');
+    } finally { clearTimeout(timeout); if (this.request === controller) this.request = undefined; }
   }
   private async performCheck(): Promise<UpdateState> {
     this.nextAutomaticCheck = Date.now() + DAY;
@@ -180,27 +198,27 @@ export class AppUpdates {
         this.record = undefined; this.downloadedPath = undefined;
         this.changed({ status: 'current', message: '当前已是最新版本' });
       } else {
-        const name = `AgentSwitcher-${version}-arm64.dmg`;
+        const name = releaseAssetName(version, this.options.platform, this.options.arch) ?? '';
         const assets = Array.isArray(release.assets) ? release.assets.filter((asset: any) => validAsset(asset, tag)) : [];
         const matches = assets.filter((asset: any) => asset.name === name);
         const asset = matches.length === 1 ? matches[0] : undefined;
-        let hash = typeof asset?.digest === 'string' && /^sha256:[a-f\d]{64}$/i.test(asset.digest) ? asset.digest.slice(7).toLowerCase() : undefined;
-        if (asset && !hash) {
-          const sums = assets.filter((entry: any) => entry.name === 'SHA256SUMS');
-          if (sums.length === 1) {
-            const text = await this.fetchText(sums[0].browser_download_url, 65536);
-            const hashes = text.split(/\r?\n/).map(line => /^([a-f\d]{64}) [ *](.+)$/i.exec(line)).filter(match => match?.[2] === name);
-            if (hashes.length === 1) hash = hashes[0]![1].toLowerCase();
-          }
+        const manifests = assets.filter((entry: any) => entry.name === manifestName(name));
+        let manifest: ReleaseManifest | undefined;
+        if (asset && this.supported() && this.releaseKey && manifests.length === 1 && manifests[0].size <= 4096) {
+          const text = await this.fetchText(manifests[0].browser_download_url, 4096);
+          let parsed: unknown;
+          try { parsed = JSON.parse(text); } catch { /* A malformed manifest cannot authorize a download. */ }
+          if (verifyReleaseManifest(parsed, { version, name, size: asset.size }, this.releaseKey) &&
+              (asset.digest == null || (typeof asset.digest === 'string' && asset.digest.toLowerCase() === `sha256:${parsed.sha256}`))) manifest = parsed;
         }
-        if (this.record?.info.version !== version || this.record.sha256 !== hash) this.downloadedPath = undefined;
+        if (!manifest || this.record?.info.version !== version || this.record.manifest?.sha256 !== manifest.sha256) this.downloadedPath = undefined;
         this.record = { info: { version, name, size: asset?.size || 0, url: releaseUrl(tag),
           notes: typeof release.body === 'string' ? release.body.slice(0, 8000) : '',
           publishedAt: typeof release.published_at === 'string' ? release.published_at : '',
-          downloadable: !!asset && !!hash && this.supported() }, assetUrl: asset?.browser_download_url || '', sha256: hash };
-        const message = !this.supported() ? '应用内下载目前支持 macOS Apple Silicon，可在 GitHub 项目页查看其他版本' :
-          !asset ? '此版本没有可用的 Apple Silicon 安装包，可在 GitHub 项目页查看发布信息' :
-          !hash ? '此版本未提供完整性校验，可从 GitHub 项目页下载' : undefined;
+          downloadable: !!manifest && this.supported() }, assetUrl: asset?.browser_download_url || '', manifest };
+        const message = !this.supported() ? '请前往 GitHub 发布页下载适用于此系统的安装包' :
+          !asset ? '此版本没有适用于此 Mac 的安装包，可在 GitHub 项目页查看发布信息' :
+          !manifest ? '此版本缺少有效的发布者签名，可在 GitHub 项目页查看发布信息' : undefined;
         this.changed({ status: this.downloadedPath ? 'downloaded' : 'available', message });
       }
       this.save();
@@ -214,16 +232,21 @@ export class AppUpdates {
     return this.getState();
   }
 
+  private armDownloadTimeout(active: ActiveDownload, message: string, ms = 60000) {
+    clearTimeout(active.timeout);
+    active.timeout = setTimeout(() => this.failDownload(active, message), ms);
+    active.timeout.unref?.();
+  }
   async download(): Promise<UpdateState> {
     if (this.active || this.downloadedPath) return this.getState();
-    if (this.stopped || this.checking || !this.record?.info.downloadable || !this.record.sha256) throw new Error('暂无可下载的已校验版本，请先检查新版');
+    if (this.stopped || this.checking || !this.record?.info.downloadable || !this.record.manifest) throw new Error('暂无可下载的已校验版本，请先检查新版');
     fs.mkdirSync(this.options.downloadsDir, { recursive: true });
     const directory = fs.mkdtempSync(path.join(path.resolve(this.options.downloadsDir), DIRECTORY_PREFIX));
     const destination = path.join(directory, this.record.info.name);
-    const active: ActiveDownload = { record: this.record, directory, destination, partial: `${destination}.partial` };
+    const active: ActiveDownload = { record: this.record, directory, destination, partial: `${destination}.partial`, receivedBytes: 0 };
     this.active = active;
     this.changed({ status: 'downloading', progress: 0, message: undefined, errorStage: undefined });
-    active.timeout = setTimeout(() => this.failDownload(active, '无法开始下载，请重试，或从 GitHub 项目页下载'), 30000);
+    this.armDownloadTimeout(active, '无法开始下载，请重试，或从 GitHub 项目页下载', 30000);
     try { this.network.downloadURL(active.record.assetUrl); }
     catch { this.failDownload(active, '无法开始下载，请重试，或从 GitHub 项目页下载'); }
     return this.getState();
@@ -231,16 +254,32 @@ export class AppUpdates {
   private acceptDownload(event: Electron.Event, item: DownloadItem) {
     const active = this.active;
     if (!active || active.item || !item.getURLChain().includes(active.record.assetUrl)) { event.preventDefault(); return; }
-    clearTimeout(active.timeout);
+    const expected = active.record.info.size, declared = item.getTotalBytes();
+    const sizeError = '安装包大小与发布签名不符，已取消下载';
+    if ((declared > 0 && declared !== expected) || item.getReceivedBytes() > expected) {
+      event.preventDefault();
+      this.failDownload(active, sizeError);
+      return;
+    }
+    this.armDownloadTimeout(active, '下载超时，请重试，或从 GitHub 项目页下载');
     active.item = item;
     item.setSavePath(active.partial);
     item.on('updated', (_event, status) => {
       if (this.active !== active) return;
       if (status === 'interrupted') this.failDownload(active, '下载已中断，请重试，或从 GitHub 项目页下载');
-      else this.changed({ progress: Math.min(99, Math.floor(item.getReceivedBytes() / active.record.info.size * 100)) });
+      else {
+        const received = item.getReceivedBytes();
+        if (received > expected) return this.failDownload(active, sizeError);
+        if (received > active.receivedBytes) {
+          active.receivedBytes = received;
+          this.armDownloadTimeout(active, '下载超时，请重试，或从 GitHub 项目页下载');
+        }
+        this.changed({ progress: Math.min(99, Math.floor(received / active.record.info.size * 100)) });
+      }
     });
     item.once('done', (_event, status) => {
       if (this.active !== active) return;
+      clearTimeout(active.timeout);
       if (status !== 'completed') this.failDownload(active, '下载未完成，请重试，或从 GitHub 项目页下载');
       else void this.finishDownload(active);
     });
@@ -252,7 +291,7 @@ export class AppUpdates {
     if (this.active !== active) return;
     this.active = undefined;
     clearTimeout(active.timeout);
-    active.item?.cancel();
+    try { active.item?.cancel(); } catch { /* Electron may already have destroyed a completed or interrupted item. */ }
     this.cleanup(active);
     this.changed({ status: 'error', progress: undefined, message, errorStage: 'download' });
   }
@@ -260,7 +299,7 @@ export class AppUpdates {
     this.changed({ status: 'verifying', progress: 100 });
     try {
       const stat = fs.lstatSync(active.partial);
-      if (!stat.isFile() || stat.size !== active.record.info.size || await sha256(active.partial) !== active.record.sha256) throw new Error('安装包校验失败，请重新下载');
+      if (!stat.isFile() || stat.size !== active.record.info.size || await sha256(active.partial) !== active.record.manifest?.sha256) throw new Error('安装包校验失败，请重新下载');
       if (this.active !== active) return;
       fs.renameSync(active.partial, active.destination);
       this.downloadedPath = active.destination;
@@ -280,8 +319,8 @@ export class AppUpdates {
     const file = this.downloadedPath, record = this.record;
     let message: string | undefined;
     try {
-      if (!record?.sha256 || !this.ownedFile(file, record.info.name)) message = '安装包不存在，请重新下载';
-      else if (fs.statSync(file).size !== record.info.size || await sha256(file) !== record.sha256) message = '安装包已改变，请重新下载';
+      if (!record?.manifest || !this.ownedFile(file, record.info.name)) message = '安装包不存在，请重新下载';
+      else if (fs.statSync(file).size !== record.info.size || await sha256(file) !== record.manifest.sha256) message = '安装包已改变，请重新下载';
     } catch { message = '安装包无法读取，请重新下载'; }
     if (message || !file) {
       this.downloadedPath = undefined;

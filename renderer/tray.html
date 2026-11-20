@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>AgentSwitcher</title>
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="tray.css">
+  <script defer src="logos.js"></script>
+  <script defer src="tray.js"></script>
+</head>
+<body>
+  <main id="panel">
+    <header>
+      <div class="platforms" role="tablist" aria-label="平台">
+        <button role="tab" id="codex" aria-controls="content" aria-selected="true">Codex</button>
+        <button role="tab" id="agy" aria-controls="content" aria-selected="false" tabindex="-1">Antigravity</button>
+      </div>
+      <button class="icon-btn" id="refresh" aria-label="刷新当前账号额度" title="刷新各平台当前账号额度">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 9a8 8 0 0 0-13-4L3 9m0-5v5h5m-4 6a8 8 0 0 0 13 4l4-4m0 5v-5h-5"/></svg>
+      </button>
+    </header>
+    <div id="content" role="tabpanel" aria-labelledby="codex"></div>
+    <div id="switcher">
+      <button id="switch" aria-controls="choices" aria-expanded="false">
+        <span id="switchLabel">切换账号</span>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+      </button>
+      <div id="choices" role="group" aria-label="可切换账号" hidden></div>
+      <div class="panel-actions">
+        <button id="open">打开主窗口</button>
+        <button id="quit" aria-label="退出 AgentSwitcher">退出</button>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

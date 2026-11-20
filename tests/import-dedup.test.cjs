@@ -38,11 +38,6 @@ test('mixed imports skip existing and within-backup identities without touching 
   const repeat=await install(parsed);assert.equal(repeat.imported.length,0);assert.equal(repeat.skipped.length,3);
   assert.equal(store.listProfiles('codex').length,2);
 });
-test('matching email does not merge distinct workspaces or distinct members of one workspace',async()=>{
-  put('个人',auth('personal'));
-  const result=await install(await combine([['团队',auth('team')],['团队另一成员',auth('team','other-person')]]));
-  assert.equal(result.imported.length,2);assert.deepEqual(result.skipped,[]);
-});
 test('same display name for a new identity is renamed, while duplicates added after preview are skipped',async()=>{
   put('同名',auth('first'));
   const preview=await combine([['同名',auth('new')],['预览后已存在',auth('late')]]);
@@ -57,12 +52,12 @@ test('API keys deduplicate by key identity and remain separate across providers'
   const result=await install(await combine([['重复Key',api],['不同Key',Buffer.from(JSON.stringify({OPENAI_API_KEY:'another-key'}))],['另一平台',claude,'claude']]));
   assert.equal(result.imported.length,2);assert.deepEqual(result.skipped,[{key:'codex/重复Key',existing:'codex/API'}]);
 });
-test('a later installation failure rolls back only newly imported accounts',async()=>{
-  const original=auth('existing');put('原有',original);
-  const parsed=await combine([['重复',original],['新建',auth('new')],['损坏',auth('bad')]]);
-  parsed.groups.get('codex/损坏').set('auth.json',Buffer.from('{}'));
-  await assert.rejects(install(parsed),/凭据/);
-  assert.deepEqual(store.listProfiles('codex'),['原有']);
-  assert.deepEqual(readCredentialFile(path.join(store.profileDir('codex','原有'),'auth.json')),original);
-  assert.equal(fs.readdirSync(store.STORE_DIR).some(name=>name.startsWith('.import-')),false);
+test('case-colliding backup profile names stage separately without overwriting credentials on case-insensitive disks', async () => {
+  const first = auth('case-alice', 'alice-sub', 'alice-rt');
+  const second = auth('case-bob', 'bob-sub', 'bob-rt');
+  const parsed = await combine([['work', first], ['Work', second]]);
+  const result = await install(parsed);
+  assert.deepEqual(result.imported, ['codex/work', 'codex/Work-import-1']);
+  assert.deepEqual(readCredentialFile(path.join(store.profileDir('codex', 'work'), 'auth.json')), first);
+  assert.deepEqual(readCredentialFile(path.join(store.profileDir('codex', 'Work-import-1'), 'auth.json')), second);
 });

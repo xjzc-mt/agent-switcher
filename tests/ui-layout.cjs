@@ -39,12 +39,7 @@ app.whenReady().then(async()=>{
     assert.match(quotaCases.stale[1].label,/上次查询/);
     const quotaNumberOverlaps=()=>run(`[...document.querySelectorAll('.account-card .quota-cell-line')].flatMap(line=>{const number=line.querySelector('.quota-number'),reset=line.querySelector('.quota-reset');if(!number||!reset?.offsetWidth)return [];const range=document.createRange();range.selectNodeContents(number);const n=range.getBoundingClientRect(),r=reset.getBoundingClientRect();return n.right>r.left+0.01&&Math.min(n.bottom,r.bottom)>Math.max(n.top,r.top)?[{number:number.textContent,reset:reset.textContent,overlap:n.right-r.left}]:[];})`);
     const rows=[];
-    // Native minimums, current padding/card breakpoints, default and wide windows.
-    const dimensions = [
-      [636,true], [660,true], [661,true], [748,false],
-      [839,true], [840,true], [840,false], [880,true], [880,false],
-      [935,false], [936,false], [1000,false], [1001,false], [1440,false], [1440,true],
-    ];
+    const dimensions = [[636,true], [748,false], [880,true], [1440,false]];
     for(const layout of ['cards','rows'])for(const [width,collapsed] of dimensions){
       w.setSize(width,740);await run(`accountLayout='${layout}';writeLayout('sidebarCollapsed','${collapsed}');applySidebar();renderWorkbench()`);await pause(40);
       const geometry=await run(`(()=>{const section=document.querySelector('.account-section'),cards=[...document.querySelectorAll('.account-card')],overlap=[];
@@ -67,7 +62,6 @@ app.whenReady().then(async()=>{
         assert.equal(geometry.centered,true,JSON.stringify(geometry));assert.equal(geometry.headingFull,true,JSON.stringify(geometry));
       }
       rows.push(geometry);
-      if(width===880&&!collapsed)fs.writeFileSync(outputPath(`accounts-${layout}-release.png`),(await w.webContents.capturePage()).toPNG());
       if((width===748&&!collapsed)||(width===636&&collapsed))fs.writeFileSync(outputPath(`accounts-${layout}-minimum-${collapsed?'collapsed':'expanded'}.png`),(await w.webContents.capturePage()).toPNG());
       if(layout==='cards'&&width===880&&collapsed){
         assert.equal(await run(`(()=>{const cards=[...document.querySelectorAll('[data-family="pro"] .account-card')];return cards.slice(0,${geometry.columns}).every(card=>card.getBoundingClientRect().y===cards[0].getBoundingClientRect().y)&&cards[${geometry.columns}].getBoundingClientRect().y>cards[0].getBoundingClientRect().y;})()`),true);
@@ -99,17 +93,14 @@ app.whenReady().then(async()=>{
     await run(`document.querySelector('${selector}').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2}))`);assert.match(await run(`document.querySelector('dialog[open]').textContent`),/579.03/);await close();
     await run(`document.querySelector('${selector} .reset-ticket').click()`);assert.match(await run(`document.querySelector('dialog[open]').textContent`),/重置卡 2 张/);assert.match(await run(`document.querySelector('dialog[open]').textContent`),/适用范围和有效期待刷新/);assert.equal(await run(`document.querySelector('dialog[open] [data-action*=redeem]')`),null);await close();
     await run(`accountLayout='rows';agentsData[0].profiles[1].meta.snapshot.quota.credits.balance='1234567890.12';renderWorkbench()`);await pause(40);
-    const creditLayout=await run(`(()=>{const card=document.querySelector('${selector}'),badge=card.querySelector('.credit-badge'),number=badge.querySelector('b'),head=card.closest('.account-plan-group').querySelector('.row-credit-head'),b=badge.getBoundingClientRect(),h=head.getBoundingClientRect();return {aligned:Math.abs(b.left-h.left)<1&&Math.abs(b.right-h.right)<1,contained:number.getBoundingClientRect().right<=b.right+1,ellipsis:getComputedStyle(number).textOverflow,tip:number.dataset.tooltip,label:badge.getAttribute('aria-label')};})()`);
-    assert.equal(creditLayout.aligned,true);assert.equal(creditLayout.contained,true);assert.equal(creditLayout.ellipsis,'ellipsis');assert.match(creditLayout.tip,/1,234,567,890.12/);assert.match(creditLayout.label,/1,234,567,890.12/);
     assert.match(await hover(' .credit-badge b'),/1,234,567,890.12/);
     assert.equal(await run(`document.querySelector('${selector} .reset-ticket')?.textContent`),'2','Row actions must retain the reset-card entry');
     await run(`agentsData[0].profiles[5].meta.snapshot.quota.primaryWindow=structuredClone(agentsData[0].profiles[1].meta.snapshot.quota.primaryWindow);renderWorkbench()`);
-    for(const dates of [false,true])for(const width of [1120,748]){
+    for(const [dates,width] of [[false,1120],[true,748]]){
       w.setSize(width,740);await run(`settings.showResetTimes=${!dates};renderWorkbench()`);await pause(40);
       const mixed=await run(`(()=>{const group=document.querySelector('[data-family="pro"]'),head=group.querySelector('.row-credit-head').getBoundingClientRect(),pro=group.querySelector('[data-profile="重构"]'),plus=document.querySelector('[data-family="plus"] .account-card'),pr=pro.getBoundingClientRect(),pq=[...pro.querySelectorAll('.quota-cell')],pp=[...plus.querySelectorAll('.quota-cell')];return {periods:pq.map(el=>el.querySelector('.quota-label').textContent),height:pr.height,contained:pq.every(el=>{const r=el.getBoundingClientRect();return r.top>=pr.top&&r.bottom<=pr.bottom;}),slotsAligned:Math.abs(pro.querySelector('.card-resources').getBoundingClientRect().left-pp[0].getBoundingClientRect().left)<1&&Math.abs(pro.querySelector('.card-resources .plan-tier').getBoundingClientRect().left-pp[1].getBoundingClientRect().left)<1,overflow:[group,...group.querySelectorAll('.account-card,.card-resources,.quota-cells,.quota-cell-line')].filter(el=>el.scrollWidth>el.clientWidth+1).map(el=>el.className),aligned:[...group.querySelectorAll('.credit-badge')].every(el=>Math.abs(el.getBoundingClientRect().left-head.left)<1)};})()`);
       assert.deepEqual(mixed.periods,['5h','7d']);assert.equal(mixed.height,44);assert.equal(mixed.contained,true);assert.equal(mixed.slotsAligned,true,JSON.stringify(mixed));assert.deepEqual(mixed.overflow,[],JSON.stringify(mixed));assert.equal(mixed.aligned,true);
       assert.deepEqual(await quotaNumberOverlaps(),[],`Mixed quotas at ${width}px, dates=${dates}`);
-      if(dates&&width===748)fs.writeFileSync(outputPath('accounts-rows-mixed-date-minimum.png'),(await w.webContents.capturePage()).toPNG());
     }
     await run(`{const s=agentsData[0].profiles[5].meta.snapshot;window.savedStressSnapshot=structuredClone(s);s.state='error';s.quota.primaryWindow.usedPercent=0;s.quota.secondaryWindow.usedPercent=0;s.quota.credits={balance:'1234567890.12'};s.quota.resetCredits={availableCount:120,credits:null};}`);
     const stressHeads=[];

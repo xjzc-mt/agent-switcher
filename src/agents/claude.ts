@@ -22,10 +22,12 @@ export class ClaudeAgent extends BaseAgent {
   private pendingStatus?: Promise<StatusResult>;
   identityFromAuth(creds: Credentials | null): Identity | undefined {
     const token = creds?.claudeAiOauth?.refreshToken || creds?.tokens?.refresh_token || creds?.claudeAiOauth?.accessToken || creds?.tokens?.access_token || creds?.sessionKey;
-    if (!token) return undefined;
+    if (typeof token !== 'string' || !token) return undefined;
     const info = jwtInfo(creds?.tokens?.id_token);
-    const email = creds?.account?.email || creds?.email || info.email;
-    return { id: info.sub || email || fingerprint(token), email };
+    const rawEmail = creds?.account?.email || creds?.email || info.email;
+    const email = typeof rawEmail === 'string' && rawEmail.trim() ? rawEmail.trim() : undefined;
+    const sub = typeof info.sub === 'string' && info.sub ? info.sub : undefined;
+    return { id: sub || email?.toLowerCase() || fingerprint(token), email };
   }
   switchSupport(): string | undefined {
     if (this.observed?.available && this.observed.authMethod !== 'claude.ai') return 'Claude Code 正在使用非订阅认证，请先在官方 CLI 中更改认证方式。';

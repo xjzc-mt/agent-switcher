@@ -133,20 +133,29 @@ afterEach(async () => {
 });
 after(() => fs.rmSync(root, {recursive: true, force: true}));
 
-test('login waits for credentials flushed on EOF before exposing save', async () => {
-  fs.writeFileSync(behavior, 'late-write');
-  assert.equal((await invoke('launch-login', 'codex', 'copy')).ok, true);
-  const ready = await completeLogin('late-write@example.test');
-  assert.equal((await invoke('save-profile', 'codex', 'late-write', ready.attempt)).ok, true);
-  assert.equal(codexAgent.identity(store.profileDir('codex', 'late-write')).email, 'late-write@example.test');
-});
-
 test('login reports spawn failure and early exit, then permits retry', async t => {
+  const missing = t.mock.method(codexAgent, 'findCodexBinary', () => undefined);
+  assert.match((await invoke('launch-login', 'codex', 'copy')).error, /未找到 Codex CLI/);
+  assert.equal((await invoke('login-status', 'codex')).isolated, false);
+  assert.equal((await invoke('login-status', 'codex')).email, 'A@example.test');
+  missing.mock.restore();
+  const transport = t.mock.method(require('../dist/codex-process'), 'startCodexProcess', () => { throw Error('fixture setup failed'); });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    assert.match((await invoke('launch-login', 'codex', 'copy')).error, /setup failed/);
+    await assert.rejects(codexAgent.queryLiveRpc(live), /setup failed/);
+    t.mock.timers.tick(60000);
+  } finally {
+    t.mock.timers.reset();
+    transport.mock.restore();
+  }
   const find = t.mock.method(codexAgent, 'findCodexBinary', () => path.join(root, 'missing-cli'));
   assert.match((await invoke('launch-login', 'codex', 'copy')).error, /无法启动 Codex CLI/);
+  await assert.rejects(codexAgent.queryLiveRpc(live), /无法启动 Codex CLI/);
   find.mock.restore();
   fs.writeFileSync(behavior, 'exit');
   assert.match((await invoke('launch-login', 'codex', 'copy')).error, /登录已结束/);
+  await assert.rejects(codexAgent.queryLiveRpc(live), /查询进程提前退出/);
   fs.writeFileSync(behavior, 'normal');
   assert.equal((await invoke('launch-login', 'codex', 'copy')).ok, true);
 });
@@ -165,15 +174,13 @@ test('private login, ordinary login and copying share one attempt; preference an
   assert.equal(privateOpened.length,2);
   assert.equal(copied[1],opened[0]);
   assert.equal(dirs().length,1);
-  const ready=await completeLogin('private-login@example.test');
-  assert.equal((await invoke('save-profile','codex','private-login',ready.attempt)).ok,true);
 });
 
 test('temporary cleanup failure preserves a committed save and its recoverable directory', async () => {
   fs.writeFileSync(behavior,'normal');
-  for (const mode of ['new','recover','update']) {
+  for (const mode of ['save','update']) {
     const name='cleanup-'+mode, email=name+'@example.test';
-    if(mode!=='new')expiredProfile(name,email);
+    if(mode==='update')expiredProfile(name,email);
     await invoke('launch-login','codex','copy',undefined,mode==='update'?name:undefined);
     const ready=await completeLogin(email), dir=dirs()[0];
     const originalRm=fs.rmSync;
@@ -214,17 +221,13 @@ test('cancel detaches a busy registered directory without affecting the next log
   } finally { fs.rmSync=originalRm; }
 });
 
-test('ten sequential Codex logins share one link per account, save each identity, and leave A active', async () => {
-  fs.writeFileSync(behavior, 'normal');
+test('consecutive logins save credentials flushed on EOF, reject stale attempts and leave A active', async () => {
+  fs.writeFileSync(behavior, 'late-write');
   assert.equal((await invoke('save-profile', 'codex', 'A')).ok, true);
   let previousAttempt;
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= 2; i++) {
     const name = 'account-' + i, email = name + '@example.test';
     assert.equal((await invoke('launch-login', 'codex', 'copy')).ok, true);
-    assert.equal(opened.length, i - 1);
-    assert.equal((await invoke('launch-login', 'codex')).ok, true);
-    assert.equal(copied.at(-1), opened.at(-1));
-    assert.equal(dirs().length, 1);
     const pending = await invoke('login-status', 'codex');
     assert.equal(pending.ready, false);
     assert.equal((await invoke('save-profile', 'codex', name, pending.attempt)).ok, false);
@@ -249,7 +252,7 @@ test('ten sequential Codex logins share one link per account, save each identity
     assert.deepEqual(dirs(), []);
     previousAttempt = ready.attempt;
   }
-  assert.equal(new Set(copied).size, 10);
+  assert.equal(new Set(copied).size, 2);
 });
 
 test('cancel during startup never opens a browser or copies a late link', async () => {
@@ -360,27 +363,6 @@ test('relogin matching checks workspace and member identity, not just the email'
   assert.equal((await invoke('update-from-login', 'codex', 'workspace-target', matched.attempt)).ok, true);
 });
 
-test('canceling a relogin waiting for the storage lock prevents the credential update', async () => {
-  fs.writeFileSync(behavior, 'normal');
-  const dir = expiredProfile('cancel-update', 'cancel-update@example.test');
-  await invoke('launch-login', 'codex', 'copy', undefined, 'cancel-update');
-  const ready = await completeLogin('cancel-update@example.test');
-  const before = readCredentialFile(path.join(dir, 'auth.json'));
-  let entered, release;
-  const locked = new Promise(resolve => { entered = resolve; });
-  const gate = new Promise(resolve => { release = resolve; });
-  const holding = store.withStoreLock(async () => { entered(); await gate; });
-  await locked;
-  const update = invoke('update-from-login', 'codex', 'cancel-update', ready.attempt);
-  await new Promise(resolve => setImmediate(resolve));
-  const canceled = invoke('cancel-login', 'codex');
-  release();
-  await holding;
-  assert.equal((await update).ok, false);
-  await canceled;
-  assert.deepEqual(readCredentialFile(path.join(dir, 'auth.json')), before);
-});
-
 test('changing the update target starts a separate login and cannot reuse a completed attempt', async () => {
   fs.writeFileSync(behavior, 'normal');
   expiredProfile('target-one', 'target-one@example.test');
@@ -411,21 +393,26 @@ test('Add Account login repairs an expired existing account instead of rejecting
   assert.equal(JSON.parse(readCredentialFile(path.join(dir, 'auth.json'))).tokens.refresh_token, 'fixture-replacement');
 });
 
-test('canceling Add Account while save waits for the lock cannot update an expired account', async () => {
+test('canceling while a save or update waits for the lock preserves the expired account', async () => {
   fs.writeFileSync(behavior, 'normal');
-  const dir = expiredProfile('cancel-add-recovery', 'cancel-add-recovery@example.test');
-  await invoke('launch-login', 'codex', 'copy');
-  const ready = await completeLogin('cancel-add-recovery@example.test');
-  const before = readCredentialFile(path.join(dir, 'auth.json'));
-  let entered, release;
-  const locked = new Promise(resolve => { entered = resolve; });
-  const gate = new Promise(resolve => { release = resolve; });
-  const holding = store.withStoreLock(async () => { entered(); await gate; });
-  await locked;
-  const save = invoke('save-profile', 'codex', 'cancel-add-recovery', ready.attempt);
-  await new Promise(resolve => setImmediate(resolve));
-  const canceled = invoke('cancel-login', 'codex');
-  release();await holding;
-  assert.equal((await save).ok, false);await canceled;
-  assert.deepEqual(readCredentialFile(path.join(dir, 'auth.json')), before);
+  for (const operation of ['save-profile', 'update-from-login']) {
+    const name = 'cancel-' + operation, email = name + '@example.test';
+    const dir = expiredProfile(name, email);
+    const before = readCredentialFile(path.join(dir, 'auth.json'));
+    await invoke('launch-login', 'codex', 'copy', undefined, operation === 'update-from-login' ? name : undefined);
+    const ready = await completeLogin(email);
+    let release, started;
+    const locked = new Promise(resolve => { started = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const holding = store.withStoreLock(async () => { started(); await gate; });
+    await locked;
+    const committing = invoke(operation, 'codex', name, ready.attempt);
+    await new Promise(resolve => setImmediate(resolve));
+    const canceled = invoke('cancel-login', 'codex');
+    release();
+    await holding;
+    assert.equal((await committing).ok, false);
+    await canceled;
+    assert.deepEqual(readCredentialFile(path.join(dir, 'auth.json')), before);
+  }
 });

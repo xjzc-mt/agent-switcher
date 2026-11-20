@@ -1,29 +1,3 @@
-// Official Brand SVGs
-const LOGOS = {
-  codex: `
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="color: #10a37f;">
-      <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.124 7.1954a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.6622zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z" fill="currentColor"/>
-    </svg>
-  `,
-  claude: `
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="color: #D97706;">
-      <path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z" fill="currentColor"/>
-    </svg>
-  `,
-  agy: `
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <linearGradient id="gemini-grad-light" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#4E8BF5" />
-          <stop offset="50%" stop-color="#9B72CB" />
-          <stop offset="100%" stop-color="#F28B82" />
-        </linearGradient>
-      </defs>
-      <path d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81" fill="url(#gemini-grad-light)"/>
-    </svg>
-  `
-};
-
 const DEFAULT_AGENTS = [
   { id: 'codex', label: 'Codex' },
   { id: 'agy', label: 'Antigravity' },
@@ -43,10 +17,12 @@ let inputModality = 'pointer';
 const exportSelection = new Set();
 let selecting = false, filter = '';
 let modalAgent, modalPollTimer, loading, refreshing, refreshBatch;
+let switchingAccount = false;
 const refreshRetryAt = new Map();
 let addTab = 'local', addPreview, encryptedImportId, credentialUpdate, addBusy = false, localAccountReady = false, detectedExistingProfile = undefined, detectedExistingUpdatable = false, addSession = 0;
 let detectedLoginAttempt, suggestedLocalName = '', betweenLocalAccounts = false, isolatedLoginRequested = false, lastLoginMode = 'open';
 let quotaRefreshTimer;
+let statusRetryAt = 0;
 const $ = id => document.getElementById(id);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const stateLabels = { ok: '查询成功', error: '查询失败', expired: '凭据失效', unsupported: '暂不支持', unverified: '尚未查询', 'signed-out': '未检测到凭据' };
@@ -115,8 +91,8 @@ function planLabel(status, className='', agentId=currentTab) {
   const info=AccountPolicy.planInfo(status,agentId);
   return `<span class="${className}"${info.tier?` data-plan-tier="${escapeHTML(info.tier)}"`:''}>${escapeHTML(info.label)}${info.tier?`<span aria-hidden="true">·</span>${escapeHTML(info.tier)}`:''}</span>`;
 }
-function canUpdateCredentials(status) {
-  return credentialsExpired(status) || (status?.state === 'error' && ['authentication-rejected','account-unavailable'].includes(status.authFailure));
+function canUpdateCredentials(profile, status) {
+  return credentialsExpired(status) || !!profile?.meta?.snapshot?.stagedReplacement || (status?.state === 'error' && ['authentication-rejected','account-unavailable'].includes(status.authFailure));
 }
 function queryWarning(status) {
   if(status?.state!=='error'||credentialsExpired(status)||!windows(status).length)return '';
@@ -228,7 +204,10 @@ function platformOptions(list, selected) {
 }
 function selectTab(id) {
   if (!agentEnabled(id)) return;
-  if (id !== 'settings') lastAgentTab = id;
+  if (id !== 'settings' && id !== lastAgentTab) {
+    lastAgentTab = id;
+    syncTray();
+  }
   currentTab = id; filter = ''; selecting = false; exportSelection.clear();
   document.querySelectorAll('.nav-item').forEach(el => {const active=el.id===`nav-${id}`;el.classList.toggle('active',active);if(active)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');});
   $('viewTitle').textContent = id === 'settings' ? '设置' : `${agentsData.find(a => a.id === id)?.label || id} 账号管理`;
@@ -276,7 +255,7 @@ function renderCurrentSectionHtml(agent, current, status, statusTip) {
       <article class="active-session-card ${selecting && !current.unsaved ? 'selectable' : ''} ${selecting && activeChecked ? 'is-selected' : ''}" data-account-context data-agent="${agent.id}" data-profile="${escapeHTML(current.name)}" tabindex="0" ${selecting && !current.unsaved ? `data-action="toggleExport" role="button" aria-pressed="${activeChecked}"` : 'aria-haspopup="dialog" aria-keyshortcuts="Enter Shift+F10"'} aria-label="当前使用账号 ${escapeHTML(title)}">
         <div class="session-card-header">
           <div class="session-meta-group"><div class="platform-logo-big">${LOGOS[agent.id]}</div><div class="session-title-group"><div class="detail-title"><strong class="account-name" data-tooltip-overflow data-tooltip="${escapeHTML(title)}">${escapeHTML(title)}</strong>${status.plan ? planLabel(status,'current-plan') : ''}${problem ? `<span class="pill-badge pill-query-error" title="${escapeHTML(statusTip)}">${escapeHTML(stateLabels[status.state])}</span>` : ''}</div><div class="session-account-line"><span class="session-account-email" data-tooltip-overflow data-tooltip="${escapeHTML(account)}">${escapeHTML(account)}</span></div></div></div>
-          ${creditBadge(status,true)}<div class="detail-header-actions">${resetTicket(agent,current,status)}${current.unsaved ? button('openSaveModal', '保存当前账号', agent.id) : selecting ? `<span class="selection-check ${activeChecked ? 'checked' : ''}" aria-hidden="true">${activeChecked ? '✓' : ''}</span>` : `${canUpdateCredentials(status) ? button('openCredentialUpdate', '更新', agent.id, current.name) : !status.available ? button('reloginAccount', '登录', agent.id, current.name) : ''}${['codex', 'agy'].includes(agent.id) ? button('handleRestartClient', `${icon('restart')} 重启客户端`, agent.id, undefined, 'btn btn-sm btn-restart-client') : ''}`}</div>
+          ${creditBadge(status,true)}<div class="detail-header-actions">${resetTicket(agent,current,status)}${current.unsaved ? button('openSaveModal', '保存当前账号', agent.id) : selecting ? `<span class="selection-check ${activeChecked ? 'checked' : ''}" aria-hidden="true">${activeChecked ? '✓' : ''}</span>` : `${canUpdateCredentials(current, status) ? button('openCredentialUpdate', '更新', agent.id, current.name) : !status.available ? button('reloginAccount', '登录', agent.id, current.name) : ''}${['codex', 'agy'].includes(agent.id) ? button('handleRestartClient', `${icon('restart')} 重启客户端`, agent.id, undefined, 'btn btn-sm btn-restart-client') : ''}`}</div>
         </div>
         <div class="current-quota">${quotaCells(status, agent.id, true)}</div>
       </article></section>`;
@@ -330,7 +309,113 @@ function renderWorkbench() {
 }
 function sortedProfiles(agent) {
   const now = Date.now();
-  return agent.profiles.filter(p => !p.isActive).sort((a, b) => hasQuota(agent) ? AccountPolicy.compare({ name: a.name, status: profileStatus(agent, a) }, { name: b.name, status: profileStatus(agent, b) }, now, agent.id) : a.name.localeCompare(b.name,'zh-CN'));
+  const pool = agent.profiles.filter(p => !p.isActive);
+  if (!hasQuota(agent)) return pool.sort((a,b) => a.name.localeCompare(b.name,'zh-CN'));
+  const order = [...new Set([...readAccountGroups(agent.id).order, 'pro', 'plus', 'go', 'free'])];
+  const rank = key => order.includes(key) ? order.indexOf(key) : order.length;
+  return pool.sort((a,b) => {
+    const left = profileStatus(agent,a), right = profileStatus(agent,b);
+    return rank(AccountPolicy.planInfo(left,agent.id).key) - rank(AccountPolicy.planInfo(right,agent.id).key)
+      || AccountPolicy.compare({ name:a.name, status:left }, { name:b.name, status:right }, now, agent.id);
+  });
+}
+
+function trayAccount(agent, profile, positions, freshRows) {
+  const status = profileStatus(agent, profile);
+  const expired = canUpdateCredentials(profile, status);
+  let nickname = typeof profile.meta.label === 'string' && profile.meta.label || profile.name;
+  // Imported profile names can consist of, or contain, the full login email.
+  if (nickname.includes('@')) {
+    const email = profile.meta.email || status?.account;
+    if (email && nickname.includes(email)) nickname = nickname.replaceAll(email, '').replace(/^[\s_-]+|[\s_-]+$/g, '');
+    const privacyLabel = `账号 ${positions.get(profile)}`;
+    nickname = nickname && !nickname.includes('@') ? `${nickname} · ${privacyLabel}` : privacyLabel;
+  }
+  const plan = (status?.plan || status?.quota?.plan) && AccountPolicy.planInfo(status,agent.id).label;
+  const slots = hasQuota(agent) && !expired ? AccountPolicy.quotaSlots(status, agent.id) : [];
+  const row = {
+    name: profile.name, label: nickname, expired,
+    plan: typeof plan === 'string' && !plan.includes('@') ? plan : undefined,
+    windows: slots.map(w => ({
+      label: quotaWindowLabel(w),
+      remaining: Number.isFinite(w.usedPercent) ? remaining(w) : undefined,
+    })),
+  };
+  if (row.windows.some(w => w.remaining !== undefined)) {
+    row.cached = AccountPolicy.stale(status, Date.now(), agent.id);
+    if (!row.cached) freshRows.push({ row, status, agent: agent.id });
+  }
+  return row;
+}
+
+let trayGroups, lastTrayState, lastTrayJson, freshTrayRows = [];
+function syncTray(rebuild = false, cacheChanged = false) {
+  if (!window.api.updateTray) return;
+  if (rebuild) {
+    freshTrayRows = [];
+    trayGroups = DEFAULT_AGENTS.filter(a => agentEnabled(a.id)).map(({id}) => {
+      const agent = agentsData.find(a => a.id === id);
+      if (!agent || statusRetryAt) return { id, unavailable:'账号状态未取得', total:0, alternates:[], unmanaged:false, canRefresh:false };
+      const active = agent.profiles.find(p => p.isActive);
+      const pool = sortedProfiles(agent);
+      const positions = new Map(agent.profiles.map((profile, i) => [profile, i + 1]));
+      const alternates = agent.switchUnsupported ? [] : pool
+        .filter(p => !canUpdateCredentials(p, profileStatus(agent, p)) && p.meta.snapshot?.available !== false)
+        .map(p => trayAccount(agent, p, positions, freshTrayRows));
+      const unmanaged = !active && agent.status.available && canSaveLocal(agent);
+      const unavailable = !active && !unmanaged && agent.status.state !== 'signed-out' ? '登录状态未确认' : undefined;
+      return { id, current: active && trayAccount(agent, active, positions, freshTrayRows), unmanaged, unavailable, canRefresh:hasQuota(agent),
+        alternates, total:pool.length };
+    });
+  }
+  if (!trayGroups) return;
+  const refreshing = trayGroups.some(g => (g.current || g.unmanaged) && refreshQueue.get(refreshKey(g.id,g.current?.name)));
+  if (!rebuild && !cacheChanged && refreshing === lastTrayState?.refreshing &&
+      switchingAccount === lastTrayState?.switching && lastAgentTab === lastTrayState?.selectedAgent) return;
+  const state = { groups: trayGroups, refreshing, switching:switchingAccount, selectedAgent:lastAgentTab };
+  lastTrayState = state;
+  const serialized = JSON.stringify(state);
+  if (serialized !== lastTrayJson) {
+    lastTrayJson = serialized;
+    window.api.updateTray(state);
+  }
+}
+
+async function handleTrayCommand({action, agent:id, name}) {
+  if (loading && action !== 'add' && action !== 'open') await loading;
+  if (switchingAccount || action === 'open') return;
+  if (document.querySelector('dialog[open]')) {
+    if (action === 'switch') await window.api.revealTrayMain?.();
+    return;
+  }
+  if (action === 'add') return openSaveModal(id || lastAgentTab);
+  if (statusRetryAt) {
+    if (action === 'switch') throw new Error('暂时无法读取账号列表，请稍后重试');
+    return;
+  }
+  if (action === 'refresh') {
+    const live = agentsData.filter(a => agentEnabled(a.id) && hasQuota(a) && (a.active || a.status.available));
+    await Promise.all(live.map(a => requestRefresh(a.id, a.active, true, 2, 'tray')));
+    return;
+  }
+  const agent = agentsData.find(a => a.id === id && agentEnabled(a.id));
+  if (!agent) {
+    if (action === 'switch') throw new Error('账号列表已变更，请重新选择');
+    return;
+  }
+  if (action === 'save') {
+    if (!agent.active && agent.status.available && canSaveLocal(agent)) { selectTab(id); return openSaveModal(id); }
+    return;
+  }
+  const profile = agent.profiles.find(p => p.name === name);
+  if (!profile) throw new Error('账号列表已变更，请重新选择');
+  if (canUpdateCredentials(profile,profileStatus(agent,profile))) {
+    if (action === 'switch') await window.api.revealTrayMain?.();
+    if (!document.querySelector('dialog[open]')) { selectTab(id); return openCredentialUpdate(id,name); }
+  } else if (action === 'switch' && !profile.isActive) {
+    if (agent.switchUnsupported) throw new Error(agent.switchUnsupported);
+    await handleSwitchProfile(id,name,'tray');
+  }
 }
 function accountStatusNote(status) {
   if(credentialsExpired(status))return `凭据失效，请更新凭据。${status?.quota?'以下数值为上次查询记录。':''}`;
@@ -345,7 +430,7 @@ function renderCardHTML(agent, p) {
   const email = p.meta.email || status?.account || '账号信息未识别';
   const checked = exportSelection.has(profileKey(agent.id, p.name));
   const info=AccountPolicy.planInfo(status,agent.id);
-  const needsLogin=canUpdateCredentials(status);
+  const needsLogin=canUpdateCredentials(p, status);
   if (!hasQuota(agent)) return `<article class="account-card credential-card ${selecting?'selectable':''} ${selecting&&checked?'is-selected':''}" role="listitem" data-account-context data-agent="${agent.id}" data-profile="${escapeHTML(p.name)}" ${selecting?'data-action="toggleExport"':'tabindex="0" aria-haspopup="dialog" aria-keyshortcuts="Enter Shift+F10"'} aria-label="${escapeHTML(p.meta.label||p.name)}"><div class="account-summary"><div class="account-title-row"><strong class="account-main-name" data-tooltip-overflow data-tooltip="${escapeHTML(p.meta.label||p.name)}">${escapeHTML(p.meta.label||p.name)}</strong>${status?.plan?planLabel(status,'plan-tier',agent.id):''}</div><div class="account-secondary"><span class="account-email-sub" data-tooltip-overflow data-tooltip="${escapeHTML(email)}">${escapeHTML(email)}</span></div></div><div class="card-actions">${selecting?`<input type="checkbox" class="account-select" data-action="toggleExport" data-agent="${agent.id}" data-profile="${escapeHTML(p.name)}" ${checked?'checked':''} aria-label="选择 ${escapeHTML(p.name)}">`:agent.switchUnsupported?'':button('handleSwitchProfile','切换',agent.id,p.name,'btn btn-brand-soft btn-switch')}</div></article>`;
   return `<article class="account-card ${selecting ? 'selectable' : ''} ${selecting && checked ? 'is-selected' : ''}" role="listitem" data-account-context data-agent="${agent.id}" data-profile="${escapeHTML(p.name)}" ${selecting?'data-action="toggleExport"':'tabindex="0" aria-haspopup="dialog" aria-keyshortcuts="Enter Shift+F10"'} aria-label="${escapeHTML(p.meta.label||p.name)}">
     <div class="account-summary"><div class="account-title-row"><strong class="account-main-name" ${accountLayout==='cards'?'data-tooltip-overflow':''} data-tooltip="${escapeHTML((p.meta.label||p.name)+' · '+email)}">${escapeHTML(p.meta.label || p.name)}</strong>${queryWarning(status)}</div>
@@ -383,6 +468,7 @@ function moveAccountGroup(id, _profile, target) {
   const saved = readAccountGroups(id);
   saved.order = [...keys, ...saved.order.filter(key => !keys.includes(key))];
   writeLayout(`accountGroups.${id}`, JSON.stringify(saved));
+  syncTray(true);
   renderCards();
   focusAccountGroup(target.dataset.family, 'moveAccountGroup', String(-Number(target.dataset.direction)));
 }
@@ -428,8 +514,7 @@ function renderCards() {
     group.pro = agent.id === 'codex' && group.info.key === 'pro';
   }
   const saved = readAccountGroups(agent.id), searching = !!filter.trim();
-  const familyOrder = [...new Set([...saved.order, 'pro', 'plus', 'go', 'free'])];
-  const ordered=[...groups.values()].filter(g=>g.profiles.length).sort((a,b)=>{const rank=k=>familyOrder.includes(k)?familyOrder.indexOf(k):familyOrder.length;return rank(a.info.key)-rank(b.info.key);});
+  const ordered=[...groups.values()].filter(g=>g.profiles.length);
   const credits = pool.some(p => creditBadge(profileStatus(agent,p)));
   const summary = agent.id==='agy' && pool.some(p => AccountPolicy.modelBucket(profileStatus(agent,p),'claude'));
   grid.innerHTML = profiles.length ? ordered.map((group, index)=>{
@@ -494,7 +579,9 @@ function renderSettings() {
       <div id="appUpdateNotes" class="app-update-notes" role="region" aria-label="更新说明" hidden><p></p></div>
       <p id="appUpdateMessage" class="app-update-hint" role="status" hidden></p>
       <p id="appUpdateInstallHint" class="app-update-hint" hidden></p>
-      <div class="app-update-footer"><label class="app-update-auto"><input id="autoCheckUpdates" type="checkbox">自动检查新版</label><button class="btn btn-sm app-update-project" data-action="appUpdate" data-update-action="project">${icon('github')}<span>GitHub</span></button></div>
+      <div class="app-update-footer"><label class="app-update-auto"><input id="autoCheckUpdates" type="checkbox">自动检查新版</label><div class="app-update-actions">
+        <button class="btn btn-sm" data-action="exportDiagnostics">导出故障报告</button><button class="btn btn-sm app-update-project" data-action="appUpdate" data-update-action="project">${icon('github')}<span>GitHub</span></button>
+      </div></div>
     </div></section></div>`;
   updateAppUpdatePanel();
   readAppUpdateState();
@@ -642,9 +729,11 @@ function accountDetailsContent(id,name,dialog) {
   const agent=agentsData.find(a=>a.id===id);
   const plan=status?.plan?(id==='agy'?escapeHTML(status.plan):planLabel(status,'',id)):'未取得';
   if (!hasQuota(agent)) return `<p class="account-dialog-email">${escapeHTML(p.meta.email||status?.account||'账号信息未识别')}</p>${status?.plan?`<div class="account-detail-line"><span>套餐</span><b>${plan}</b></div>`:''}<p class="detail-note provider-detail-note">${escapeHTML(p.unsaved?(status?.extra||'来自官方 CLI 的当前登录状态。'):agent?.switchUnsupported?'文件凭据备份；可重命名、导出或从本机移除。':'文件凭据备份；切换后请重新打开终端会话。')}</p>${accountDetailActions(id,name,p,dialog)}`;
+  const staged = p.isActive && p.meta.snapshot?.stagedReplacement ? p.meta.snapshot : undefined;
+  const candidateNote = staged ? `<p class="detail-note detail-status-note">新凭据验证 · ${escapeHTML(staged.extra || '等待验证')}</p>` : '';
   const credit=creditInfo(status),email=p.meta.email||status?.account||'未取得';
   const refresh=button('refreshSelected',icon('restart'),id,name,'btn-icon-ghost detail-refresh').replace('<button ','<button data-refresh-account data-tooltip-instant data-tooltip="刷新额度" aria-label="刷新额度" ');
-  return `<p class="account-dialog-email">${escapeHTML(email)}</p><div class="account-detail-line"><span>套餐</span><b>${plan}</b></div>${id==='codex'||credit?`<div class="account-detail-line"><span>Credits</span><b>${escapeHTML(credit?.balance??'未取得')}</b></div>`:''}<div class="detail-quota-list">${accountDetailStatus(status)}${(id==='agy'?(status?.quota?.buckets||[]).flatMap(bucket=>bucket.windows.map(w=>({...w,model:bucket.label}))):windows(status)).map(w=>`<div class="account-detail-line"><span>${escapeHTML(w.model?`${w.model} · ${quotaWindowLabel(w)}`:quotaWindowLabel(w))} 剩余</span><b>${remaining(w)===0&&w.usedPercent<100?'&lt;1':remaining(w)}%</b><span>${Number.isFinite(w.resetsAt)?resetDate(w.resetsAt):'重置时间未提供'}</span></div>`).join('')}</div><div class="detail-update-row"><span>${status?.fetchedAt?'上次更新：':''}${escapeHTML(time(status?.fetchedAt))}</span>${refresh}</div>${accountDetailActions(id,name,p,dialog)}`;
+  return `<p class="account-dialog-email">${escapeHTML(email)}</p><div class="account-detail-line"><span>套餐</span><b>${plan}</b></div>${id==='codex'||credit?`<div class="account-detail-line"><span>Credits</span><b>${escapeHTML(credit?.balance??'未取得')}</b></div>`:''}<div class="detail-quota-list">${accountDetailStatus(status)}${candidateNote}${(id==='agy'?(status?.quota?.buckets||[]).flatMap(bucket=>bucket.windows.map(w=>({...w,model:bucket.label}))):windows(status)).map(w=>`<div class="account-detail-line"><span>${escapeHTML(w.model?`${w.model} · ${quotaWindowLabel(w)}`:quotaWindowLabel(w))} 剩余</span><b>${remaining(w)===0&&w.usedPercent<100?'&lt;1':remaining(w)}%</b><span>${Number.isFinite(w.resetsAt)?resetDate(w.resetsAt):'重置时间未提供'}</span></div>`).join('')}</div><div class="detail-update-row"><span>${status?.fetchedAt?'上次更新：':''}${escapeHTML(time(status?.fetchedAt))}</span>${refresh}</div>${accountDetailActions(id,name,p,dialog)}`;
 }
 function updateAccountDetails() {
   document.querySelectorAll('dialog[data-account-details]:not([data-closing])').forEach(dialog=>{
@@ -699,6 +788,8 @@ async function loadStatus(refreshExternal = false) {
   if (loading) return loading;
   loading = (async () => {
     agentsData = check(await window.api.getStatus(refreshExternal===true,currentTab));
+    statusRetryAt = 0;
+    syncTray(true);
     agentsData.forEach(a => { $(`badge-count-${a.id}`).textContent = a.profiles.length; $(`logo-nav-${a.id}`).innerHTML = LOGOS[a.id]; });
     syncSidebarLabels();
     if ($('saveModalOverlay')?.open) {
@@ -710,16 +801,26 @@ async function loadStatus(refreshExternal = false) {
     renderWorkbench();
     updateAccountDetails();
     scheduleQuotaRefresh();
-  })().catch(error => showToast(error.message, 'error')).finally(() => { loading = null; });
+  })().catch(error => {
+    statusRetryAt = Date.now() + 60000;
+    syncTray(true);
+    showToast(error.message, 'error');
+    scheduleQuotaRefresh();
+  }).finally(() => { loading = null; });
   return loading;
 }
-function scheduleQuotaRefresh(minDelay = 0) {
+function scheduleQuotaRefresh() {
   clearTimeout(quotaRefreshTimer);
   if (document.hidden || refreshBatch) return;
+  if (statusRetryAt) {
+    // Refresh the local deadlines before scheduling queries from a stale dashboard.
+    quotaRefreshTimer = setTimeout(resumeQuotaRefresh, Math.max(0, statusRetryAt - Date.now()));
+    return;
+  }
   const targets = agentsData.filter(hasQuota).flatMap(refreshTargets);
   const deadline = Math.min(...targets.filter(t=>!refreshQueue.get(t.key)).map(t=>t.deadline));
   if (!Number.isFinite(deadline)) return;
-  quotaRefreshTimer = setTimeout(() => refreshAll(), Math.max(1000, minDelay, deadline - Date.now()));
+  quotaRefreshTimer = setTimeout(() => refreshAll(), Math.max(1000, deadline - Date.now()));
 }
 function refreshKey(id, profile) {
   const agent=agentsData.find(a=>a.id===id);
@@ -728,13 +829,18 @@ function refreshKey(id, profile) {
 function refreshTargets(agent) {
   const active=agent.profiles.find(p=>p.isActive);
   const targets=agent.profiles.filter(p=>!p.isActive).map(p=>({id:agent.id,profile:p.name,deadline:p.refreshAt}));
-  if(active||agent.status.available)targets.unshift({id:agent.id,profile:active?.name,deadline:agent.refreshAt});
+  if (active || agent.status.available) {
+    const saved = active?.meta?.snapshot;
+    const deadline = saved?.stagedReplacement || saved?.available === false ? active.refreshAt : agent.refreshAt;
+    targets.unshift({id:agent.id,profile:active?.name,deadline});
+  }
   return targets.map(target => {
     const key = JSON.stringify([target.id, target.profile || null]);
     return { ...target, key, deadline: Math.max(target.deadline ?? 0, refreshRetryAt.get(key) || 0) };
   });
 }
 function syncRefreshUi() {
+  syncTray();
   const supportsQuota=hasQuota(agentsData.find(a=>a.id===currentTab));
   $('refreshIcon')?.classList.toggle('spin',supportsQuota&&!!refreshBatch);
   if($('btnRefresh')){
@@ -756,18 +862,20 @@ function syncRefreshUi() {
 const refreshQueue = new AccountRefreshQueue({
   canAutoRefresh:()=>!document.hidden,
   onChange:syncRefreshUi,
-  run:async ({id,profile},force)=>{
+  run:async ({id,profile,source},force)=>{
     const key=refreshKey(id,profile);
     const agent=agentsData.find(a=>a.id===id);
     try {
-      const result=check(await window.api.refreshAccount(id,profile,force));
+      const result=check(await window.api.refreshAccount(id,profile,force,source));
       refreshRetryAt.delete(key);
       if (!refreshBatch) {
         await loadStatus();
       } else if (agent && agentsData.includes(agent)) {
         const saved = agent.profiles.find(p => p.name === profile);
+        const checkingCandidate = saved?.meta.snapshot?.stagedReplacement || result.stagedReplacement;
         if (saved) saved.meta.snapshot = result;
-        if (saved?.isActive || !profile) agent.status = result;
+        // Only the subsequent dashboard read can confirm which login a verified replacement reached.
+        if (!profile || (saved?.isActive && !checkingCandidate)) agent.status = result;
         updateAccountDetails();
         if (currentTab === id && !refreshBatch.frame) {
           const batch = refreshBatch;
@@ -785,16 +893,16 @@ const refreshQueue = new AccountRefreshQueue({
     }
   },
 });
-function requestRefresh(id,profile,force,priority) {
+function requestRefresh(id,profile,force,priority,source) {
   const resolved=profile||agentsData.find(a=>a.id===id)?.profiles.find(p=>p.isActive)?.name;
-  return refreshQueue.request(refreshKey(id,resolved),{id,profile:resolved},{force,priority});
+  return refreshQueue.request(refreshKey(id,resolved),{id,profile:resolved,source},{force,priority});
 }
 async function refreshSelected(id = currentTab, profile, force = true, trigger) {
   if (!hasQuota(agentsData.find(a=>a.id===id))) { await loadStatus(); return; }
   const restoreFocus=trigger?.matches(':focus-visible');
   const previousCheckedAt=detailAccount(id,profile).status?.checkedAt;
   let result;
-  try { result=await requestRefresh(id,profile,force,2); }
+  try { result=await requestRefresh(id,profile,force,2,'manual'); }
   finally {
     if(restoreFocus&&document.activeElement===document.body)[...document.querySelectorAll('[data-refresh-account]')].find(el=>refreshKey(el.dataset.agent,el.dataset.profile)===refreshKey(id,profile))?.focus({preventScroll:true});
   }
@@ -804,7 +912,7 @@ async function refreshSelected(id = currentTab, profile, force = true, trigger) 
   }
 }
 function refreshAll(force = false) {
-  if(document.hidden&&!force)return Promise.resolve();
+  if (!force && (document.hidden || statusRetryAt)) return Promise.resolve();
   const agents=agentsData.filter(a=>hasQuota(a)&&(!force||a.id===currentTab));
   if(!agents.length)return Promise.resolve();
   const batch=refreshBatch||(refreshBatch={requests:new Map(),keys:new Set(),completed:0,force:false});
@@ -839,11 +947,18 @@ function refreshAll(force = false) {
   syncRefreshUi();
   return refreshing;
 }
-async function handleSwitchProfile(id, name) {
-  const result = check(await window.api.useProfile(id, name));
-  if (result.canceled) return;
-  showToast(result.clientRestartError || `已切换到 ${name}；已有终端会话请重新启动`, result.clientRestartError ? 'warn' : 'ok');
-  await loadStatus(); await refreshSelected(id, name, false);
+async function handleSwitchProfile(id, name, source) {
+  if (switchingAccount) return;
+  switchingAccount = true;
+  syncTray();
+  try {
+    const result = check(await window.api.useProfile(id, name, source === 'tray' ? 'tray' : 'manual'));
+    if (result.canceled) return;
+    showToast(result.clientRestartError || `已切换到 ${name}；已有终端会话请重新启动`, result.clientRestartError ? 'warn' : 'ok');
+    await loadStatus();
+  } finally { switchingAccount = false; syncTray(); }
+  try { await refreshSelected(id, name, false); }
+  catch (error) { showToast(`账号已切换，额度更新失败：${error.message}`, 'warn'); }
 }
 async function handleDeleteProfile(id,name,target) {
   const dialog=target.closest('[data-account-details]');if(!dialog)return;
@@ -992,8 +1107,8 @@ function updateSessionGuide() {
 function updateAddAction() {
   const hasPreview = !!addPreview;
   const agent=agentsData.find(a=>a.id===modalAgent);
-  const officialOnly=addTab==='local'&&!canSaveLocal(agent)&&!hasPreview;
   const isolatedLocal = hasIsolatedLogin(modalAgent) && addTab === 'local' && !hasPreview;
+  const officialOnly=addTab==='local'&&!canSaveLocal(agent)&&!isolatedLocal&&!hasPreview;
   const batch = hasPreview && addPreview.kind === 'credentials' && !credentialUpdate;
   const count = $('addImportPreview').querySelectorAll('[name="account"]:checked').length;
   $('modalProfileInput').required = addTab === 'local' && !hasPreview && !officialOnly && !credentialUpdate;
@@ -1079,7 +1194,7 @@ function pollLocalAccount() {
   clearInterval(modalPollTimer); modalPollTimer = null;
   if (addTab !== 'local' || !$('saveModalOverlay').open || betweenLocalAccounts || (credentialUpdate && !isolatedLoginRequested)) return;
   handleModalDetect().catch(showAddError);
-  if (!canSaveLocal(agentsData.find(a=>a.id===modalAgent))) return;
+  if (!canSaveLocal(agentsData.find(a=>a.id===modalAgent)) && !isolatedLoginRequested) return;
   modalPollTimer = setInterval(() => handleModalDetect().catch(showAddError), 2500);
 }
 function resetLocalDraft(label) {
@@ -1120,13 +1235,13 @@ function openSaveModal(id, updateTarget) {
   $('keepAdding').checked = false; lastLoginMode = 'open';
   credentialUpdate = updateTarget;
   if (credentialUpdate) $('modalAccountEmail').textContent='等待重新登录';
-  clearAddImport(); showAddError(''); addTab = !canSaveLocal(list.find(a=>a.id===modalAgent))?'session':'local'; localAccountReady = false; addBusy = false; detectedExistingProfile = undefined;
+  clearAddImport(); showAddError(''); addTab = canSaveLocal(list.find(a=>a.id===modalAgent))||hasIsolatedLogin(modalAgent)?'local':'session'; localAccountReady = false; addBusy = false; detectedExistingProfile = undefined;
   $('saveModalOverlay').showModal(); updateAddAction(); pollLocalAccount();
   $(addTab==='session'?'sessionCredentials':credentialUpdate?'btnModalLaunch':'modalProfileInput').focus();
 }
 async function openCredentialUpdate(id,name,target) {
   const {p,status}=detailAccount(id,name);
-  if(!p||!canUpdateCredentials(status))throw new Error('此账号当前没有认证异常');
+  if(!p||!canUpdateCredentials(p, status))throw new Error('此账号当前没有认证异常');
   await target?.closest('[data-account-details]')?.dismissAccountDialog(false);
   openSaveModal(id,{profile:name,email:p.meta.email||status?.account});
 }
@@ -1254,12 +1369,13 @@ function updateCredentialImportSummary() {
     const row=input.closest('.credential-import-row'), selected=row.querySelector('[name="account"]').checked;
     input.disabled=addBusy||!selected; input.removeAttribute('aria-invalid');
     if (!selected) continue;
-    const value=input.value.trim(), key=`${row.dataset.agent}/${value}`;
-    let invalid=!value||value==='.'||value.includes('..')||/[\\/\x00-\x1f\x7f]/.test(value)||value.length>100;
-    if(invalid)error ||= '请填写有效名称，不能包含路径分隔符或连续点';
+    const value=input.value.trim(), key=`${row.dataset.agent}/${value.normalize('NFC').toLowerCase()}`;
+    const nameError=profileNameError(value);
+    let invalid=!!nameError;
+    if(invalid)error ||= nameError;
     if(names.has(key)){names.get(key).setAttribute('aria-invalid','true');invalid=true;error ||= '所选账号名称重复，请修改后导入';}
     names.set(key,input);
-    if(agentsData.find(a=>a.id===row.dataset.agent)?.profiles.some(p=>p.name===value)) {invalid=true;error ||= `名称「${value}」已被使用`;}
+    if(agentsData.find(a=>a.id===row.dataset.agent)?.profiles.some(p=>p.name.normalize('NFC').toLowerCase()===value.normalize('NFC').toLowerCase())) {invalid=true;error ||= `名称「${value}」已被使用`;}
     if(invalid)input.setAttribute('aria-invalid','true');
   }
   const drafts=credentialImportDrafts();
@@ -1340,12 +1456,13 @@ async function submitAddAccount(event) {
         ? window.api.updateFromLogin(modalAgent,credentialUpdate.profile,detectedLoginAttempt)
         : window.api.commitCredentialUpdate(addPreview.id)));
       if (session === addSession) await closeSaveModal();
-      showToast('凭据已更新，正在查询额度'); await loadStatus();
+      showToast(result.staged ? '凭据已暂存，正在验证归属与额度' : '凭据已更新，正在查询额度'); await loadStatus();
       try {
         const status = await requestRefresh(result.agent,result.profile,true,2);
         if(status.state==='ok')showToast('凭据已更新，额度已刷新');
+        else if(result.staged){await loadStatus();showToast(status.extra||'未能验证新凭据，已保留原凭据；请使用「重新登录」更新','warn');}
         else showToast(credentialsExpired(status)?'已替换凭据，但验证仍未通过，请使用最新的凭据':`凭据已更新；${status.extra||'暂未取得额度'}`,'warn');
-      } catch { showToast('凭据已更新，额度查询失败，可稍后右键刷新','warn'); }
+      } catch { showToast(result.staged?'新凭据暂存验证未完成，原凭据已保留，可稍后重试或重新登录':'凭据已更新，额度查询失败，可稍后右键刷新','warn'); }
     } else if (addPreview) {
       const keys = [...$('addImportPreview').querySelectorAll('[name="account"]:checked')].map(c => addPreview.items[Number(c.value)].key);
       const names=addPreview.kind==='credentials'?Object.fromEntries([...credentialImportDrafts()].filter(([key,draft])=>keys.includes(key)).map(([key,draft])=>[key,draft.name.trim()])):undefined;
@@ -1407,7 +1524,7 @@ $('addImportPreview').addEventListener('input',event=>{if(event.target.matches('
 function askPassword() {
   return new Promise(resolve => {
     const dialog = document.createElement('dialog'); dialog.className = 'password-dialog';
-    dialog.innerHTML = `<form><strong>加密导出</strong><div class="detail-note">密码至少 8 位，请妥善保存。备份包含账号登录凭据。</div><input class="modal-input" type="password" name="password" autocomplete="new-password" aria-label="备份密码" required minlength="8"><input class="modal-input" type="password" name="repeat" autocomplete="new-password" aria-label="再次输入密码" placeholder="再次输入密码" required><div class="detail-actions"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">选择保存位置</button></div></form>`;
+    dialog.innerHTML = `<form><strong>加密导出</strong><div class="detail-note">备份包含账号登录凭据。请设置至少 6 个字符的密码。</div><input class="modal-input" type="password" name="password" autocomplete="new-password" aria-label="备份密码" required minlength="6"><input class="modal-input" type="password" name="repeat" autocomplete="new-password" aria-label="再次输入密码" placeholder="再次输入密码" required><div class="detail-actions"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">选择保存位置</button></div></form>`;
     const done = value => { dialog.close(); dialog.remove(); resolve(value); };
     dialog.querySelector('[data-cancel]').addEventListener('click', () => done(null));
     dialog.addEventListener('cancel', event => { event.preventDefault(); done(null); });
@@ -1448,8 +1565,12 @@ const actions = {
   handleLaunchLogin: id => handleLaunchLogin(id), privateLogin: id => handleLaunchLogin(id, 'private'), handleOfficialLogin, reloginAccount,
   handleSwitchProfile, handleDeleteProfile, cancelDeleteProfile, confirmDeleteProfile, handleExportProfile, handleDeleteSelected, handleRestartClient, chooseImportFile: (_id, _profile, target) => chooseImportFile(target.dataset.kind), resetAddImport,
   startSelection, endSelection, toggleExport, selectAllExport, exportSelected, toggleSidebar,
-  setAccountLayout, toggleAccountGroup, moveAccountGroup, openAccountDetails, openResetCards,
+  setAccountLayout, toggleAccountGroup, moveAccountGroup, openResetCards,
   copyCleanupPrompt: async () => { check(await window.api.copyCleanupPrompt());showToast('清理指令已复制，尚未执行清理'); },
+  exportDiagnostics: async () => {
+    const result = check(await window.api.exportDiagnostics());
+    if (!result.canceled) showToast('故障报告已保存，可发给维护者');
+  },
   refreshSelected: (id,profile,target) => refreshSelected(id,profile,true,target),
   loadStatus: () => hasQuota(agentsData.find(a=>a.id===currentTab))?refreshAll(true):loadStatus(true),
   copyInstruction: async (_id, _profile, target) => {
@@ -1531,8 +1652,17 @@ function resumeQuotaRefresh() {
 }
 window.addEventListener('focus', resumeQuotaRefresh);
 document.addEventListener('visibilitychange', resumeQuotaRefresh);
-// Update reset labels without another network request.
-setInterval(() => { if (!document.hidden && currentTab !== 'settings' && !selecting && !document.querySelector('dialog[open], details[open]') && !$('saveModalOverlay').open && !$('accountSearch')?.matches(':focus')) renderWorkbench(); }, 30000);
+// Age the tray snapshot and reset labels without another network request.
+setInterval(() => {
+  const freshCount = freshTrayRows.length;
+  freshTrayRows = freshTrayRows.filter(({row,status,agent}) => {
+    if (!AccountPolicy.stale(status,Date.now(),agent)) return true;
+    row.cached = true;
+    return false;
+  });
+  syncTray(false, freshTrayRows.length !== freshCount);
+  if (!document.hidden && currentTab !== 'settings' && !selecting && !document.querySelector('dialog[open], details[open]') && !$('accountSearch')?.matches(':focus')) renderWorkbench();
+}, 30000);
 const resizer = $('sidebarResizer');
 let resizing = false;
 function readLayout(key, fallback) { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } }
@@ -1596,4 +1726,15 @@ window.api.onAppUpdateState?.(state => {
   }
   appUpdateRevision++; appUpdateState = state; updateAppUpdatePanel();
 });
-window.api.getSettings().then(result => { settings = check(result); }).catch(error => showToast(error.message, 'error')).then(loadStatus).then(() => { selectTab(currentTab); return refreshAll(); });
+window.api.onAppQuitState?.(state => {
+  if (state?.waiting) showToast('正在完成凭据安全回存，完成后将自动退出…');
+});
+window.api.onTrayCommand?.(command => handleTrayCommand(command).catch(async error => {
+  if (command.action === 'switch') await window.api.revealTrayMain?.();
+  showToast(error.message,'error');
+}));
+window.api.getSettings().then(result => { settings = check(result); }).catch(error => showToast(error.message, 'error')).then(loadStatus).then(() => {
+  selectTab(currentTab);
+  window.api.trayReady?.();
+  return refreshAll();
+});

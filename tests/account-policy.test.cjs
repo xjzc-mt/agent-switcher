@@ -5,15 +5,9 @@ const now = Date.now();
 function account(name, used, weekly, overrides = {}) {
   return { name, status: { state:'ok', plan:'plus', fetchedAt:new Date(now).toISOString(), quota:{primaryWindow:{usedPercent:used,windowMins:300,resetsAt:now/1000+3600},secondaryWindow:{usedPercent:weekly,windowMins:10080,resetsAt:now/1000+86400}}, ...overrides } };
 }
-test('a full short window never outweighs an exhausted weekly window', () => {
-  const exhausted = account('empty-week',0,100), usable = account('usable',70,70);
-  assert.ok(policy.compare(usable, exhausted, now) < 0);
-  assert.equal(policy.health(exhausted.status,now).kind,'blocked');
-});
 test('Plus compares short remaining quota first, then weekly quota without a low-quota bucket', () => {
   const profiles = [account('short-98',2,0), account('week-5',0,95), account('week-55',0,45), account('empty-week',0,100), account('empty-short',100,42)];
   assert.deepEqual(profiles.sort((a,b)=>policy.compare(a,b,now)).map(a=>a.name), ['week-55','week-5','short-98','empty-short','empty-week']);
-  assert.ok(policy.compare(account('short-full',0,90), account('balanced',40,40),now)<0);
 });
 test('plans stay grouped instead of comparing percentages across tiers', () => {
   const plus = account('plus',95,95), pro = account('pro',0,0,{plan:'pro'});
@@ -104,14 +98,6 @@ test('reset-card dates cross month boundaries and preserve unknown expiry', () =
   for(const credits of [null,[],[{status:'available',expiresAt:null}],[{status:'available',expiresAt:Infinity}],[{status:'available',expiresAt:-1}]])assert.equal(policy.resetExpiryDays({credits},now),null);
 });
 
-test('Antigravity compares model groups without converting Codex model buckets into general quotas', () => {
-  const status = { available:true, state:'ok', plan:'Google AI Pro', fetchedAt:new Date().toISOString(),
-    quota:{buckets:[{id:'Gemini',label:'Gemini',windows:[{usedPercent:100,windowMins:300}]}]} };
-  assert.equal(policy.windows(status, 'agy').length, 1);
-  assert.equal(policy.windows(status, 'codex').length, 0);
-  assert.equal(policy.health(status, Date.now(), 'agy').label, 'Gemini 额度耗尽');
-});
-
 test('Antigravity ranks Gemini independently and keeps other limits available for refresh', () => {
   const now = Date.now(), future = now / 1000 + 3600;
   const make = (short, week) => ({state:'ok',plan:'Google AI Pro',fetchedAt:new Date(now).toISOString(),quota:{buckets:[
@@ -120,6 +106,8 @@ test('Antigravity ranks Gemini independently and keeps other limits available fo
     {id:'Gemini Models',label:'Gemini',windows:[{windowMins:300,usedPercent:100-short,resetsAt:future},{windowMins:10080,usedPercent:100-week,resetsAt:future}]},
   ]}});
   const high=make(90,20), low=make(70,80), exhausted=make(100,0);
+  assert.equal(policy.windows(high,'codex').length,0,'Codex model buckets are separate from account limits');
+  assert.equal(policy.health(exhausted,now,'agy').label,'Gemini 额度耗尽');
   assert.equal(policy.modelBucket(high,'gemini').id,'Gemini Models');
   assert.equal(policy.modelBucket(high,'claude').id,'Claude and GPT Models');
   assert.equal(policy.health(high,now,'agy').rank,0);

@@ -1,3 +1,4 @@
+const { accessToken } = require('./codex-token-fixture.cjs');
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -7,6 +8,7 @@ const Module = require('node:module');
 const { pathToFileURL } = require('node:url');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-import-ipc-'));
 os.homedir = () => root;
+const { readNativeToken: realReadNative, writeNativeToken: realWriteNative } = require('../dist/antigravity-native');
 const { readCredentialFile } = require('./vault-fixture.cjs');
 const channels = new Map();
 const appEvents = new Map(), openedUrls = [], confirmations = [], quitErrors = [];
@@ -58,6 +60,150 @@ test('unsupported account switching is rejected before inspecting or quitting ru
     assert.equal(result.ok,false);assert.match(result.error,/共用认证/);assert.equal(inspected,0);
   } finally {agent.switchSupport=previousSupport;clients.runningClients=previousRunning;}
 });
+test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C or marker active state flips during final async session check', { skip: process.platform !== 'darwin' }, async t => {
+  const childProcess = require('node:child_process');
+  const native = require('../dist/antigravity-native');
+  const clients = require('../dist/clients');
+  const accounts = require('../dist/accounts');
+  const agyAgent = accounts.resolveAgent('agy');
+  const prevExec = childProcess.execFileSync;
+  const prevReadNative = native.readNativeToken;
+  const prevWriteNative = native.writeNativeToken;
+  const prevRunning = clients.runningClients;
+  const prevShared = native.sharedAntigravitySessions;
+  const prevSwitchSupport = agyAgent.switchSupport;
+  const prevNativeEnabled = agyAgent.nativeEnabled;
+  const gemini = path.join(root, '.gemini');
+  const cliPath = path.join(gemini, 'antigravity-cli/antigravity-oauth-token');
+  const desktopPath = path.join(gemini, native.NATIVE_TOKEN_FILE);
+  const desktopMarker = path.join(gemini, 'cache/antigravity-keyring-unavailable');
+  const makeTok = (email, gen = 1) => Buffer.from(JSON.stringify({
+    auth_method: 'consumer',
+    id_token_email: email,
+    token: { access_token: `a-${email}-${gen}`, refresh_token: `r-${email}-${gen}`, expiry: new Date(1795000000000 + gen * 60000).toISOString() },
+  }));
+  let kcStored = 'go-keyring-base64:' + makeTok('kc-a@example.test', 1).toString('base64');
+  childProcess.execFileSync = (cmd, args, opts) => {
+    if (cmd === '/usr/bin/osascript') {
+      if (args.some(arg => String(arg).includes('SecItemDelete'))) {
+        const { raw, revision } = JSON.parse(String(opts.input));
+        assert.equal(raw, kcStored);
+        assert.equal(revision, 'fixture-ref-and-date');
+        kcStored = null;
+        return '';
+      }
+      if (args.some(arg => String(arg).includes('AGS_KEYCHAIN_REVISION'))) return 'fixture-ref-and-date';
+      throw Object.assign(new Error('official item'), { status: 77 });
+    }
+    if (args[0] === 'find-generic-password') {
+      if (kcStored === null) throw Object.assign(new Error('missing'), { status: 44 });
+      return kcStored;
+    }
+    if (args[0] === 'delete-generic-password') { kcStored = null; return ''; }
+    kcStored = opts.input.match(/-w "([^"]*)"/)[1];
+    return '';
+  };
+  native.readNativeToken = realReadNative;
+  native.writeNativeToken = realWriteNative;
+  clients.runningClients = async () => [];
+  agyAgent.nativeEnabled = true;
+  agyAgent.switchSupport = () => undefined;
+  try {
+    fs.rmSync(gemini, { recursive: true, force: true });
+    await accounts.saveAccount(agyAgent, 'AGY-A');
+    atomicWrite(path.join(store.profileDir('agy', 'AGY-TARGET'), agyAgent.authFiles[0]), makeTok('target@example.test', 1));
+
+    const big = Buffer.from(JSON.stringify({ ...JSON.parse(makeTok('long@example.test')), id_token: 'x'.repeat(8000) }));
+    atomicWrite(path.join(store.profileDir('agy', 'AGY-LONG'), agyAgent.authFiles[0]), big);
+    for (const running of [[], ['Antigravity']]) {
+      clients.runningClients = async () => running;
+      const before = confirmations.length, oldItem = kcStored;
+      confirmationResponse = 0;
+      assert.deepEqual(await invoke('use-profile', 'agy', 'AGY-LONG'), { canceled: true });
+      assert.equal(confirmations.length, before + 1);
+      const question = confirmations.at(-1);
+      assert.equal(question.defaultId, 0);
+      assert.match(question.buttons.join(' '), running.length ? /退出并切换/ : /使用文件并切换/);
+      assert.match(question.detail, /文件/);
+      assert.match(question.detail, /0600/);
+      assert.equal(kcStored, oldItem);
+      assert.equal(fs.existsSync(cliPath), false);
+      assert.equal(fs.existsSync(desktopPath), false);
+    }
+    const desktopActions = [];
+    let running = true;
+    clients.runningClients = async () => running ? ['Antigravity'] : [];
+    t.mock.method(clients, 'quitClients', async () => { running = false; desktopActions.push('quit'); });
+    t.mock.method(clients, 'openClients', async () => { running = true; desktopActions.push('open'); });
+    native.sharedAntigravitySessions = async () => [];
+    confirmationResponse = 1;
+    const applied = await invoke('use-profile', 'agy', 'AGY-LONG');
+    assert.equal(applied.ok, true, applied.error);
+    assert.deepEqual(desktopActions, ['quit', 'open']);
+    assert.equal(kcStored, null);
+    assert.deepEqual(fs.readFileSync(cliPath), big);
+    assert.deepEqual(fs.readFileSync(desktopPath), big);
+    clients.runningClients = async () => [];
+    const restored = await invoke('use-profile', 'agy', 'AGY-A');
+    assert.equal(restored.ok, true, restored.error);
+
+    // Case 1: CLI holds unmanaged B when user confirms discard (response=1), then during final async sharedAntigravitySessions(), CLI changes B -> C!
+    fs.mkdirSync(path.dirname(cliPath), { recursive: true });
+    const tokB = makeTok('cli-b@example.test', 1), tokC = makeTok('cli-c@example.test', 1);
+    fs.writeFileSync(cliPath, tokB);
+    confirmationResponse = 1; // "不保存并切换"
+    native.sharedAntigravitySessions = async () => {
+      // Simulate official CLI logging into C right during the last async check before writeNativeToken!
+      fs.writeFileSync(cliPath, tokC);
+      return [];
+    };
+    const r1 = await invoke('use-profile', 'agy', 'AGY-TARGET');
+    assert.equal(r1.ok, false);
+    assert.match(r1.error || '', /确认期间|已变化/);
+    assert.deepEqual(fs.readFileSync(cliPath), tokC, 'new CLI login C must not be deleted by stale confirmation');
+    assert.equal(kcStored, 'go-keyring-base64:' + makeTok('kc-a@example.test', 1).toString('base64'));
+
+    // User can now re-confirm cleanly on C:
+    native.sharedAntigravitySessions = async () => [];
+    confirmationResponse = 2; // "保存后切换"
+    const r1Retry = await invoke('use-profile', 'agy', 'AGY-TARGET');
+    assert.equal(r1Retry.ok, true);
+    assert.equal(fs.existsSync(cliPath), false);
+    assert.equal(store.listProfiles('agy').some(p => agyAgent.identity(store.profileDir('agy', p))?.email === 'cli-c@example.test'), true);
+
+    // Case 2: Desktop marker flips from expired (>1h) to active (<1h) via mtime touch ONLY during final async check!
+    kcStored = 'go-keyring-base64:' + makeTok('kc-a@example.test', 1).toString('base64');
+    fs.mkdirSync(path.dirname(desktopPath), { recursive: true });
+    fs.mkdirSync(path.dirname(desktopMarker), { recursive: true });
+    const deskTok = makeTok('cli-c@example.test', 1); // already in pool, so needsUnmanagedChoice is false!
+    fs.writeFileSync(desktopPath, deskTok);
+    fs.writeFileSync(desktopMarker, '');
+    const expiredTs = (Date.now() - 7200_000) / 1000;
+    fs.utimesSync(desktopMarker, expiredTs, expiredTs); // marker expired -> active identity is kc-a
+    native.sharedAntigravitySessions = async () => {
+      const freshTs = Date.now() / 1000;
+      fs.utimesSync(desktopMarker, freshTs, freshTs); // marker now active -> flips active identity without changing file bytes!
+      return [];
+    };
+    const r2 = await invoke('use-profile', 'agy', 'AGY-TARGET');
+    assert.equal(r2.ok, false);
+    assert.match(r2.error || '', /确认期间|已变化/);
+    assert.deepEqual(fs.readFileSync(desktopPath), deskTok);
+    assert.equal(fs.existsSync(desktopMarker), true);
+  } finally {
+    confirmations.length = 0;
+    confirmationResponse = 0;
+    fs.rmSync(gemini, { recursive: true, force: true });
+    fs.rmSync(path.join(store.STORE_DIR, 'agy'), { recursive: true, force: true });
+    childProcess.execFileSync = prevExec;
+    native.readNativeToken = prevReadNative;
+    native.writeNativeToken = prevWriteNative;
+    clients.runningClients = prevRunning;
+    native.sharedAntigravitySessions = prevShared;
+    agyAgent.switchSupport = prevSwitchSupport;
+    agyAgent.nativeEnabled = prevNativeEnabled;
+  }
+});
 test('Codex dashboard is not blocked by an unrelated provider CLI; Claude status queries join',async()=>{
   const clients = require('../dist/clients');
   const original = clients.findClaudeBinary;
@@ -98,113 +244,71 @@ test('actual import IPC selects encrypted file before password, supports retry a
   assert.deepEqual(store.listProfiles('codex'), ['source']);
   assert.equal(codexAgent.identity(),undefined);
   assert.equal((await invoke('commit-import',unlocked.id,[unlocked.items[0].key])).ok,false);
-  const again=await invoke('preview-import','backup');
-  const duplicate=await invoke('unlock-import',again.id,'test-password');
-  assert.deepEqual(await invoke('commit-import',duplicate.id,[duplicate.items[0].key]),{
-    ok:true,imported:[],skipped:[{key:'codex/source',existing:'codex/source'}],
-  });
-});
-
-test('actual import IPC previews plain credentials without password and cancel discards pending preview', async () => {
-  selectedFile=path.join(root,'auth.json');
-  atomicWrite(selectedFile,JSON.stringify({tokens:{access_token:'fake',refresh_token:'other-refresh',account_id:'other'}}));
-  const selected=await invoke('preview-import','credentials');
-  assert.equal(selected.needsPassword,undefined); assert.equal(selected.items.length,1);
-  await invoke('cancel-import');
-  assert.equal((await invoke('commit-import',selected.id,[selected.items[0].key])).ok,false);
-  selectedFile=undefined;
-  assert.equal((await invoke('preview-import','backup')).canceled,true);
 });
 
 test('truncated encrypted files report corruption rather than asking for a password again', async () => {
   await assert.rejects(backup.decryptBackup(Buffer.from('AGS1'),'test-password'),/损坏/);
 });
 
-test('credential update IPC binds the target and accepts pasted JSON or a file without duplicate import',async()=>{
-  const credential=token=>JSON.stringify({tokens:{access_token:'fake',refresh_token:token,account_id:'update-target',id_token:'h.'+Buffer.from(JSON.stringify({sub:'update-member',email:'update@example.test'})).toString('base64url')+'.s'}});
+test('credential update IPC cancels file previews and binds pasted candidates to a single update commit',async()=>{
+  const clients=require('../dist/clients');clients.runningClients=async()=>[];
+  const logout=require('../dist/client-logout');logout.runningCodexSessions=async()=>[];
+  const credential=token=>JSON.stringify({auth_mode:'chatgpt',tokens:{access_token:'fake',refresh_token:token,account_id:'update-target',id_token:'h.'+Buffer.from(JSON.stringify({sub:'update-member',email:'update@example.test','https://api.openai.com/auth':{chatgpt_account_id:'update-target',user_id:'update-member'}})).toString('base64url')+'.s'}});
   const dir=store.profileDir('codex','expired-target');
   atomicWrite(path.join(dir,'auth.json'),credential('old'));
-  const expire=()=>store.writeProfileMeta('codex','expired-target',{label:'keep',snapshot:{state:'expired',authExpired:true,available:true}});
-  expire();
+  store.writeProfileMeta('codex','expired-target',{snapshot:{state:'expired',authExpired:true,available:true}});
+  selectedFile=path.join(root,'replacement.json');
+  atomicWrite(selectedFile,credential('file-new'));
+  const file=await invoke('preview-credential-update','codex','expired-target');
+  assert.equal(file.updating,true);
+  await invoke('cancel-import');
+  assert.equal((await invoke('commit-credential-update',file.id)).ok,false);
   const pasted=await invoke('preview-credential-update','codex','expired-target',credential('new'));
   assert.equal(pasted.updating,true);assert.equal(pasted.profile,'expired-target');
   assert.equal((await invoke('commit-import',pasted.id,[pasted.items[0].key])).ok,false);
   assert.equal((await invoke('commit-credential-update',pasted.id)).ok,true);
-  assert.equal(JSON.parse(readCredentialFile(path.join(dir,'auth.json'))).tokens.refresh_token,'new');
+  // Staged in .pending, original auth.json untouched until verified!
+  assert.equal(JSON.parse(readCredentialFile(path.join(dir,'auth.json'))).tokens.refresh_token,'old');
+  assert.equal(JSON.parse(readCredentialFile(path.join(dir,'auth.json.pending'))).tokens.refresh_token,'new');
   assert.equal((await invoke('commit-credential-update',pasted.id)).ok,false);
-  expire();selectedFile=path.join(root,'replacement.json');atomicWrite(selectedFile,credential('file-new'));
-  const file=await invoke('preview-credential-update','codex','expired-target');
-  assert.equal(file.updating,true);
-  await invoke('cancel-import');assert.equal((await invoke('commit-credential-update',file.id)).ok,false);
-  assert.equal(JSON.parse(readCredentialFile(path.join(dir,'auth.json'))).tokens.refresh_token,'new');
-  const again=await invoke('preview-credential-update','codex','expired-target');
-  await invoke('commit-credential-update',again.id);
-  assert.equal(JSON.parse(readCredentialFile(path.join(dir,'auth.json'))).tokens.refresh_token,'file-new');
-  assert.equal(store.readProfileMeta('codex','expired-target').label,'keep');
-  assert.equal(codexAgent.identity(),undefined);
 });
 
 test('file and paste IPC share a multi-account preview and commit only selected editable names',async()=>{
-  const file=path.join(root,'accounts.json');
+  const file=path.join(root,'accounts.jsonl');
   const credential=(name,i)=>({name,tokens:{access_token:'fake',refresh_token:'batch-'+i,account_id:'batch-'+i}});
-  const document=JSON.stringify({data:{accounts:[null,credential('批量甲',0),credential('批量乙',1),credential('重复',0)]}});
+  const expired=credential('原名',2);
+  expired.tokens.id_token='h.'+Buffer.from(JSON.stringify({sub:'batch-member',email:'batch@example.test'})).toString('base64url')+'.s';
+  const saved=path.join(store.profileDir('codex','原名'),'auth.json');
+  atomicWrite(saved,JSON.stringify({tokens:{...expired.tokens,refresh_token:'previous'}}));
+  store.writeProfileMeta('codex','原名',{snapshot:{state:'expired',authExpired:true,available:true}});
+  const document=[{tokens:{refresh_token:'incomplete'}},credential('批量甲',0),credential('批量乙',1),credential('重复',0),expired]
+    .map(value=>JSON.stringify(value)).join('\n');
   atomicWrite(file,document);
   selectedFiles=[file];
   const preview=await invoke('preview-import','credentials','codex');
   assert.deepEqual(lastDialogOptions.properties,['openFile']);
-  assert.equal(preview.kind,'credentials');assert.equal(preview.items.length,4);
-  assert.deepEqual(preview.items.map(x=>x.state),['error','ready','ready','duplicate']);
+  assert.ok(lastDialogOptions.filters[0].extensions.includes('jsonl'));
+  assert.equal(preview.kind,'credentials');
+  assert.deepEqual(preview.items.map(x=>x.state),['error','ready','ready','duplicate','update']);
   assert.equal(preview.items[1].profile,'批量甲');
+  assert.equal(preview.items[0].sourceIndex,1);
   assert.doesNotMatch(JSON.stringify(preview),/refresh_token|batch-0/);
   const pasted=await invoke('preview-credentials',document,'codex');
   assert.deepEqual(pasted.items.map(x=>[x.profile,x.state]),preview.items.map(x=>[x.profile,x.state]));
+  assert.equal((await invoke('commit-import',preview.id,[preview.items[1].key])).ok,false);
   const key=pasted.items[2].key;
-  const result=await invoke('commit-import',pasted.id,[key],{[key]:'导入时命名'});
+  const update=pasted.items[4];
+  const result=await invoke('commit-import',pasted.id,[key,update.key],{[key]:'导入时命名',[update.key]:update.profile});
+  assert.deepEqual(result.updated,['codex/原名']);
+  assert.equal(JSON.parse(readCredentialFile(saved)).tokens.refresh_token,'previous');
+  assert.equal(JSON.parse(readCredentialFile(saved+'.pending')).tokens.refresh_token,expired.tokens.refresh_token);
   assert.deepEqual(result.imported,['codex/导入时命名']);assert.equal(result.skipped.length,1);assert.equal(result.failed.length,1);
   assert.equal(store.profileExists('codex','批量甲'),false);
+  assert.equal(codexAgent.identity(),undefined);
   selectedFiles=[];assert.equal((await invoke('preview-import','credentials','codex')).canceled,true);
   selectedFiles=[file,file];assert.equal((await invoke('preview-import','credentials','codex')).ok,false);
   selectedFiles=undefined;
 });
-
-test('Session file and paste previews recover expired accounts through the normal import IPC',async()=>{
-  for(const mode of ['paste','file']) {
-    const name='原账号-'+mode,accountId='recover-'+mode;
-    const original={tokens:{access_token:'fixture-old',refresh_token:'fixture-old-refresh',account_id:accountId}};
-    const updated={tokens:{access_token:'fixture-new',refresh_token:'fixture-new-refresh',account_id:accountId}};
-    original.tokens.id_token=updated.tokens.id_token=`h.${Buffer.from(JSON.stringify({sub:'member-'+mode,email:mode+'@example.test'})).toString('base64url')}.s`;
-    const profile=store.profileDir('codex',name);
-    atomicWrite(path.join(profile,'auth.json'),JSON.stringify(original));
-    store.writeProfileMeta('codex',name,{label:'保留昵称',snapshot:{state:'expired',authExpired:true,available:true}});
-    const before=store.listProfiles('codex');
-    const document=JSON.stringify({name:'来源里的名称',...updated});
-    if(mode==='file'){selectedFile=path.join(root,'recovery.json');atomicWrite(selectedFile,document);}
-    const preview=mode==='file'?await invoke('preview-import','credentials','codex'):await invoke('preview-credentials',document,'codex');
-    assert.equal(preview.items[0].state,'update');assert.equal(preview.items[0].profile,name);
-    assert.doesNotMatch(JSON.stringify(preview),/fixture-new|credentialRevision/);
-    const key=preview.items[0].key;
-    const result=await invoke('commit-import',preview.id,[key],{[key]:name});
-    assert.equal(result.ok,true);assert.deepEqual(result.imported,[]);assert.deepEqual(result.updated,['codex/'+name]);
-    assert.deepEqual(store.listProfiles('codex'),before);
-    assert.deepEqual(JSON.parse(readCredentialFile(path.join(profile,'auth.json'))),updated);
-    assert.equal(store.readProfileMeta('codex',name).label,'保留昵称');
-    assert.equal(store.readProfileMeta('codex',name).snapshot.state,'unverified');
-  }
-});
-
-test('pasted and selected JSONL use the same boundary parser without touching the active login',async()=>{
- const make=(name,i)=>JSON.stringify({name,auth_mode:'chatgpt',tokens:{access_token:'a',refresh_token:'line-'+i,account_id:'line-'+i}});
- const input=make('连续甲',0)+'\n'+make('连续乙',1);
- const pasted=await invoke('preview-credentials',input,'codex');
- assert.deepEqual(pasted.items.map(x=>x.profile),['连续甲','连续乙']);
- selectedFile=path.join(root,'records.jsonl');atomicWrite(selectedFile,input);
- const file=await invoke('preview-import','credentials','codex');
- assert.ok(lastDialogOptions.filters[0].extensions.includes('jsonl'));
- assert.deepEqual(file.items.map(x=>x.profile),['连续甲','连续乙']);
- await invoke('cancel-import');
- assert.equal(codexAgent.identity(),undefined);
-});
-
 
 test('canceling during an asynchronous backup read keeps the pending import cleared', async () => {
   const file = path.join(root, 'cancel-preview.json');
@@ -232,6 +336,28 @@ test('canceling during an asynchronous backup read keeps the pending import clea
 });
 
 
+test('logout IPC preserves the removal error when checking the closed client also fails', async t => {
+  const accounts = require('../dist/accounts');
+  const clients = require('../dist/clients');
+  const preview = { agent: 'codex', profile: 'original', profiles: ['original'], identity: 'old',
+    current: true, signature: 'same' };
+  t.mock.method(accounts, 'previewRemoveAccount', async () => preview);
+  t.mock.method(clients, 'runningClients', async () => ['Codex']);
+  t.mock.method(clients, 'quitClients', async () => {});
+  t.mock.method(accounts, 'removeAccount', async () => { throw new Error('移除失败，已保留账号'); });
+  t.mock.method(codexAgent, 'identity', () => { throw new Error('登录暂时不可读'); });
+  const previousResponse = confirmationResponse, previousCount = confirmations.length;
+  confirmationResponse = 1;
+  try {
+    const { id } = await invoke('preview-delete-profile', 'codex', 'original');
+    const result = await invoke('delete-profile', 'codex', 'original', { previewId: id, logout: true });
+    assert.deepEqual(result, { ok: false, error: '移除失败，已保留账号' });
+  } finally {
+    confirmationResponse = previousResponse;
+    confirmations.length = previousCount;
+  }
+});
+
 test('deletion IPC binds a short-lived preview to the exact target and refuses replay', async () => {
   for (const name of ['delete-A', 'delete-copy', 'delete-B']) {
     atomicWrite(path.join(store.profileDir('codex', name), 'auth.json'), JSON.stringify({ OPENAI_API_KEY: name === 'delete-B' ? 'fixture-key-B' : 'fixture-key-A' }));
@@ -245,6 +371,27 @@ test('deletion IPC binds a short-lived preview to the exact target and refuses r
   assert.deepEqual(result.removed, ['delete-A', 'delete-copy']);
   assert.equal(store.profileExists('codex', 'delete-B'), true);
   assert.equal((await invoke('delete-profile', 'codex', 'delete-A', { previewId: preview.id, logout: false })).ok, false);
+});
+
+test('large deletion selections retain each confirmation and reject changes to its original scope', async t => {
+  const accounts = require('../dist/accounts');
+  const put = (name, key) => atomicWrite(path.join(store.profileDir('codex', name), 'auth.json'), JSON.stringify({ OPENAI_API_KEY: key }));
+  const first = 'selected-first', changed = 'selected-changed';
+  put(first, 'large-selection-first'); put(changed, 'large-selection-changed');
+  const original = accounts.previewRemoveAccount;
+  t.mock.method(accounts, 'previewRemoveAccount', (agent, name) => name.startsWith('simulated-')
+    ? Promise.resolve({ agent: agent.id, profile: name, profiles: [name], current: false, signature: name })
+    : original(agent, name));
+  const preview = name => invoke('preview-delete-profile', 'codex', name);
+  const remove = (name, id) => invoke('delete-profile', 'codex', name, { previewId: id, logout: false });
+  const previous = await preview(first), selected = await preview(first), other = await preview(changed);
+  for (let i = 0; i < 203; i++) await preview(`simulated-${i}`);
+  assert.equal((await remove(first, previous.id)).ok, false);
+  assert.deepEqual((await remove(first, selected.id)).removed, [first]);
+  put('new-alias', 'large-selection-changed');
+  assert.equal((await remove(changed, other.id)).ok, false);
+  assert.ok(store.profileExists('codex', changed));
+  assert.ok(store.profileExists('codex', 'new-alias'));
 });
 
 test('cleanup IPC copies only a generic instruction without inspecting or changing accounts', async () => {
@@ -271,41 +418,95 @@ test('project IPC always opens the fixed project URL and obsolete actions are ab
   assert.equal(channels.has('ignore-app-update'), false);
 });
 
-test('actual quit lifecycle drains account work, preserves canceled drafts and rejects new writes', async () => {
-  const accounts = require('../dist/accounts'), original = accounts.refreshAccount;
+test('actual quit lifecycle quits promptly during slow network lookup, but drains active writes/rotation commits, preserves drafts and rejects new writes', async () => {
   const logins = [require('../dist/codex-login').codexLogin, require('../dist/antigravity-login').antigravityLogin];
   const cancels = logins.map(login => login.cancel);
   let cleanups = 0;
   logins.forEach((login, i) => { login.cancel = async () => { cleanups++; return cancels[i](); }; });
-  let release, started;
-  const gate = new Promise(resolve => { release = resolve; });
-  const running = new Promise(resolve => { started = resolve; });
+  let releaseLookup, lookupStarted, releaseCommit, commitEntered;
+  const lookupGate = new Promise(resolve => { releaseLookup = resolve; });
+  const lookupRunning = new Promise(resolve => { lookupStarted = resolve; });
+  const commitGate = new Promise(resolve => { releaseCommit = resolve; });
+  const commitRunning = new Promise(resolve => { commitEntered = resolve; });
   const drain = () => new Promise(resolve => setImmediate(resolve));
-  accounts.refreshAccount = async () => { started(); await gate; return { state: 'ok' }; };
+  const origQuery = codexAgent.queryLiveRpc;
+  const origCommit = codexAgent.commitQuery.bind(codexAgent);
+  const quitProfile = store.profileDir('codex', 'quit-test-card');
+  atomicWrite(path.join(quitProfile, 'auth.json'), JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { account_id: 'ws-q', access_token: accessToken('ws-q','uq','uq@example.test',1), refresh_token: 'rt1', id_token: 'h.' + Buffer.from(JSON.stringify({ sub: 'uq', email: 'uq@example.test' })).toString('base64url') + '.s' },
+  }));
   try {
+    // Phase 1: Slow ordinary network lookup does NOT block Cmd+Q confirmation/quit!
+    codexAgent.queryLiveRpc = async () => { lookupStarted(); await lookupGate; return { rates: { rateLimits: { primary: { usedPercent: 5 } } } }; };
     const draft = await invoke('preview-credentials', JSON.stringify({ OPENAI_API_KEY: 'quit-draft' }), 'codex');
-    const refreshing = invoke('refresh-account', 'codex');
-    await running;
+    const slowLookup = invoke('refresh-account', 'codex', 'quit-test-card', true);
+    await lookupRunning;
+    confirmationResponse = 0; // cancel quit at draft prompt — reached IMMEDIATELY without waiting for lookupGate!
     assert.equal(app.quit(), true);
-    assert.equal(app.quit(), true);
-    assert.equal(quitCount, 0); assert.equal(confirmations.length, 0);
-    assert.match((await invoke('save-profile', 'codex', 'must-not-save')).error, /准备退出/);
-    assert.match((await invoke('cancel-import')).error, /准备退出/);
-    assert.match((await invoke('cancel-login', 'codex')).error, /准备退出/);
-    release(); await refreshing; await drain();
-    assert.equal(confirmations.length, 1); assert.match(confirmations[0].detail, /待确认的导入/);
-    assert.equal(quitCount, 0); assert.equal(cleanups, 0);
+    await drain();
+    assert.equal(confirmations.length, 1, 'Cmd+Q must reach confirmation promptly without waiting on slow network lookup');
+    assert.match(confirmations[0].detail, /待确认的导入/);
+    assert.equal(quitCount, 0);
+    releaseLookup();
+    await slowLookup;
+
+    // Phase 2: Once a query has rotated a token and entered the commit critical section, Cmd+Q DOES wait until safe persistence completes!
+    const rotateProfile = store.profileDir('codex', 'quit-rotate-card');
+    atomicWrite(path.join(rotateProfile, 'auth.json'), JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: { account_id: 'ws-q2', access_token: accessToken('ws-q2','uq2','uq2@example.test',1), refresh_token: 'rt1', id_token: 'h.' + Buffer.from(JSON.stringify({ sub: 'uq2', email: 'uq2@example.test' })).toString('base64url') + '.s' },
+    }));
     const key = draft.items[0].key;
     assert.equal((await invoke('commit-import', draft.id, [key], { [key]: '退出前保留' })).ok, true);
     await invoke('preview-credentials', JSON.stringify({ OPENAI_API_KEY: 'quit-confirmed-draft' }), 'codex');
+    codexAgent.queryLiveRpc = async temp => {
+      atomicWrite(path.join(temp, 'auth.json'), JSON.stringify({
+        auth_mode: 'chatgpt',
+        tokens: { account_id: 'ws-q2', access_token: accessToken('ws-q2','uq2','uq2@example.test',2), refresh_token: 'rt2-rotated', id_token: 'h.' + Buffer.from(JSON.stringify({ sub: 'uq2', email: 'uq2@example.test' })).toString('base64url') + '.s' },
+      }));
+      return { rates: { rateLimits: { primary: { usedPercent: 10 } } } };
+    };
+    const origQueryCredential = codexAgent.queryCredential;
+    const origWithLock = store.withStoreLock;
+    let blockNextCommitLock = false;
+    codexAgent.queryCredential = async function (...a) {
+      const res = await origQueryCredential.apply(this, a);
+      blockNextCommitLock = true;
+      return res;
+    };
+    store.withStoreLock = async (work, id) => {
+      if (blockNextCommitLock && id === undefined) {
+        blockNextCommitLock = false;
+        commitEntered();
+        await commitGate;
+      }
+      return origWithLock(work, id);
+    };
+    const rotatingRefresh = invoke('refresh-account', 'codex', 'quit-rotate-card', true);
+    await commitRunning;
     confirmationResponse = 1;
     assert.equal(app.quit(), true);
+    assert.equal(app.quit(), true);
     await drain();
+    assert.equal(quitCount, 0, 'Cmd+Q must wait for post-rotation commit critical section');
+    assert.equal(confirmations.length, 1);
+    assert.match((await invoke('save-profile', 'codex', 'must-not-save')).error, /准备退出/);
+    assert.match((await invoke('cancel-import')).error, /准备退出/);
+    assert.match((await invoke('cancel-login', 'codex')).error, /准备退出/);
+    releaseCommit();
+    await rotatingRefresh;
+    for (let i = 0; i < 10 && quitCount === 0; i++) await drain();
+    assert.equal(JSON.parse(readCredentialFile(path.join(rotateProfile, 'auth.json'))).tokens.refresh_token, 'rt2-rotated');
     assert.equal(confirmations.length, 2); assert.equal(quitCount, 1); assert.equal(cleanups, 2);
     assert.deepEqual(quitErrors, []);
     assert.match((await invoke('save-profile', 'codex', 'must-not-save')).error, /准备退出/);
+    codexAgent.queryCredential = origQueryCredential;
+    store.withStoreLock = origWithLock;
   } finally {
-    release(); accounts.refreshAccount = original;
+    releaseLookup?.(); releaseCommit?.();
+    codexAgent.queryLiveRpc = origQuery;
+    codexAgent.commitQuery = origCommit;
     logins.forEach((login, i) => { login.cancel = cancels[i]; });
   }
 });

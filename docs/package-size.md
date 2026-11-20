@@ -11,7 +11,7 @@
 
 ## 当前打包配置
 
-`package.json` 的 `build.files` 只纳入 `dist/**/*.js`、`renderer/**/*` 和 `assets/**/*`；electron-builder 同时收集必要运行依赖。`build.mac.icon` 另从 `packaging/app-icon.png` 生成应用图标，该文件也是开发版 Dock 图标来源。默认生成 DMG，不自动上传。语言资源保留英文与简繁体中文及相应变体。应用标识固定为 `com.agent-switcher.app`。
+`package.json` 的 `build.files` 纳入项目 MIT 许可 `LICENSE`、`dist/**/*.js`、`renderer/**/*` 和运行时 `assets/**/*`，排除备选图标目录 `assets/icon-candidates/**/*`。electron-builder 同时收集必要运行依赖。`build.mac.icon` 另从 `packaging/app-icon.png` 生成应用图标，该文件也是开发版 Dock 图标来源。默认生成 DMG，不自动上传。语言资源保留英文与简繁体中文及相应变体。应用标识固定为 `com.agent-switcher.app`。
 
 ```bash
 npm run dist

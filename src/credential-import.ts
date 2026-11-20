@@ -2,12 +2,11 @@ import path from 'path';
 import { Worker } from 'worker_threads';
 import { randomUUID } from 'crypto';
 import { isSameIdentity, resolveAgent, availableCredentialUpdateTarget, CredentialUpdateTarget } from './accounts';
-import { ParsedBackup, parseCredentials, installBackup, ImportResult } from './backup';
-import { listProfiles, profileDir, validateName } from './store';
+import { ParsedBackup, parsedCredentialEntry, installBackup, ImportResult } from './backup';
+import { listProfiles, profileDir, profileNameError, profileNameKey } from './store';
 import type { Identity } from './agents/base';
 import { parseCredentialDocument } from './credential-document';
 
-const MAX_ACCOUNTS = 200;
 const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
 export interface CredentialImportItem {
   key: string;
@@ -42,10 +41,12 @@ function classify(batch: CredentialBatch): void {
     const agent = resolveAgent(item.agent);
     if (!known.has(agent.id)) {
       const profiles = listProfiles(agent.id);
-      usedNames.set(agent.id, new Set(profiles));
+      usedNames.set(agent.id, new Set(profiles.map(profileNameKey)));
       known.set(agent.id, profiles.flatMap(profile => {
-        const identity = agent.identity(profileDir(agent.id, profile));
-        return identity ? [{ key: `${agent.id}/${profile}`, profile, source: 'pool' as const, identity }] : [];
+        try {
+          const identity = agent.identity(profileDir(agent.id, profile));
+          return identity ? [{ key: `${agent.id}/${profile}`, profile, source: 'pool' as const, identity }] : [];
+        } catch { return []; }
       }));
     }
     const identity = batch.parsed.identities!.get(item.key)!;
@@ -63,8 +64,8 @@ function classify(batch: CredentialBatch): void {
       const used = usedNames.get(agent.id)!;
       const original = item.profile;
       let suffix = 2;
-      while (used.has(item.profile)) item.profile = `${original.slice(0, 80)} (${suffix++})`;
-      used.add(item.profile);
+      while (used.has(profileNameKey(item.profile))) item.profile = `${original.slice(0, 80)} (${suffix++})`;
+      used.add(profileNameKey(item.profile));
       accounts.push({ key: item.key, profile: item.profile, source: 'batch', identity });
       batch.parsed.items.find(parsed => parsed.key === item.key)!.profile = item.profile;
     }
@@ -72,6 +73,14 @@ function classify(batch: CredentialBatch): void {
 }
 
 type CredentialDocument = ReturnType<typeof parseCredentialDocument>;
+
+/** Older backups with nonportable names use the existing editable import preview. */
+export function editableBackup(parsed: ParsedBackup): CredentialBatch | undefined {
+  if (!parsed.items.some(item => profileNameError(item.profile))) return;
+  const batch: CredentialBatch = { parsed, updates: new Map(), items: parsed.items.map(item => ({ ...item, state: 'ready' })) };
+  classify(batch);
+  return batch;
+}
 
 async function parseForPreview(data: Buffer, agent?: string): Promise<CredentialDocument> {
   if (data.length < 256 * 1024) return parseCredentialDocument(data, agent);
@@ -96,12 +105,10 @@ export async function parseCredentialBatch(data: Buffer, agent?: string, fileNam
     items: [], updates: new Map(),
     parsed: { groups: new Map(), items: [], identities: new Map() },
   };
-  if (document.entries.length > MAX_ACCOUNTS) throw new Error(`一次最多导入 ${MAX_ACCOUNTS} 个账号`);
   for (const [index, entry] of document.entries.entries()) {
     const sourceIndex = document.collection ? index + 1 : undefined;
     try {
-      if (entry.error || !entry.data) throw new Error(entry.error || '未找到完整的客户端凭据');
-      const parsed = await parseCredentials(entry.data, agent);
+      const parsed = parsedCredentialEntry(entry, agent);
       const item = parsed.items[0];
       const key = `${item.agent}/${randomUUID()}`;
       // A bundle filename is not an account name. Prefer per-account metadata or identity.
@@ -123,7 +130,6 @@ export async function installCredentialBatch(batch: CredentialBatch, keys: strin
   if (!names || typeof names !== 'object' || Array.isArray(names) || Object.keys(names).length !== keys.length || keys.some(key => !Object.hasOwn(names, key))) throw new Error('请为所选账号填写名称');
   const renamed = new Map<string, string>();
   for (const key of keys) {
-    validateName(names[key]);
     if (batch.updates.has(key) && names[key] !== batch.updates.get(key)!.profile) throw new Error('更新凭据会保留原账号名称');
     renamed.set(key, names[key]);
   }

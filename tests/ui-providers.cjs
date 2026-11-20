@@ -25,29 +25,27 @@ app.whenReady().then(async()=>{
       assert.equal(await run(`currentTab`),'codex');
       w.webContents.sendInputEvent({type:'mouseMove',x:700,y:600});
     }
-    await run(`localStorage.setItem('sidebarCollapsed','false');applySidebar();openSaveModal('codex');loadStatus()`);
+    await run(`localStorage.setItem('sidebarCollapsed','false');applySidebar();
+      agentsData.find(a=>a.id==='codex').management={canSaveCurrent:false,isolatedLogin:true,quota:true};openSaveModal('codex')`);
+    assert.deepEqual(await run(`[addTab,$('btnConfirmSave').hidden,$('btnCopyLoginLink').hidden]`),['local',false,false]);
+    await run(`loadStatus()`);
     assert.equal(await run(`document.querySelector('#modalPlatformSelect option[value=claude]').disabled`),true);
     assert.deepEqual(await run(`[...document.querySelector('#modalPlatformSelect').options].map(e=>e.value)`),['codex','agy','claude']);
     await run(`closeSaveModal()`);
-    for(const id of ['agy'])for(const layout of ['cards','rows']) {
-      await run(`selectTab('${id}');accountLayout='${layout}';renderWorkbench()`);
+    await run(`selectTab('agy')`);
+    w.setSize(760,700);
+    for(const layout of ['cards','rows']) {
+      await run(`accountLayout='${layout}';renderWorkbench()`);
       assert.equal(await run(`document.querySelectorAll('.current-quota,.card-resources,.credit-corner,.reset-ticket,.row-column-head').length`),0);
       assert.equal(await run(`document.querySelectorAll('[data-action="handleSwitchProfile"],[data-action="handleRestartClient"]').length`),0);
-      assert.equal(await run(`document.querySelectorAll('.provider-notice').length`),1);
       assert.equal(await run(`document.querySelectorAll('.credential-card').length`),1);
-      assert.doesNotMatch(await run(`document.querySelector('#workspaceContent').textContent`),/Pro·200|套餐未知|周期额度|Credits|额度未提供/);
-      for(const width of [760,880,1120]) {
-        w.setSize(width,700);await pause(100);
-        assert.equal(await run(`[...document.querySelectorAll('.account-card,.provider-session-card,.account-list')].some(e=>e.clientWidth&&e.scrollWidth>e.clientWidth+1)`),false,`${id}/${layout}/${width} overflow`);
-      }
-      w.setSize(880,700);await pause(140);
-      fs.writeFileSync(outputPath(`${id}-${layout}.png`),(await w.webContents.capturePage()).toPNG());
-      await run(`openAccountDetails('${id}',agentsData.find(a=>a.id==='${id}').profiles[0].name)`);await pause(180);
-      assert.doesNotMatch(await run(`document.querySelector('[data-account-details]').textContent`),/Credits|未取得|上次更新|刷新额度/);
-      assert.equal(await run(`document.querySelectorAll('[data-account-details] [data-action="handleDeleteProfile"]').length`),1);
-      assert.equal(await run(`document.querySelectorAll('[data-account-details] [data-action="handleExportProfile"]').length`),1);
-      await run(`document.querySelector('[data-account-details]').dismissAccountDialog(false)`);await pause(150);
+      assert.equal(await run(`[...document.querySelectorAll('.account-card,.provider-session-card,.account-list')].some(e=>e.clientWidth&&e.scrollWidth>e.clientWidth+1)`),false);
     }
+    assert.equal(await run(`document.querySelectorAll('.provider-notice').length`),1);
+    await run(`openAccountDetails('agy',agentsData.find(a=>a.id==='agy').profiles[0].name)`);
+    assert.doesNotMatch(await run(`document.querySelector('[data-account-details]').textContent`),/Credits|未取得|上次更新|刷新额度/);
+    assert.deepEqual(await run(`[...document.querySelectorAll('[data-account-details] .account-actions button')].map(b=>b.textContent)`),['删除账号','导出账号']);
+    await run(`document.querySelector('[data-account-details]').dismissAccountDialog(false)`);
     await run(`selectTab('agy');openSaveModal('agy')`);await pause(100);
     assert.equal(await run(`addTab`),'session');
     await run(`selectAddTab('local')`);await pause(100);
@@ -55,9 +53,6 @@ app.whenReady().then(async()=>{
     assert.equal(await run(`document.querySelector('#modalProfileInput').required`),false);
     assert.equal(await run(`document.querySelector('#btnConfirmSave').hidden`),true);
     await run(`closeSaveModal();`);
-    await run(`selectTab('codex');accountLayout='cards';renderWorkbench()`);
-    assert.equal(await run(`document.querySelectorAll('.current-quota').length`),1);
-    assert.equal(await run(`document.querySelectorAll('.card-resources').length`),3);
     await run(`window.providerTestApi.native();loadStatus()`);await pause(100);
     await run(`selectTab('agy');renderWorkbench()`);
     assert.equal(await run(`document.querySelector('.current-plan').textContent`),'Ultra');

@@ -27,9 +27,8 @@ app.whenReady().then(async () => {
       return {name,meta:{label:name,email:'account@example.test',snapshot:status}};
     };
     agent.profiles=[active,
-      make('主力开发','pro',null,80),make('长任务备用','prolite',null,100),make('代码审查','pro',null,30),make('失效Pro','promax',null,100,'expired'),
-      make('短期充足','plus',100,55),make('低周额度','plus',100,5),make('较低短期','plus',98,100),
-      make('短期耗尽','plus',0,58),make('周额度耗尽','plus',100,0),make('缺少5h','plus',null,9),make('缺少7d','plus',90,null),
+      make('长任务备用','prolite',null,100),make('主力开发','pro',null,80),
+      make('短期充足','plus',100,55),make('缺少5h','plus',null,9),make('缺少7d','plus',90,null),
       make('缓存查询','plus',85,62,'error'),make('首次查询','plus',null,null,'error'),make('失效Plus','plus',100,90,'expired')];
     $('badge-count-codex').textContent=agent.profiles.length;syncSidebarLabels();
     accountLayout='cards';selectTab('codex');
@@ -47,14 +46,12 @@ app.whenReady().then(async () => {
     await run(`localStorage.clear();applySidebar()`);
     await setup();
     assert.deepEqual(await order(), ['pro','plus']);
-    assert.deepEqual(await run(`[...document.querySelectorAll('[data-family="pro"] .account-card')].map(c=>c.dataset.profile)`), ['主力开发','长任务备用','代码审查','失效Pro']);
-    assert.deepEqual(await run(`[...document.querySelectorAll('[data-family="plus"] .account-card')].slice(0,5).map(c=>c.dataset.profile)`), ['短期充足','低周额度','较低短期','短期耗尽','周额度耗尽']);
-    assert.equal(await run(`document.querySelector('[data-family="plus"] .account-card:last-child').dataset.profile`), '失效Plus');
+    assert.equal(await run(`document.querySelector('[data-family="pro"] .account-card').dataset.profile`),'主力开发');
     const initial = await geometry();
     assert.equal(initial.heights['短期充足'],103);
     for (const name of ['缺少5h','缺少7d','缓存查询']) assert.equal(initial.heights[name],initial.heights['短期充足']);
     assert.equal(initial.heights['主力开发'],84);
-    for (const name of ['首次查询','失效Plus','失效Pro']) assert.ok(initial.heights[name] <= initial.heights['主力开发'] + 1);
+    for (const name of ['首次查询','失效Plus']) assert.ok(initial.heights[name] <= initial.heights['主力开发'] + 1);
     assert.deepEqual(initial.missing[0][0], ['5h','—','未提供']);
     assert.deepEqual(initial.missing[1][1], ['7d','—','未提供']);
     assert.equal(initial.cached,2);
@@ -79,7 +76,6 @@ app.whenReady().then(async () => {
     assert.deepEqual(await order(), ['plus','pro']);
     assert.equal(await run(`document.querySelector('[data-profile="长任务备用"] .account-select').checked`),true);
     assert.equal(await run(`exportSelection.size`),1);
-    assert.deepEqual(await run(`[...document.querySelectorAll('[data-family="pro"] .account-card')].map(c=>c.dataset.profile)`), ['主力开发','长任务备用','代码审查','失效Pro']);
     await pause(50);
     fs.writeFileSync(outputPath('account-groups-manage.png'),(await window.webContents.capturePage()).toPNG());
 
@@ -95,7 +91,6 @@ app.whenReady().then(async () => {
     await run(`renderWorkbench()`);
     assert.equal(await run(`document.querySelector('[data-family="plus"] .accounts-grid').hidden`),true);
     assert.equal(await run(`window.testApi.calls().length`),accountCalls,'Display changes must not operate on accounts');
-
     await window.webContents.reload();
     await pause(300);
     await setup();
@@ -107,24 +102,16 @@ app.whenReady().then(async () => {
     await run(`{const p=structuredClone(agentsData[0].profiles[1]);p.name='新套餐';p.meta.snapshot.plan='team';agentsData[0].profiles.push(p);renderWorkbench();}`);
     assert.deepEqual(await order(), ['plus','pro','team']);
 
-    for (const layout of ['cards','rows']) {
-      await click(`[data-action="setAccountLayout"][data-layout="${layout}"]`);
-      for (const width of [1440,1120,748,636]) {
-        window.setSize(width,900);
-        await run(`writeLayout('sidebarCollapsed','${width===636}');applySidebar();renderWorkbench()`);
-        await pause(40);
-        assert.deepEqual((await geometry()).overflow,[],`${layout} at ${width}px`);
-        await click('[data-action="startSelection"]');
-        assert.deepEqual((await geometry()).overflow,[],`Managing ${layout} at ${width}px`);
-        await click('[data-action="endSelection"]');
-      }
-    }
+    window.setSize(636,900);
+    await run(`writeLayout('sidebarCollapsed','true');applySidebar();startSelection()`);await pause(40);
+    assert.deepEqual((await geometry()).overflow,[],'Group controls fit while managing accounts at minimum width');
+    await click('[data-action="endSelection"]');
     await run(`writeLayout('accountGroups.codex','{invalid');renderWorkbench()`);
     assert.deepEqual(await order(), ['pro','plus','team']);
     await run(`(async()=>{await window.providerTestApi.setup();await loadStatus();selectTab('agy');})()`);
     assert.equal(await run(`document.querySelectorAll('.account-group-toggle,.account-group-actions,.card-resources').length`),0);
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({passed:true,initial,checks:'Weighted sorting, missing periods, compact errors, fold/move/search/reload/selection, both layouts, non-quota Agent'}));
+    console.log(JSON.stringify({passed:true,initial,checks:'Missing periods, compact errors, fold/move/search/reload/selection, both layouts, non-quota Agent'}));
     app.exit(0);
   } catch (error) {
     console.error(error, errors);

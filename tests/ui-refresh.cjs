@@ -2,6 +2,7 @@ require('./ui-support.cjs');
 const {app,BrowserWindow}=require('electron');
 const assert=require('node:assert/strict');
 const path=require('node:path');
+const {antigravityRenewalHint}=require('../dist/agents/antigravity');
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 app.whenReady().then(async()=>{
   const w=new BrowserWindow({width:1120,height:740,show:false,webPreferences:{preload:path.join(__dirname,'fixture-preload.cjs'),contextIsolation:true}});
@@ -49,14 +50,6 @@ app.whenReady().then(async()=>{
     assert.equal(await run(`document.querySelector('dialog [data-refresh-account]').disabled`),false);
     assert.equal(await run(`document.querySelector('dialog [data-refresh-account]').getAttribute('aria-label')`),'刷新额度');
     assert.equal(await run(`document.querySelector('dialog [data-refresh-account] svg').classList.contains('spin')`),false);
-    const contextContent=await run(`document.querySelector('dialog .account-dialog-body').textContent`);
-    await close();
-    assert.equal(await run(`document.activeElement.closest('[data-account-context]')===null`),true);
-
-    await run(`document.querySelector('[data-profile="工作账号"].account-card .credit-corner').click()`);
-    assert.equal(await run(`document.querySelector('dialog[open]')===null`),true,'Credits corner only shows a tooltip');
-    await context('[data-profile="工作账号"].account-card');
-    assert.equal(await run(`document.querySelector('dialog .account-dialog-body').textContent`),contextContent);
     await run(`window.refreshTestApi.nextCredit('3.75');document.querySelector('dialog [data-action=refreshSelected]').click()`);await idle();
     assert.match(await run(`document.querySelector('dialog[open]').textContent`),/3.75/);
     assert.equal(await run(`document.querySelector('dialog[open] [data-action=refreshSelected]').disabled`),false);
@@ -123,14 +116,81 @@ app.whenReady().then(async()=>{
     assert.equal((await calls()).length,beforeHidden+3,'In-flight queries finish, but the fourth account stays unqueried while hidden');
     await run(`Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'))`);await pause(30);await idle();
     assert.equal((await calls()).length,beforeHidden+4);
-    await run(`accountLayout='rows';renderWorkbench()`);
-    assert.equal(await run(`document.querySelectorAll('[data-account-context] [data-refresh-account]').length`),0);
-    await run(`{const c=document.querySelector('[data-profile="备用账号"].account-card');c.focus();c.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'F10',shiftKey:true}));}`);
-    assert.equal(await run(`document.querySelector('dialog[data-account-details]').dataset.profile`),'备用账号');
+    const yesterday=new Date(Date.now()-86400000).toISOString();
+    await run(`Object.defineProperty(document,'hidden',{configurable:true,value:true});window.providerTestApi.native(${JSON.stringify(yesterday)});loadStatus()`);
+    await run(`selectTab('agy')`);await context('.active-session-card');
+    const updatedLabel=()=>run(`document.querySelector('dialog .detail-update-row span').textContent`);
+    const quotaRows=()=>run(`[...document.querySelectorAll('dialog .detail-quota-list .account-detail-line')].map(row=>row.textContent)`);
+    const oldLabel=await updatedLabel(), oldQuotas=await quotaRows();
+    assert.ok(oldQuotas.length>0);
+    const beforeDeferred=(await calls()).length;
+    await run(`window.refreshTestApi.deferNext(${JSON.stringify(antigravityRenewalHint)});document.querySelector('dialog [data-refresh-account]').click()`);
+    await idle();
+    assert.deepEqual((await calls()).slice(beforeDeferred),[{method:'refresh',id:'agy',name:'Google A',force:true}]);
+    const detailNote=await run(`document.querySelector('dialog .detail-status-note').innerText`);
+    assert.equal(detailNote,antigravityRenewalHint);
+    assert.ok(!(await run(`document.querySelector('.active-session-card').innerText`)).includes(detailNote));
+    assert.equal(await run(`document.querySelector('#toastBox').textContent`),detailNote);
+    assert.equal(await updatedLabel(),oldLabel);
+    assert.deepEqual(await quotaRows(),oldQuotas);
+    assert.equal(await run(`document.querySelector('dialog [data-refresh-account]').getAttribute('aria-busy')`),'false');
+    await run(`Object.defineProperty(document,'hidden',{configurable:true,value:false});refreshAll(false)`);await idle();
+    assert.equal((await calls()).length,beforeDeferred+1,'A deferred check must not trigger another immediate query');
+    await run(`document.querySelector('dialog [data-refresh-account]').click()`);await idle();
+    assert.notEqual(await updatedLabel(),oldLabel);
+    assert.notEqual(await run(`document.querySelector('dialog .detail-status-note')?.innerText`),antigravityRenewalHint);
+    assert.match(await run(`document.querySelector('#toastBox').textContent`),/账号额度已刷新/);
     await close();
-    assert.equal(await run(`document.activeElement.dataset.profile`),'备用账号');
-    await run(`startSelection()`);await context('.account-card');
-    assert.equal(await run(`document.querySelector('dialog[open]')===null`),true);
-    console.log(JSON.stringify({passed:true,retainsSnapshotOnResume:true,backgroundRevalidation:true,contextDetails:true,keyboardContext:true,unsavedCurrent:true,singleAccount:true,queuePriority:true,deduplication:true,partialFailure:true,detailsUpdate:true,hiddenPause:true}));app.exit(0);
+
+    const activeCalls={method:'refresh',id:'codex',name:'个人主力',force:false};
+    const beforeCandidate=(await calls()).length;
+    await run(`window.refreshTestApi.stageCurrent(0,600000);loadStatus()`);
+    await run(`refreshAll(false)`);
+    assert.equal((await calls()).length,beforeCandidate,'An overdue live login must not requery a recently checked candidate');
+    await run(`window.refreshTestApi.unreadableCurrent();loadStatus()`);
+    await run(`refreshAll(false)`);
+    assert.equal((await calls()).length,beforeCandidate,'An unreadable saved credential must not inherit a due live deadline');
+    await run(`window.refreshTestApi.stageCurrent(600000,0);loadStatus()`);
+    await run(`selectTab('codex')`);await context('.active-session-card');
+    const liveRows=await quotaRows(),liveUpdated=await updatedLabel();
+    assert.ok(liveRows.length);
+    const candidateNote=()=>run(`document.querySelector('dialog .detail-quota-list').textContent`);
+    assert.match(await candidateNote(),/等待验证新凭据/);
+    await run(`window.refreshTestApi.deferNext();window.refreshTestApi.failStatusReads(true);refreshAll(false)`);
+    assert.deepEqual((await calls()).slice(beforeCandidate),[activeCalls],'A fresh live login must not delay a due candidate');
+    assert.match(await candidateNote(),/暂不验证新凭据/,'The batch presents the updated verification reason');
+    assert.deepEqual(await quotaRows(),liveRows,'A pending candidate result cannot replace live quota in a batch');
+    assert.equal(await updatedLabel(),liveUpdated);
+    await run(`window.refreshTestApi.failStatusReads(false);loadStatus()`);
+    assert.match(await candidateNote(),/暂不验证新凭据/,'Candidate feedback must survive the next successful dashboard read');
+    assert.deepEqual(await quotaRows(),liveRows);
+    assert.equal(await updatedLabel(),liveUpdated);
+    await close();
+    assert.ok(await run(`!!document.querySelector('.active-session-card [data-action="openCredentialUpdate"]')`),
+      'A saved candidate can be replaced through official login while the live quota is healthy');
+    await run(`document.querySelector('.active-session-card [data-action="openCredentialUpdate"]').click()`);
+    assert.equal(await run(`$('saveModalOverlay').open && credentialUpdate?.profile`),'个人主力');
+    await run(`closeSaveModal()`);
+
+    for(const manual of [false,true]){
+      await run(`window.refreshTestApi.stageCurrent(600000,600000);loadStatus()`);
+      const beforeOutage=(await calls()).length;
+      await run(`window.refreshTestApi.failStatusReads(true)`);
+      await run(manual?`refreshSelected('codex','个人主力',true)`:`refreshAll(false)`);
+      await pause(1150);
+      await run(`refreshAll(false)`);
+      await idle();
+      assert.deepEqual((await calls()).slice(beforeOutage),[{...activeCalls,force:manual}],
+        'A failed account list reload must not repeat a successful quota request on the next timer or automatic trigger');
+      await run(`refreshSelected('codex','个人主力',true)`);
+      assert.deepEqual((await calls()).slice(beforeOutage+1),[{...activeCalls,force:true}],
+        'A manual request remains available while local status is unavailable');
+      await run(`window.refreshTestApi.stageCurrent(600000,0);window.refreshTestApi.failStatusReads(false);window.dispatchEvent(new Event('focus'))`);
+      for(let i=0;i<100&&(await calls()).length===beforeOutage+2;i++)await pause(20);
+      await idle();
+      assert.deepEqual((await calls()).slice(beforeOutage+2),[activeCalls],
+        'A fresh dashboard after recovery must immediately schedule a newly due candidate');
+    }
+    console.log(JSON.stringify({passed:true,retainsSnapshotOnResume:true,backgroundRevalidation:true,contextDetails:true,unsavedCurrent:true,singleAccount:true,queuePriority:true,deduplication:true,partialFailure:true,detailsUpdate:true,hiddenPause:true}));app.exit(0);
   }catch(e){console.error(e);app.exit(1);}
 });

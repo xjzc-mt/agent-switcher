@@ -1,33 +1,45 @@
 # 构建与发布
 
-首版分发 macOS Apple Silicon 的 DMG。面向用户的功能、安装说明和兼容范围见[首发说明](release-1.0.0.md)。
+[1.0.1](release-1.0.1.md) 分发 macOS Apple Silicon、Intel 两种 DMG 及 Windows x64 安装程序。版本基线、源码验收和待测环境见[当前待办](当前待办.md)。初始 1.0.0 测试版资料保留在[历史说明](release-1.0.0.md)。
+
+## 版本与提交
+
+1. 保留 `358eb6d` 和已有 1.0.0 测试包作为升级基线。当前候选源码在包清单和锁文件中均为 `1.0.1`，预定标签为 `v1.0.1`。应用按三段数字比较版本。[更新器](../src/app-updates.ts)
+2. 固定候选提交前核对 `git status --short --untracked-files=all`，特别检查新主进程模块、小菜单页面与预加载、公钥、官网和验收用例。用该提交的干净检出构建，避免现有工作区或陈旧 `dist/` 掩盖漏交的文件。体验记录留存源码构建标识、平台及对应提交。
+3. 确定发布范围时，在候选提交同步应用版本、锁文件根版本、发布说明和下载入口。每个对外版本的标签、平台产物及校验文件对应同一提交。若 Windows 修复晚于已发 macOS 版本且需要改源码，给后续发布分配下一个版本号。
+4. 保留旧版支持的 `SHA256SUMS`，同时为新版更新器提供 `.signed.json` 发布清单。旧版固定查询当前仓库。若发布入口迁移，需在官网提供首次手动升级路径，并将新版更新器指向公开发布入口。
 
 ## 构建候选版本
 
-在 Apple Silicon Mac 上核对 `package.json`、锁文件根版本与预定标签。例如，版本 `1.0.0` 对应标签 `v1.0.0`。从同一提交构建并校验：
+在构建前核对 `package.json`、锁文件根版本与预定标签。在 GitHub 创建指向完整提交 SHA 的 Release 草稿，手动运行 [Build release installers](../.github/workflows/release-build.yml)。三个原生 runner 从该提交打包，启动校验成功后写入版本和提交均匹配的草稿。下载三份安装包，在保管私钥的机器上签名。
 
 ```bash
 npm ci
 npm run lint
 npm test
 npm run test:ui
-npm run dist
-npm run release:checksums -- release/AgentSwitcher-1.0.0-arm64.dmg
+npm run release:checksums -- --sign-key /path/to/offline-private.pem release/AgentSwitcher-1.0.1-arm64.dmg release/AgentSwitcher-1.0.1-x64.dmg release/AgentSwitcher-Setup-1.0.1-x64.exe
 (cd release && shasum -a 256 -c SHA256SUMS)
-hdiutil verify release/AgentSwitcher-1.0.0-arm64.dmg
+hdiutil verify release/AgentSwitcher-1.0.1-arm64.dmg
 ```
 
 UI 回归使用演示账号。界面发生变化时，先用 `npm run screenshots` 更新[截图](images/README.md)，再固定构建提交。
 
+### 发布密钥
+
+客户端的信任起点是项目内的 `assets/release-signing-public.pem`（Ed25519 SPKI 公钥）。保管相应的 PKCS#8 私钥及独立备份，将私钥留在仓库和构建输出目录之外。签名脚本会比对公钥，只在输出目录写入校验文件与签名清单。执行签名时传入本地密钥文件路径。
+
+仅生成手动校验文件可运行原命令 `npm run release:checksums -- 路径/安装包.dmg`。轮换密钥时，先构建内置新公钥的过渡版本，从固定旧公钥的上一版源码目录，用旧私钥为过渡版本签名。保留过渡版的手动下载入口，后续版本使用新密钥签名。旧私钥遗失或泄露时，通过可信渠道重新分发内置新公钥的安装包。
+
 ## 检查安装包
 
-只读挂载 DMG，将应用复制到测试目录。核对版本、架构、应用图标及菜单栏图标，对复制出的应用运行 `codesign --verify --deep --strict`。当前使用 ad-hoc 签名，安装说明须准确说明签名和公证状态。
+只读挂载 DMG，将应用复制到测试目录。核对版本、架构、Info.plist 最低系统版本、应用图标及菜单栏图标，对复制出的应用运行 `codesign --verify --deep --strict`。当前使用 ad-hoc 签名，安装说明须准确说明签名和公证状态。
 
 在独立的 macOS 用户或干净机器上按默认方式启动应用，验证账号页、设置和正常退出。使用演示凭据检查登录、额度、切换、导入和备份。
 
 ## 发布稳定版
 
-1. 将草稿指向构建安装包的提交。Assets 使用 `AgentSwitcher-1.0.0-arm64.dmg` 和同批 `SHA256SUMS`，核对文件名、大小及 SHA-256。草稿正文中的文档链接应指向该版本源码。
+1. 为待发布版本新建草稿，指向构建安装包的提交。核对三份安装包，上传各自同名的 `.signed.json` 清单及同批 `SHA256SUMS`，核对版本、文件名、大小和 SHA-256。草稿正文中的文档链接应指向该版本源码。
 2. 核对安装说明和对应提交的 CI，完成安装验收后发布稳定版。正式标签指向已验收的提交。
-3. 从公开 Release 匿名下载安装包和校验文件，按用户步骤验证下载、校验与安装。从较旧的受支持版本验证应用内更新入口。
-4. 已发布版本如有安装或凭据问题，保留可追溯的原包并发布新版本。需要回退账号池时，通过独立密码保护的 `.ags` 备份恢复，详见[账号管理](account-management.md)。
+3. 匿名访问 Pages 与公开 Release，验证中英文页面的下载、校验与安装。从较旧的受支持版本验证应用内更新。当前私有仓库的套餐无法启用 Pages。仓库公开后，在 Settings → Pages 选择 GitHub Actions 并运行 Deploy GitHub Pages，再核对中英文主页。
+4. 已发布版本如有安装或凭据问题，保留可追溯的原包并发布新版本。回退账号池须使用目标版本可读取的备份；回退到初始 v1.0.0 时，使用升级前保留的 AGS1 备份。详见[账号管理](account-management.md)。

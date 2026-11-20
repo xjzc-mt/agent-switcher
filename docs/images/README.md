@@ -10,7 +10,7 @@
 node_modules/.bin/electron scripts/capture-screenshots.cjs
 ```
 
-脚本复用 `tests/fixture-preload.cjs` 和隔离浏览器数据目录，不启动生产主进程，不读取账号池、Keychain 或真实客户端凭据；外部网络请求和新窗口被阻止。执行后清理临时浏览器数据。截图为生成文件，不计入源码行数。
+脚本复用 `tests/fixture-preload.cjs` 和隔离浏览器数据目录，在 macOS 上为 Chromium 启用模拟钥匙串。演示资料由夹具提供，外部网络请求和新窗口均被阻止，退出后清理临时浏览器数据。截图为生成文件，不计入源码行数。
 
 | 图片 | 展示场景 |
 | --- | --- |
@@ -21,6 +21,6 @@ node_modules/.bin/electron scripts/capture-screenshots.cjs
 | `05-import-preview.png` | 批量导入预览、命名、重复项与无效项提示 |
 | `06-encrypted-backup.png` | 多账号选择与密码加密备份 |
 | `07-remove-confirmation.png` | 移除范围核对、默认保留客户端登录 |
-| `08-settings.png` | 显示偏好、清理指令入口与应用更新设置 |
+| `08-settings.png` | 1.0.1 显示偏好、清理指令、应用更新与导出故障报告 |
 
 设置图保留「尚未检查新版」，不伪造可下载的未来版本。截图中的密码为演示值；实际使用请自行设置并妥善保存备份密码。

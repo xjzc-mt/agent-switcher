@@ -1,0 +1,39 @@
+:root {
+  --surface: #ffffff;
+  --surface-hover: #f8fafc;
+  --border-subtle: #edf2f7;
+  --brand: #4f46e5;
+  --brand-hover: #4338ca;
+  --brand-bg: #eef2ff;
+  --brand-text: #4338ca;
+  --text-secondary: #475569;
+  --text-dim: #94a3b8;
+  --success: #059669;
+  --success-bg: #ecfdf5;
+  --success-border: #a7f3d0;
+  --danger: #dc2626;
+  --danger-bg: #fef2f2;
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --bg: #f7f9fc;
+  --sidebar-bg: #f0f3f8;
+  --border: #e2e7ef;
+  --text: #172033;
+  --text-muted: #66758c;
+  --pool-low: #986000;
+  --pool-empty: #c23636;
+  --quota-ample-text:#246847; --quota-ample-bg:#e1f0e7;
+  --quota-normal-text:#34618b; --quota-normal-bg:#eaf1f8;
+  --quota-low-text:#8b5710; --quota-low-bg:#faeed9;
+  --quota-empty-text:#a73640; --quota-empty-bg:#fae6e8;
+  --quota-cached-text:#59697c; --quota-cached-bg:#eef1f5;
+  --plan-bronze:#8d6149; --plan-silver:#617083; --plan-gold:#8a6b20;
+}
+@media (prefers-contrast:more) {
+  :root {
+    --quota-ample-text:#164e32; --quota-ample-bg:#d3e8dc;
+    --quota-normal-text:#244e76; --quota-normal-bg:#dfebf7;
+    --quota-low-text:#694005; --quota-low-bg:#f5e3c6;
+    --quota-empty-text:#7c2430; --quota-empty-bg:#f4d8dc;
+    --quota-cached-text:#29374a; --quota-cached-bg:#e6ebf1;
+  }
+}

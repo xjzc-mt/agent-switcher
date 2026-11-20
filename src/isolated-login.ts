@@ -46,11 +46,12 @@ export function createLoginManager(agent: BaseAgent, startServer: (directory: st
       if (server?.phase === 'complete' && server.attempt !== seenAttempt) return { completed: true };
       if (server?.phase === 'complete' || server?.phase === 'failed') await discard();
       if (!server) {
-        const target = updateProfile === undefined ? undefined : credentialUpdateTarget(agent, updateProfile);
+        const target = updateProfile === undefined ? undefined : credentialUpdateTarget(agent, updateProfile, { allowStaged: true });
         const directory = await prepareLogin(agent);
-        if (expected !== generation) return { canceled: true };
+        if (expected !== generation) { cancelLogin(agent); return { canceled: true }; }
         if (!directory) throw new Error('无法创建独立登录目录');
-        server = startServer(directory, target);
+        try { server = startServer(directory, target); }
+        catch (err) { cancelLogin(agent); throw err; }
       }
       try {
         const url = await server.link;
@@ -100,7 +101,7 @@ export function createLoginManager(agent: BaseAgent, startServer: (directory: st
       await current.stop();
       const result = await updateAccountCredentials(current.target, current.directory, () => {
         if (expected !== generation || server !== current) throw new Error('登录已取消，请重新登录');
-      });
+      }, { trusted: true });
       await discard();
       return result;
     });

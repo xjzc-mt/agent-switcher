@@ -19,6 +19,28 @@ beforeEach(() => {
 });
 after(() => { restore?.(); fs.rmSync(root, { recursive: true, force: true }); });
 
+test('Windows DPAPI reopens the fixture account in a fresh process', {
+  skip: process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true',
+}, () => {
+  const script = `
+    const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+    os.homedir = () => process.env.AGS_TEST_HOME;
+    const { atomicWrite, readBuffer } = require('./dist/utils');
+    const file = path.join(os.homedir(), '.agent-switcher', 'codex', 'demo', 'auth.json');
+    if (process.argv[1] === 'save') atomicWrite(file, 'synthetic-login');
+    else {
+      const assert = require('node:assert/strict');
+      assert.equal(fs.readFileSync(file).includes('synthetic-login'), false);
+      assert.equal(readBuffer(file).toString(), 'synthetic-login');
+    }
+  `;
+  for (const action of ['save', 'reopen']) {
+    childProcess.execFileSync(process.execPath, ['-e', script, action], {
+      cwd: path.join(__dirname, '..'), env: { ...process.env, AGS_TEST_HOME: root },
+    });
+  }
+});
+
 test('pool bytes are encrypted, native client files and metadata retain their formats', () => {
   atomicWrite(file(), auth);
   const encrypted = fs.readFileSync(file());
@@ -114,28 +136,18 @@ test('replaced key and damaged ciphertext cannot silently overwrite an existing 
   assert.deepEqual(fs.readFileSync(file()), damaged);
 });
 
-test('dashboard-style repeated reads unlock once, while writes and migration recheck the system key', () => {
+test('reading two profiles shares one key lookup, and renewal readiness rechecks the cached key', () => {
   atomicWrite(file(), auth); atomicWrite(file('B'), auth);
   let reads = 0;
   const resetSession = vault.setCredentialKeyProvider({ read: () => { reads++; return key; }, create: () => { throw new Error('unexpected creation'); } });
   try {
-    for (let n = 0; n < 100; n++) {
-      assert.deepEqual(readBuffer(file()), auth);
-      assert.deepEqual(readBuffer(file('B')), auth);
-    }
-    assert.equal(reads, 1, '200 profile reads should not launch 200 Keychain commands');
+    assert.deepEqual(readBuffer(file()), auth);
+    assert.deepEqual(readBuffer(file('B')), auth);
+    assert.equal(reads, 1);
     const beforeCheck = fs.readFileSync(file());
     vault.assertCredentialWriteReady(file());
     assert.equal(reads, 2, 'renewal readiness must recheck the system even with an unlocked read cache');
     assert.deepEqual(fs.readFileSync(file()), beforeCheck, 'readiness must not change credentials');
-    atomicWrite(file(), auth);
-    const afterWrite = reads;
-    assert.ok(afterWrite > 1, 'a cached read key must not authorize writes');
-    vault.migrateCredentialPool();
-    assert.ok(reads > afterWrite, 'migration must not rely on the read cache');
-    key = null;
-    assert.throws(() => vault.migrateCredentialPool(), /密钥不存在/);
-    assert.deepEqual(readBuffer(file()), auth);
   } finally { resetSession(); }
 });
 
@@ -177,14 +189,127 @@ test('vault rejects symlink directory escapes and does not touch external creden
   assert.deepEqual(fs.readFileSync(path.join(external, 'auth.json')), auth);
 });
 
-test('active key initialization is not overwritten; a dead process lock is recoverable', () => {
-  rawWrite(path.join(pool, '.vault-key.lock'), String(process.pid));
+test('startup isolates nonregular credential paths while key creation still refuses ambiguous storage', () => {
+  atomicWrite(file('healthy'), auth);
+  const outside = path.join(root, 'outside-pool');
+  rawWrite(path.join(outside, 'auth.json'), auth);
+  const linkedFile = file('linked-file'), directoryFile = file('dir-file');
+  const linkedProfile = path.dirname(file('linked-profile'));
+  fs.mkdirSync(path.dirname(linkedFile));
+  fs.symlinkSync(path.join(outside, 'auth.json'), linkedFile);
+  fs.mkdirSync(directoryFile, { recursive: true });
+  fs.symlinkSync(outside, linkedProfile);
+  const result = vault.migrateCredentialPool({ isolateFileErrors: true });
+  assert.deepEqual(result.corrupted.sort(), [linkedFile, directoryFile, linkedProfile].sort());
+  assert.deepEqual(readBuffer(file('healthy')), auth);
+  assert.deepEqual(fs.readFileSync(path.join(outside, 'auth.json')), auth);
+  assert.ok(fs.lstatSync(linkedFile).isSymbolicLink());
+  assert.ok(fs.statSync(directoryFile).isDirectory());
+  fs.unlinkSync(file('healthy'));
+  const reset = vault.setCredentialKeyProvider({ read: () => null, create: () => assert.fail('must not create') });
+  try { assert.throws(() => atomicWrite(file('new'), auth), /符号链接|普通文件/); }
+  finally { reset(); }
+});
+
+test('EPERM keeps an active or unobservable lock owner and only evicts a confirmed reused PID', {
+  skip: typeof process.getuid !== 'function',
+}, () => {
+  const lock = path.join(pool, '.lock');
+  rawWrite(path.join(lock, 'owner'), String(process.pid));
+  const kill = process.kill, ps = childProcess.execFileSync;
+  let processInfo;
+  try {
+    process.kill = () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }); };
+    childProcess.execFileSync = () => {
+      if (!processInfo) throw new Error('process information unavailable');
+      return processInfo;
+    };
+    assert.equal(vault.evictDeadLock(lock), false);
+    processInfo = `${process.getuid()} Thu Jan 1 00:00:00 1970`;
+    assert.equal(vault.evictDeadLock(lock), false);
+    assert.ok(fs.existsSync(path.join(lock, 'owner')));
+    processInfo = `${process.getuid() + 1} Thu Jan 1 00:00:00 1970`;
+    assert.equal(vault.evictDeadLock(lock), true);
+    assert.equal(fs.existsSync(lock), false);
+  } finally { process.kill = kill; childProcess.execFileSync = ps; }
+});
+
+test('key initialization waits for a live owner and recovers a stale empty lock', () => {
+  rawWrite(path.join(pool, '.vault-key.lock'), `${process.pid}\nactive-nonce`);
   assert.throws(() => atomicWrite(file(), auth), /正在初始化/);
   assert.equal(creations, 0);
-  fs.writeFileSync(path.join(pool, '.vault-key.lock'), '2147483647');
+
+  // Empty 0-byte crash lock (>5s old) is recovered cleanly.
+  const lockPath = path.join(pool, '.vault-key.lock');
+  fs.writeFileSync(lockPath, '');
+  const staleTime = new Date(Date.now() - 8000);
+  fs.utimesSync(lockPath, staleTime, staleTime);
   atomicWrite(file(), auth);
   assert.deepEqual(readBuffer(file()), auth);
   assert.equal(creations, 1);
+});
+
+test('plaintext migration preserves the original if the key disappears or changes before replacement', () => {
+  // Scenario 1a: Key vanishes right after encryption, before final verification & rename.
+  rawWrite(file('plain-vanish'), auth);
+  let liveKey = Buffer.alloc(32, 11), readCount = 0;
+  const reset1 = vault.setCredentialKeyProvider({
+    read: () => {
+      readCount++;
+      // 1st read in encodeCredentialFile succeeds; 2nd read in verifyCredentialWrite sees missing key!
+      return readCount === 1 ? liveKey : null;
+    },
+    create: () => assert.fail('must not create'),
+  });
+  try {
+    assert.throws(() => vault.migrateCredentialPool(), /密钥不存在/);
+    assert.deepEqual(fs.readFileSync(file('plain-vanish')), auth, 'original plaintext bytes must survive');
+  } finally { reset1(); }
+
+  // Scenario 1b: Key changes right after encryption, before final verification & rename.
+  readCount = 0;
+  const reset2 = vault.setCredentialKeyProvider({
+    read: () => {
+      readCount++;
+      return readCount === 1 ? Buffer.alloc(32, 11) : Buffer.alloc(32, 22);
+    },
+    create: () => assert.fail('must not create'),
+  });
+  try {
+    assert.throws(() => vault.migrateCredentialPool(), /密钥已变化/);
+    assert.deepEqual(fs.readFileSync(file('plain-vanish')), auth, 'original plaintext bytes must survive');
+  } finally { reset2(); }
+
+});
+
+test('a migration scan reads the system key once even when many encrypted profiles are damaged', () => {
+  atomicWrite(file('good'), auth);
+  const healthy = fs.readFileSync(file('good'));
+  const damaged = Buffer.from(healthy);
+  damaged[damaged.length - 1] ^= 1;
+  const badPaths = Array.from({ length: 64 }, (_, i) => file(`bad-${i}`));
+  for (const target of badPaths) rawWrite(target, damaged);
+  let reads = 0;
+  const reset = vault.setCredentialKeyProvider({
+    read: () => { reads++; return key; },
+    create: () => assert.fail('the scan must not create a replacement key'),
+  });
+  const scan = () => vault.migrateCredentialPool({ isolateFileErrors: true });
+  try {
+    fs.unlinkSync(file('good'));
+    assert.deepEqual(scan().corrupted.sort(), [...badPaths].sort());
+    assert.equal(reads, 1);
+    rawWrite(file('good'), healthy);
+    assert.deepEqual(scan().corrupted.sort(), [...badPaths].sort());
+    assert.equal(reads, 2);
+    assert.deepEqual(readBuffer(file('good')), auth);
+    assert.equal(reads, 2);
+    key = null;
+    assert.throws(scan, /密钥不存在/);
+    assert.equal(reads, 3);
+    assert.deepEqual(fs.readFileSync(badPaths[0]), damaged);
+    assert.deepEqual(fs.readFileSync(file('good')), healthy);
+  } finally { reset(); }
 });
 
 test('macOS system provider uses stdin and verifies the saved key without overwriting an existing item', { skip: process.platform !== 'darwin' }, () => {

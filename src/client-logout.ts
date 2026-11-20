@@ -1,19 +1,22 @@
 import fs from 'fs';
 import path from 'path';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { windowsCodexProcesses } from './windows-processes';
+import { sharedCliSessions } from './temporary-credentials';
 import type { BaseAgent } from './agents/base';
 import { credentialState } from './credential-state';
 import { readJsonFile } from './utils';
 import { runningClients } from './clients';
-import { sharedAntigravitySessions } from './antigravity-native';
+import { sharedAntigravitySessions, nativeLogoutSupport } from './antigravity-native';
+import { isolatedCodexPids } from './codex-process';
 
-const run = promisify(execFile);
 
 /** Logout is deliberately narrower than switching: uncertain backends stay intact. */
 export function logoutSupport(agent: BaseAgent): string | undefined {
   if (process.platform !== 'darwin') return '此系统的客户端退出尚未验证，请在官方客户端退出';
-  if (agent.id === 'agy' && agent.management().storage === 'keychain' && agent.management().canSaveCurrent) return;
+  if (agent.id === 'agy' && agent.management().storage === 'keychain' && agent.management().canSaveCurrent) {
+    try { return nativeLogoutSupport(agent.readCredentials()[agent.authFiles[0]]); }
+    catch (error) { return error instanceof Error ? error.message : '无法可靠确认客户端登录，请在官方客户端退出'; }
+  }
   if (agent.id !== 'codex') return '此认证存储尚不支持自动退出，请在官方客户端退出';
   if (['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'].some(key => process.env[key])) {
     return '检测到环境变量认证，请先在官方客户端退出';
@@ -38,18 +41,26 @@ export function logoutSupport(agent: BaseAgent): string | undefined {
   } catch { return '无法确认 Codex 文件认证，请在官方客户端退出'; }
 }
 
+export async function runningCodexSessions(options: { failClosed?: boolean } = {}): Promise<number[]> {
+  if (process.platform === 'win32') {
+    const pids = await windowsCodexProcesses();
+    return pids.filter(pid => !isolatedCodexPids.has(pid));
+  }
+  if (process.platform !== 'darwin') {
+    if (options.failClosed) throw new Error('此系统尚未实现 Codex 会话探测');
+    return [];
+  }
+  return sharedCliSessions(isolatedCodexPids, command => ['codex', 'codex-cli'].includes(path.basename(command)));
+}
+
 export async function assertLogoutReady(agent: BaseAgent): Promise<void> {
   const unsupported = logoutSupport(agent);
   if (unsupported) throw new Error(unsupported);
-  if ((await runningClients(agent.id)).length) throw new Error('请先正常退出客户端，再移除本机登录');
+  if ((await runningClients(agent.id, { failClosed: true })).length) throw new Error('请先正常退出客户端，再移除本机登录');
   if (agent.id === 'agy') {
     if ((await sharedAntigravitySessions()).length) throw new Error('请先结束共用认证的 agy 或 IDE 会话');
-  } else {
-    const { stdout } = await run('/bin/ps', ['-axo', 'pid=,comm=']);
-    if (stdout.split('\n').some(line => {
-      const match = line.trim().match(/^(\d+)\s+(.+)$/);
-      return match && ['codex', 'codex-cli'].includes(path.basename(match[2]));
-    })) throw new Error('请先结束 Codex CLI、IDE 或其他正在使用凭据的会话');
+  } else if ((await runningCodexSessions()).length) {
+    throw new Error('请先结束 Codex CLI、IDE 或其他正在使用凭据的会话');
   }
 }
 

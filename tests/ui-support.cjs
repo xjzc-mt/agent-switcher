@@ -4,6 +4,7 @@ const path = require('node:path');
 const { app } = require('electron');
 
 // Each UI suite owns its browser state, including when run on its own.
+if (process.platform === 'darwin') app.commandLine.appendSwitch('use-mock-keychain');
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-ui-'));
 app.setPath('userData', userData);
 app.setPath('sessionData', userData);

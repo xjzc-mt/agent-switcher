@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import fs from 'fs';
+import { once } from 'events';
 import path from 'path';
 import { spawn } from 'child_process';
 import { ALL_AGENTS } from './accounts';
@@ -47,10 +47,12 @@ program
   .description('Switch <agent> to a saved <profile>')
   .option('--save-current', 'Save an unmanaged current account before switching')
   .option('--discard-current', 'Switch without saving an unmanaged current account')
+  .option('--allow-file-storage', 'Allow Antigravity to use its two private OAuth files and retire its previous Keychain login for a long credential')
   .addHelpText('after', `\n  Example: ags use codex work\n           ags use agy  personal`)
   .action(async (agentId: string, profileName: string, options) => {
     if (options.saveCurrent && options.discardCurrent) throw new Error('只能选择一种当前账号处理方式');
-    await runUse(resolveAgent(agentId), profileName, { saveUnmanaged: options.saveCurrent ? true : options.discardCurrent ? false : undefined });
+    await runUse(resolveAgent(agentId), profileName, { saveUnmanaged: options.saveCurrent ? true : options.discardCurrent ? false : undefined,
+      allowFileMigration: !!options.allowFileStorage });
   });
 
 // ── list ──────────────────────────────────────────────────────────────────────
@@ -86,17 +88,22 @@ program
 program
   .command('gui')
   .description('Open the AgentSwitcher desktop GUI')
-  .action(() => {
+  .action(async () => {
     const appRoot = path.join(__dirname, '..');
-    let electronBin = path.join(appRoot, 'node_modules', '.bin', 'electron');
-    if (!fs.existsSync(electronBin)) {
-      electronBin = 'electron';
+    let electronBin = 'electron';
+    try { electronBin = require('electron'); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'MODULE_NOT_FOUND') throw error;
     }
-
     const child = spawn(electronBin, [appRoot], {
       detached: true,
       stdio: 'ignore',
     });
+    try { await once(child, 'spawn'); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('未找到 Electron，请在 AGS 源码目录运行 npm ci 后重试');
+      throw error;
+    }
     child.unref();
     console.log('🤖 AgentSwitcher GUI launched.');
   });
