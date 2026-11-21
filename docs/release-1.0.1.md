@@ -1,6 +1,6 @@
 # AgentSwitcher 1.0.1
 
-2026-11-20。本版提供 Apple Silicon Mac、Intel Mac 和 Windows x64 三种安装包。Mac 用户可以在「关于本机」查看芯片，选择对应的 DMG。Windows 用户选择 Setup EXE。[发布记录](https://github.com/xjzc-mt/agent-switcher/releases)
+2026-11-20 发布。Mac 需要 macOS 13 或更高版本，可在「关于本机」查看芯片并选择 Apple Silicon 或 Intel DMG。Windows x64 使用 Setup EXE。[1.0.1 下载与更新说明](https://github.com/xjzc-mt/agent-switcher/releases/tag/v1.0.1)
 
 ## 从 1.0.0 测试版升级后有什么变化
 
@@ -9,7 +9,7 @@
 - **macOS 菜单栏。** 点击右上角 AGS 图标可查看当前额度，悬停「切换账号」即可选备用账号。在两块屏幕上使用时，切换平台或展开名单会留在打开菜单的那块屏幕。[菜单说明](navigation-menus.md)
 - **账号与备份。** 单个损坏账号可以单独处理。新账号名会检查跨平台兼容性，旧版 macOS 账号仍可更新凭据或改名。导出备份时可设置 6 个字符或更长的密码。导入旧备份时，可在预览中修正不兼容的名称。[账号管理](account-management.md)
 - **故障反馈。** 在「设置 → 应用与更新 → 导出故障报告」可保存近期操作经过、查询结果和构建标识。账号以报告内编号显示，用户可选择私下转交维护者。
-- **更新校验。** 应用内下载先验证发布者签名，再检查安装包的大小和 SHA-256。安装仍由用户打开 DMG 完成。[应用内更新](app-updates.md)
+- **更新校验。** macOS 在应用内下载时先验证签名清单，再核对 DMG 的大小和 SHA-256。打开 DMG 后手动替换应用。Windows 用户从发布页下载新版 x64 安装程序。[应用内更新](app-updates.md)
 
 ## 升级与回退
 
@@ -17,8 +17,8 @@
 
 ## 验证范围
 
-1. 在独立 macOS 用户下用两个已授权 Antigravity 账号，重开官方桌面和 CLI 核对 A → B → A；保持桌面打开跨一次官方续期，核对新额度和成功时间。
-2. 两款 Mac 安装包分别在对应架构的 macOS 上验签和启动。Mac 应用采用 ad-hoc 签名，未经 Apple 公证。已使用 1.0.0 的更新模块从公开正式源发现并验签 Apple Silicon 包。用户可在「设置 → 应用与更新」下载安装包后手动替换。
-3. Windows x64 发行包采用 NSIS，未进行 Authenticode 签名。发布检查覆盖安装、启动、卸载和 Codex 平台回归。真实账号登录与切换仍需用户环境验证。Antigravity 原生切换和额度查询目前限 macOS。
+- **macOS 安装包**已在对应架构上验证应用签名并启动。Mac 应用采用 ad-hoc 签名，未经 Apple 公证。1.0.0 更新模块已从公开发布源发现 1.0.1 并验证 Apple Silicon 安装包的签名清单。
+- **Windows x64 安装包**已在 Windows 验证安装、启动和卸载。NSIS 安装程序未进行 Authenticode 签名。Codex 真实账号的登录、切换和额度查询仍待验收。[三平台构建与验证](https://github.com/xjzc-mt/agent-switcher/actions/runs/44721399867)
+- **Antigravity 个人账号**的保存、切换与额度修复已通过隔离回归。在独立 macOS 用户下重开官方桌面及 CLI，核对两个真实账号往返切换，以及桌面保持打开跨一次官方续期的额度刷新，仍待验收。
 
 维护者的检查结果、未完成项和对应入口集中在[当前待办](当前待办.md)与[构建与发布](releasing.md)。

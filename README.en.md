@@ -36,13 +36,15 @@
 
 Your active account stays pinned at the top while backup accounts are grouped by plan and sorted by remaining availability in **Card** or **Row** view. Codex separates `5h / 7d` windows and Credits; Antigravity leads with `Gemini` and shows `Claude / GPT` model groups independently, rendering missing values honestly as `—` without blending totals.
 
+On macOS, click the AGS menu bar icon to check the current account’s quota. Hover over **Switch account** and select a backup account. The menu stays on the display where you opened it when you switch platforms or expand the account list.
+
 | Codex Row View · Compact aligned comparison | Antigravity · Primary & secondary model groups |
 | --- | --- |
 | ![Row view: compare multiple accounts across plans](docs/images/02-codex-rows.png) | ![Antigravity: active and backup model group quotas](docs/images/03-antigravity.png) |
 
 ### 2. Add accounts without signing out
 
-Launch the official browser flow (with incognito and continuous-add support) to authorize new accounts **without kicking out your active desktop client**. Multi-account JSON imports let you preview, rename, and deduplicate by identity first; expired accounts can be refreshed in place while keeping their nickname, and replacement files verify ownership before overwriting (see [Import Format](docs/session-import.md)).
+Sign in through the official website to add accounts one after another **while your desktop client stays signed in**. On Windows, choosing private sign-in copies the link so you can paste it into a private browser window. Multi-account JSON imports let you preview, rename, and deduplicate by identity first; expired accounts can be refreshed in place while keeping their nickname, and replacement files verify ownership before overwriting (see [Import Format](docs/session-import.md)).
 
 | Isolated Browser Login · Incognito & continuous add | Batch Import Preview · Rename, dedup & in-place update |
 | --- | --- |
@@ -50,7 +52,7 @@ Launch the official browser flow (with incognito and continuous-add support) to 
 
 ### 3. Back up and remove without collateral damage
 
-Select accounts and set a dedicated password to export an encrypted `.ags` archive for cross-Mac migration. Before removal, AGS lays out the exact matching scope — **by default only AGS backups are deleted**, leaving your official client login, chat history, and project files untouched.
+Select accounts and set a dedicated password of at least 6 characters to export an encrypted `.ags` backup you can restore on another computer. Before removal, AGS lays out the exact matching scope — **by default only AGS backups are deleted**, leaving your official client login, chat history, and project files untouched.
 
 | Encrypted Export · Password-protected `.ags` archive | Safe Removal · Keeps client state by default |
 | --- | --- |
@@ -67,23 +69,22 @@ Select accounts and set a dedicated password to export an encrypted `.ags` archi
 
 | Platform | Status | macOS Support & Requirements |
 | --- | :---: | --- |
-| **Codex** (`codex`) | ✅ Supported | Isolated sign-in, `auth.json` switching, `5h / 7d` quota & Credits (requires local Codex app; Keychain-only not yet adapted; API keys have no subscription quota) |
-| **Antigravity** (`agy`) | ✅ Supported | macOS 2.x personal Google account isolated sign-in, Keychain or official file switching & model-group quotas (requires official `agy` CLI; enterprise auth unverified) |
+| **Codex** (`codex`) | ✅ Supported | Isolated sign-in, `auth.json` switching, `5h / 7d` quota & Credits (uses the Codex CLI bundled with the desktop app or installed separately; Keychain-only storage is unsupported; API keys have no subscription quota) |
+| **Antigravity** (`agy`) | ✅ Supported | Isolated sign-in for personal Google accounts in Antigravity 2.x, switching via Keychain or official credential files, and quotas by model group (requires the official `agy` CLI; enterprise authentication is unverified) |
 | **Claude Code** (`claude`) | 🚧 Planned | Core compatibility code retained; GUI entry disabled in v1.0 until activation and quota capabilities are ready |
 
-Codex sign-in, switching and quotas on Windows x64 still need verification on hardware. Antigravity native switching and quotas are available on macOS only.
+The Windows x64 release has passed install, launch, and uninstall checks on Windows. Codex sign-in, account switching, and quota checks still await verification with real accounts on Windows. Antigravity native switching and quota checks are available on macOS only.
 
 ---
 
 ## Quick Install
 
-To run **1.0.1** from source, check out the release and run `npm ci && npm run build && npm run gui`. The macOS menu bar lets you hover to choose an account and stays on the display where you opened it when you switch tabs. See the [1.0.1 release notes](docs/release-1.0.1.md).
-
-Choose the 1.0.1 installer for your operating system and processor. On Mac, find the chip in **About This Mac**.
+Choose the 1.0.1 installer for your computer. The Mac version requires macOS 13 or later. To check your chip, open the Apple menu and choose **About This Mac**.
 
 [macOS · Apple Silicon (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-arm64.dmg) · [macOS · Intel (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-x64.dmg) · [Windows · x64 (EXE)](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-Setup-1.0.1-x64.exe)
 
-On macOS, open the DMG and drag AgentSwitcher into **Applications**. On Windows, run the EXE installer. Install the corresponding official client and finish active tasks before switching. AGS can quit and relaunch the desktop client after confirmation. For Antigravity, close any shared `agy` or IDE sessions first.
+- **macOS** — Open the DMG and drag AGS into **Applications**. Finish active tasks in the official client before switching. With your confirmation, AGS quits and reopens the desktop client if it was running. For Antigravity, first close any `agy` or IDE sessions that share the login.
+- **Windows** — Run the EXE installer. Before switching Codex accounts, quit the Codex desktop app if it is running and close any CLI or IDE sessions that share its login. Reopen them as needed after the switch.
 
 ```bash
 shasum -a 256 AgentSwitcher-*.dmg   # macOS. Compare the result with SHA256SUMS from the same release.
@@ -93,12 +94,14 @@ shasum -a 256 AgentSwitcher-*.dmg   # macOS. Compare the result with SHA256SUMS 
 > [!IMPORTANT]
 > macOS builds use **ad-hoc signing** (not yet Apple notarized). If macOS reports that the developer cannot be verified on first launch, verify the download source, then open **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway**.
 
-In the current source build, open **Settings → App & Updates → Export diagnostic report** to save a redacted record of recent operations. You can share it privately with a maintainer. You can also check [Known Issues](issues/README.md) or file a report on [GitHub Issues](https://github.com/xjzc-mt/agent-switcher/issues). **Never upload real credential JSON, tokens, or backup passwords.**
+If something goes wrong, open **Settings → App & Updates → Export diagnostic report** to save a redacted record of recent operations. You can share it privately with a maintainer. You can also check [Known Issues](issues/README.md) or file a report on [GitHub Issues](https://github.com/xjzc-mt/agent-switcher/issues). **Never upload real credential JSON, tokens, or backup passwords.**
 
 <details>
 <summary><strong>Preferences & In-App Updates</strong></summary>
 
-Settings let you switch reset-time format (countdown / date-time), choose incognito sign-in behavior, copy the Codex cleanup helper prompt, and check/download newer DMG releases inside the app. Current source verifies release manifests with a bundled Ed25519 public key and checks the installer SHA-256. See [In-App Updates](docs/app-updates.md).
+In Settings, you can change the quota reset time display (countdown or date and time), choose how private sign-in works, and copy the Codex cleanup helper prompt.
+
+On macOS, you can download the DMG for your Mac directly in AGS. The app verifies the release manifest with its bundled Ed25519 public key and checks the installer’s SHA-256. On Windows, download the latest x64 installer from the releases page. [In-App Updates](docs/app-updates.md) · [GitHub Releases](https://github.com/xjzc-mt/agent-switcher/releases)
 
 ![Settings: compact preferences, cleanup helper, and app updates](docs/images/08-settings.png)
 

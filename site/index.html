@@ -23,7 +23,7 @@
     <meta name="twitter:title" content="AgentSwitcher · AGS" />
     <meta
       name="twitter:description"
-      content="Multi-account & quota manager for Codex and Antigravity on macOS and Windows. Local-first, AES-256-GCM encrypted, zero backend."
+      content="Manage Codex accounts on macOS and Windows and Antigravity accounts on macOS. Compare quotas and switch accounts with locally encrypted credentials."
     />
     <meta
       name="twitter:image"
@@ -193,7 +193,7 @@
           <div class="section-head">
             <h2 data-i18n="features.title">顺手完成三件高频小事</h2>
             <p data-i18n="features.subtitle">
-              界面刻意保持紧凑与克制，所有操作围绕识别账号、比较余量与安全切换展开，不堆多余装饰。
+              在 Mac 上，点击右上角的 AGS 图标可查看当前额度，悬停「切换账号」即可选择备用账号。
             </p>
           </div>
 
@@ -244,7 +244,7 @@
               <div class="feature-copy">
                 <h3 data-i18n="f2.title">添账号，不掉线</h3>
                 <p data-i18n="f2.desc">
-                  拉起官方浏览器（支持无痕窗口与连续添加）独立完成授权，不踢掉当前正在工作的客户端。多账号 JSON 可先预览、改名、按身份去重再导入；过期账号支持原位更新并保留昵称，替换文件凭据前先校验归属。
+                  在浏览器中完成官方授权，可连续添加账号，当前客户端保持登录。多账号 JSON 可先预览、改名、按身份去重再导入。过期账号可原位更新并保留昵称，替换凭据前会核对身份。
                 </p>
                 <div class="pill-tabs" role="tablist">
                   <button
@@ -278,7 +278,7 @@
                   loading="lazy"
                   data-zoomable="true"
                 />
-                <figcaption data-i18n="f2.cap1">仅放行 OpenAI 与 Google 官方授权域名，支持无痕登录与连续入池。</figcaption>
+                <figcaption data-i18n="f2.cap1">选择无痕登录时，Mac 可打开支持的浏览器，Windows 会复制登录链接，供你粘贴到无痕窗口。</figcaption>
               </figure>
             </article>
 
@@ -286,7 +286,7 @@
               <div class="feature-copy">
                 <h3 data-i18n="f3.title">留备份，不伤现场</h3>
                 <p data-i18n="f3.desc">
-                  勾选账号并设置独立密码即可导出 .ags 加密备份，方便跨机迁移。移除账号前先核对同身份范围，默认只删除 AGS 内的备份，完整保留官方客户端登录、聊天历史与项目文件。
+                  选择账号并设置至少 6 个字符的密码，即可导出 .ags 加密备份，在另一台电脑上恢复。移除账号时可先核对范围，默认保留客户端登录、聊天历史和项目文件。
                 </p>
                 <div class="pill-tabs" role="tablist">
                   <button
@@ -386,7 +386,7 @@
                       </td>
                       <td><span class="status-badge status-ready" data-i18n="support.ready">已支持</span></td>
                       <td data-i18n="support.codexDesc">
-                        独立登录、auth.json 切换、5h / 7d 额度与 Credits（需本机 Codex 客户端；Keychain-only 未适配，API Key 无订阅额度）。
+                        需官方 Codex CLI。支持独立登录、auth.json 切换、5h / 7d 额度和 Credits。暂不支持仅存于钥匙串的登录，API Key 无订阅额度。
                       </td>
                     </tr>
                     <tr>
@@ -396,7 +396,7 @@
                       </td>
                       <td><span class="status-badge status-ready" data-i18n="support.ready">已支持</span></td>
                       <td data-i18n="support.agyDesc">
-                        macOS 2.x 个人 Google 账号独立登录、Keychain 或官方文件切换与模型组额度（需官方 agy CLI；企业认证暂未验证）。
+                        macOS 上的 Antigravity 2.x 支持个人 Google 账号登录、保存、切换和模型组额度查询，需官方 agy CLI。企业认证尚未验证。
                       </td>
                     </tr>
                     <tr>
@@ -406,14 +406,14 @@
                       </td>
                       <td><span class="status-badge status-planned" data-i18n="support.planned">规划中</span></td>
                       <td data-i18n="support.claudeDesc">
-                        保留底层兼容代码，首版 GUI 入口暂置灰，待补齐激活与额度能力后开放。
+                        账号激活和额度查询仍在规划中，桌面入口暂未开放。
                       </td>
                     </tr>
                   </tbody>
                 </table>
               </div>
               <p class="panel-foot" data-i18n="support.foot">
-                macOS 提供 Apple Silicon 和 Intel 版。Windows x64 版的 Codex 登录、切换与额度仍待实机验收，Antigravity 原生切换和额度仅适用于 macOS。
+                1.0.1 的两款 Mac 安装包已在对应芯片上启动验证，Windows x64 已验证安装、启动和卸载。Windows 的 Codex 登录、切换与额度，以及 Mac 的 Antigravity 双账号往返切换和跨续期刷新，仍待真实账号验证。
               </p>
             </div>
           </div>
@@ -425,7 +425,7 @@
           <div class="section-head">
             <h2 data-i18n="install.title">下载与快速安装</h2>
             <p data-i18n="install.subtitle">
-              在 Mac 的「关于本机」中查看芯片，在 Windows 的「设置 → 系统 → 系统信息」中查看系统类型。
+              Mac 版需要 macOS 13 或更高版本。可在「关于本机」查看芯片，后续在 AGS 设置中下载更新。Windows x64 用户可在此下载新版安装程序。
             </p>
           </div>
 
@@ -459,7 +459,7 @@
               <div class="notice-box">
                 <strong data-i18n="install.gatekeeperTitle">macOS 首次打开提示「无法验证开发者」？</strong>
                 <p data-i18n="install.gatekeeperDesc">
-                  首发包采用 ad-hoc 签名（尚未接入 Apple 公证）。核对下载来源后，打开「系统设置 → 隐私与安全性」，滑到底部点击「仍要打开」即可放行。
+                  Mac 安装包采用 ad-hoc 签名，尚未经 Apple 公证。核对下载来源后，可在「系统设置 → 隐私与安全性」中点击「仍要打开」。
                 </p>
               </div>
 

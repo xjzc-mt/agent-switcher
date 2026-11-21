@@ -36,13 +36,15 @@
 
 当前账号置顶，备用账号按套餐归组、按可用余量排好序，支持**卡片**与**单行**两种视图。Codex 分列 `5h / 7d` 与 Credits；Antigravity 以 `Gemini` 为主并独立展示 `Claude / GPT` 等模型组，缺失值如实显示 `—`，不混算总比例。
 
+在 macOS 上，点右上角菜单栏的 AGS 图标可查看当前额度。悬停「切换账号」后，直接点选备用账号。使用多块屏幕时，切换平台或展开名单都会留在打开菜单的那块屏幕上。
+
 | Codex 单行视图 · 密集对齐比对 | Antigravity · 模型组主次分层 |
 | --- | --- |
 | ![单行视图：按套餐比较多个账号的额度](docs/images/02-codex-rows.png) | ![Antigravity：当前与备用账号的模型组额度](docs/images/03-antigravity.png) |
 
 ### 2. 添账号，不掉线
 
-拉起官方浏览器（支持无痕窗口与连续添加）独立完成授权，**不踢掉当前正在工作的客户端**。多账号 JSON 可先预览、改名、按身份去重再导入；过期账号可原位更新并保留昵称；从文件导入的替换凭据须先验证归属（详见 [导入格式](docs/session-import.md)）。
+在浏览器中完成官方授权，可连续添加账号，**当前客户端保持登录**。在 Windows 选择无痕登录时，AGS 会复制链接，供你粘贴到无痕窗口。多账号 JSON 可先预览、改名、按身份去重再导入；过期账号可原位更新并保留昵称；从文件导入的替换凭据须先验证归属（详见 [导入格式](docs/session-import.md)）。
 
 | 独立浏览器授权 · 支持无痕与连续添加 | 批量导入预览 · 改名、去重与过期替换 |
 | --- | --- |
@@ -50,7 +52,7 @@
 
 ### 3. 留备份，不伤现场
 
-勾选账号并设置独立密码即可导出 `.ags` 加密备份，方便跨机迁移。移除前先摊开确认范围，**默认只删 AGS 内的备份**，完整保留官方客户端登录、聊天历史与项目文件。
+勾选账号并设置至少 6 个字符的独立密码，即可导出 `.ags` 加密备份，在另一台电脑上恢复。移除前先摊开确认范围，**默认只删 AGS 内的备份**，完整保留官方客户端登录、聊天历史与项目文件。
 
 | 加密导出 · 独立密码保护 `.ags` 备份 | 移除确认 · 默认保留客户端现场 |
 | --- | --- |
@@ -67,23 +69,22 @@
 
 | 平台 | 状态 | macOS 支持与使用条件 |
 | --- | :---: | --- |
-| **Codex** (`codex`) | ✅ 已支持 | 独立登录、`auth.json` 切换、`5h / 7d` 额度与 Credits（需本机 Codex 客户端；Keychain-only 未适配，API Key 无订阅额度） |
-| **Antigravity** (`agy`) | ✅ 已支持 | macOS 2.x 个人 Google 账号独立登录、Keychain 或官方文件切换与模型组额度（需官方 `agy` CLI；企业认证暂未验证） |
+| **Codex** (`codex`) | ✅ 已支持 | 独立登录、`auth.json` 切换、`5h / 7d` 额度与 Credits（需桌面端内置或独立安装的 Codex CLI；Keychain-only 未适配，API Key 无订阅额度） |
+| **Antigravity** (`agy`) | ✅ 已支持 | Antigravity 2.x 个人 Google 账号独立登录、Keychain 或官方文件切换与模型组额度（需官方 `agy` CLI；企业认证暂未验证） |
 | **Claude Code** (`claude`) | 🚧 规划中 | 保留底层兼容代码，首版 GUI 入口暂置灰，待补齐激活与额度能力后开放 |
 
-Windows x64 版的 Codex 登录、切换和额度仍待实机验收。Antigravity 原生切换与额度仅适用于 macOS。
+Windows x64 安装包已在 Windows 上验证安装、启动和卸载。Codex 真实账号的登录、切换与额度查询仍待实机验收。Antigravity 原生切换与额度查询仅适用于 macOS。
 
 ---
 
 ## 快速安装
 
-要从源码运行 **1.0.1**，在该版本的源码目录执行 `npm ci && npm run build && npm run gui` 即可体验。macOS 右上角菜单可悬停选择账号，切换平台时菜单会留在打开它的屏幕。参见 [1.0.1 版本说明](docs/release-1.0.1.md)。
-
-1.0.1 安装包按系统和芯片选择。Mac 可在「关于本机」查看芯片。
+选择适合自己电脑的 1.0.1 安装包。Mac 版需要 macOS 13 或更高版本，可在苹果菜单的「关于本机」查看芯片型号。
 
 [macOS · Apple Silicon（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-arm64.dmg) · [macOS · Intel（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-x64.dmg) · [Windows · x64（EXE）](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-Setup-1.0.1-x64.exe)
 
-在 macOS 打开 DMG，将应用拖入「应用程序」。在 Windows 运行 EXE 安装。请先安装相应的官方客户端，切换前结束正在运行的任务。桌面客户端会在确认后退出并重开；Antigravity 共用登录的 `agy` 或 IDE 会话需先关闭。
+- **macOS** 打开 DMG，将 AGS 拖入「应用程序」。切换前先结束官方客户端中的任务，确认后 AGS 会退出并重开原先运行的桌面客户端。使用 Antigravity 时，请先关闭共用登录的 `agy` 或 IDE 会话。
+- **Windows** 运行 EXE 安装。切换 Codex 前，请先退出正在运行的 Codex 桌面并结束共用登录的 CLI 或 IDE 会话，切换后按需重开。
 
 ```bash
 shasum -a 256 AgentSwitcher-*.dmg   # macOS。将结果与同版 SHA256SUMS 对照。
@@ -93,12 +94,14 @@ shasum -a 256 AgentSwitcher-*.dmg   # macOS。将结果与同版 SHA256SUMS 对�
 > [!IMPORTANT]
 > macOS 安装包采用 **ad-hoc 签名**（尚未接入 Apple 公证）。首次打开若提示无法验证开发者，核对来源后前往 **「系统设置 → 隐私与安全性」滑至底部点击「仍要打开」** 即可。
 
-当前源码版可在「设置 → 应用与更新 → 导出故障报告」保存近期操作的脱敏记录，并自行决定是否私下转交维护者。也可查看[已知问题记录](issues/README.md)或到 [GitHub Issues](https://github.com/xjzc-mt/agent-switcher/issues) 反馈。**切勿上传真实凭据 JSON、Token 或备份密码**。
+遇到问题时，在「设置 → 应用与更新 → 导出故障报告」保存近期操作的脱敏记录，可自行决定是否私下转交维护者。也可查看[已知问题记录](issues/README.md)或到 [GitHub Issues](https://github.com/xjzc-mt/agent-switcher/issues) 反馈。**切勿上传真实凭据 JSON、Token 或备份密码**。
 
 <details>
 <summary><strong>偏好设置与应用内更新</strong></summary>
 
-设置页支持切换重置时间格式（倒计时 / 日期时间）、无痕登录行为、复制 Codex 历史数据排查指令，以及在应用内检查与下载新版 DMG。当前源码使用内置 Ed25519 公钥验证发布清单，并核对安装包的 SHA-256。详见 [应用内下载更新](docs/app-updates.md)。
+可在设置中切换重置时间格式（倒计时 / 日期时间）、调整无痕登录行为或复制 Codex 历史数据排查指令。
+
+macOS 版可在应用内下载匹配芯片的新版 DMG。AGS 使用内置 Ed25519 公钥验证发布清单，并核对安装包的 SHA-256。Windows 版请从发布页下载新版 x64 安装程序。[应用内下载更新](docs/app-updates.md) · [GitHub Releases](https://github.com/xjzc-mt/agent-switcher/releases)
 
 ![设置：紧凑的偏好、清理辅助与应用更新](docs/images/08-settings.png)
 
