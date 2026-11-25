@@ -25,7 +25,7 @@
 ## 3. 已关闭归档索引（Archive）
 
 <details>
-<summary>已归档 13 项（位于 <code>issues/archive/</code>，点击展开）</summary>
+<summary>已归档 14 项（位于 <code>issues/archive/</code>，点击展开）</summary>
 
 | 编号 | 来源 | 平台 | 关闭日期 / 版本 | 归档记录 |
 | --- | --- | --- | --- | --- |
@@ -42,6 +42,7 @@
 | AGS-0015 | local | 全平台 | 2026-11-25 (`v0.1.0`) | [Codex 查询失败精确分流自愈与账号详情恢复指引直出](archive/AGS-0015-codex-error-classification-and-detail-guidance.md) |
 | AGS-0016 | local | 全平台 | 2026-11-25 (`v0.1.0`) | [版本体系回调至 0.1.0、历史 1.0.x 防回跳与官网跨平台一键安装脚本](archive/AGS-0016-release-0.1.0-and-one-click-install.md) |
 | AGS-0017 | local | 全平台 | 2026-11-25 (`main`) | [免下载远程元数据离线签名与一键发布脚本](archive/AGS-0017-zero-download-release-signing.md) |
+| AGS-0018 | local | Win / macOS | 2026-11-25 (`main`) | [Windows PowerShell 5.1 安装脚本 BOM/中文乱码与共享代理 IP 触发 GitHub API 限流修复](archive/AGS-0018-installer-rate-limit-and-ps51-encoding.md) |
 
 </details>
 

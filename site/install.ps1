@@ -1,72 +1,90 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+function Msg([string]$text) { [regex]::Unescape($text) }
 
 if (-not [Environment]::Is64BitOperatingSystem) {
-  throw 'AgentSwitcher 仅支持 64 位 Windows (x64)。'
+  throw (Msg 'AgentSwitcher \u4ec5\u652f\u6301 64 \u4f4d Windows (x64)\u3002')
 }
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$apiUrl = if ($env:AGS_RELEASE_API) { $env:AGS_RELEASE_API } else { 'https://api.github.com/repos/xjzc-mt/agent-switcher/releases/latest' }
-$releasesUrl = if ($env:AGS_RELEASES_URL) { $env:AGS_RELEASES_URL } else { 'https://github.com/xjzc-mt/agent-switcher/releases' }
+$releasesUrl = if ($env:AGS_RELEASES_URL) { $env:AGS_RELEASES_URL.TrimEnd('/') } else { 'https://github.com/xjzc-mt/agent-switcher/releases' }
 
-Write-Host '正在查询 AgentSwitcher 最新正式版本 (Windows x64)...'
-$release = Invoke-RestMethod -Uri $apiUrl -Headers @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'AgentSwitcher-Installer' }
-$tag = [string]$release.tag_name
+Write-Host (Msg '\u6b63\u5728\u67e5\u8be2 AgentSwitcher \u6700\u65b0\u6b63\u5f0f\u7248\u672c (Windows x64)...')
+$tag = ''
+if ($env:AGS_RELEASE_TAG) {
+  $tag = [string]$env:AGS_RELEASE_TAG
+} else {
+  $req = [Net.HttpWebRequest]::Create("$releasesUrl/latest")
+  $req.Method = 'HEAD'
+  $req.AllowAutoRedirect = $true
+  $req.UserAgent = 'AgentSwitcher-Installer'
+  $resp = $req.GetResponse()
+  try {
+    $finalUri = $resp.ResponseUri.AbsoluteUri
+  } finally {
+    $resp.Close()
+  }
+  $prefix = "$releasesUrl/tag/"
+  if (-not $finalUri.StartsWith($prefix, [StringComparison]::Ordinal)) {
+    throw (Msg '\u6682\u672a\u53d6\u5f97\u53ef\u7528\u7684\u6b63\u5f0f\u7248\u672c\u3002')
+  }
+  $tag = [uri]::UnescapeDataString($finalUri.Substring($prefix.Length).Split('?')[0].TrimEnd('/'))
+}
+
 $version = $tag -replace '^v', ''
-
-if ($release.draft -or $release.prerelease -or $version -in @('1.0.0', '1.0.1') -or
-    $version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$' -or
-    $release.html_url -ne "$releasesUrl/tag/$([uri]::EscapeDataString($tag))") {
-  throw '暂未取得可用的正式版本。'
+if ($tag -ne "v$version" -or $version -in @('1.0.0', '1.0.1') -or
+    $version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+  throw (Msg '\u6682\u672a\u53d6\u5f97\u53ef\u7528\u7684\u6b63\u5f0f\u7248\u672c\u3002')
 }
 
 $exeName = "AgentSwitcher-Setup-$version-x64.exe"
-$manifestName = "$exeName.signed.json"
-$assets = @($release.assets)
-$exeAssets = @($assets | Where-Object {
-  $_.state -eq 'uploaded' -and $_.name -eq $exeName -and $_.size -gt 0 -and $_.size -lt 2147483648 -and
-  $_.browser_download_url -eq "$releasesUrl/download/$([uri]::EscapeDataString($tag))/$([uri]::EscapeDataString($exeName))"
-})
-$manifestAssets = @($assets | Where-Object {
-  $_.state -eq 'uploaded' -and $_.name -eq $manifestName -and $_.size -gt 0 -and $_.size -le 4096 -and
-  $_.browser_download_url -eq "$releasesUrl/download/$([uri]::EscapeDataString($tag))/$([uri]::EscapeDataString($manifestName))"
-})
+$encodedTag = [uri]::EscapeDataString($tag)
+$exeUrl = "$releasesUrl/download/$encodedTag/$([uri]::EscapeDataString($exeName))"
+$manifestUrl = "$exeUrl.signed.json"
 
-if ($exeAssets.Count -ne 1) { throw '此版本缺少适用于 Windows x64 的安装程序。' }
-if ($manifestAssets.Count -ne 1) { throw '此版本缺少有效的发布者签名清单。' }
-
-$exeAsset = $exeAssets[0]
-$manifest = Invoke-RestMethod -Uri $manifestAssets[0].browser_download_url -Headers @{ 'User-Agent' = 'AgentSwitcher-Installer' }
-if ($manifest.version -ne $version -or $manifest.name -ne $exeName -or [int64]$manifest.size -ne [int64]$exeAsset.size -or
-    $manifest.sha256 -notmatch '^[a-f0-9]{64}$' -or ([string]$manifest.signature).Length -ne 88) {
-  throw '签名清单格式或版本信息不匹配。'
-}
-if ($exeAsset.digest -and ([string]$exeAsset.digest).ToLowerInvariant() -ne "sha256:$($manifest.sha256)") {
-  throw '签名清单哈希与发布记录不一致。'
-}
-
-$stage = Join-Path ([IO.Path]::GetTempPath()) ("ags-install-" + [guid]::NewGuid().ToString('N'))
+$stage = Join-Path ([IO.Path]::GetTempPath()) ('ags-install-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
+$manifestPath = Join-Path $stage "$exeName.signed.json"
 $exePath = Join-Path $stage $exeName
 
 try {
-  Write-Host "正在下载 ${exeName} (v${version})..."
-  Invoke-WebRequest -Uri $exeAsset.browser_download_url -OutFile $exePath -UseBasicParsing
+  Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestPath -Headers @{ 'User-Agent' = 'AgentSwitcher-Installer' } -UseBasicParsing
+  $manifest = [IO.File]::ReadAllText($manifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+  $expectedSize = [int64]$manifest.size
+  if ($manifest.version -ne $version -or $manifest.name -ne $exeName -or
+      $expectedSize -le 0 -or $expectedSize -ge 2147483648 -or
+      $manifest.sha256 -notmatch '^[a-f0-9]{64}$' -or ([string]$manifest.signature).Length -ne 88) {
+    throw (Msg '\u7b7e\u540d\u6e05\u5355\u683c\u5f0f\u6216\u7248\u672c\u4fe1\u606f\u4e0d\u5339\u914d\u3002')
+  }
+
+  Write-Host ((Msg '\u6b63\u5728\u4e0b\u8f7d {0} (v{1})...') -f $exeName, $version)
+  Invoke-WebRequest -Uri $exeUrl -OutFile $exePath -Headers @{ 'User-Agent' = 'AgentSwitcher-Installer' } -UseBasicParsing
   $item = Get-Item -LiteralPath $exePath
   $actualHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($item.Length -ne [int64]$manifest.size -or $actualHash -ne $manifest.sha256) {
-    throw '安装包大小或 SHA-256 校验失败，已中止安装。'
+  if ($item.Length -ne $expectedSize -or $actualHash -ne $manifest.sha256) {
+    throw (Msg '\u5b89\u88c5\u5305\u5927\u5c0f\u6216 SHA-256 \u6821\u9a8c\u5931\u8d25\uff0c\u5df2\u4e2d\u6b62\u5b89\u88c5\u3002')
   }
 
   $installerArgs = if ($env:AGS_INSTALLER_ARGS) { $env:AGS_INSTALLER_ARGS } elseif ($env:AGS_NO_OPEN -eq '1') { '/S' } else { '/S --force-run' }
-  Write-Host "正在安装 AgentSwitcher v${version}..."
+  Write-Host ((Msg '\u6b63\u5728\u5b89\u88c5 AgentSwitcher v{0}...') -f $version)
   $proc = [Diagnostics.Process]::Start($exePath, $installerArgs)
-  if ($null -eq $proc) { throw '无法启动安装程序。' }
+  if ($null -eq $proc) { throw (Msg '\u65e0\u6cd5\u542f\u52a8\u5b89\u88c5\u7a0b\u5e8f\u3002') }
   $proc.WaitForExit()
   $exitCode = $proc.ExitCode
   $proc.Dispose()
-  if ($exitCode -ne 0) { throw "安装程序异常退出 (代码: ${exitCode})。" }
-  Write-Host "AgentSwitcher v${version} 安装完成（后续可在「设置 → 应用与更新」一键升级）。"
+  if ($exitCode -ne 0) { throw ((Msg '\u5b89\u88c5\u7a0b\u5e8f\u5f02\u5e38\u9000\u51fa (\u4ee3\u7801: {0})\u3002') -f $exitCode) }
+
+  $installedExe = @(
+    (Join-Path $env:LOCALAPPDATA 'Programs\agent-switcher\AgentSwitcher.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\AgentSwitcher\AgentSwitcher.exe')
+  ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if ($installedExe) {
+    Write-Host ((Msg 'AgentSwitcher v{0} \u5df2\u5b89\u88c5\u81f3 {1}\uff08\u5df2\u521b\u5efa\u684c\u9762\u4e0e\u5f00\u59cb\u83dc\u5355\u5feb\u6377\u65b9\u5f0f\uff09\u3002') -f $version, $installedExe)
+  } else {
+    Write-Host ((Msg 'AgentSwitcher v{0} \u5b89\u88c5\u5b8c\u6210\uff08\u53ef\u5728\u684c\u9762\u6216\u5f00\u59cb\u83dc\u5355\u6253\u5f00 AgentSwitcher\uff09\u3002') -f $version)
+  }
 } finally {
   for ($i = 0; $i -lt 4 -and (Test-Path -LiteralPath $stage); $i++) {
     if ($i -gt 0) { Start-Sleep -Milliseconds 250 }

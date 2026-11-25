@@ -26,6 +26,9 @@ test('buildSite outputs all referenced local assets and images', () => {
     assert.equal(fs.existsSync(path.join(tmpDir, '.nojekyll')), true);
     assert.equal(fs.existsSync(path.join(tmpDir, 'install.sh')), true);
     assert.equal(fs.existsSync(path.join(tmpDir, 'install.ps1')), true);
+    const ps1Bytes = fs.readFileSync(path.join(tmpDir, 'install.ps1'));
+    assert.equal(ps1Bytes.every(b => b === 0x0a || (b >= 0x20 && b <= 0x7e)), true, 'install.ps1 must be BOM-free 7-bit ASCII for PowerShell 5.1 irm');
+    assert.equal(ps1Bytes.toString('ascii').includes('api.github.com'), false, 'install.ps1 must avoid unauthenticated api.github.com rate limits');
     const html = fs.readFileSync(path.join(tmpDir, 'index.html'), 'utf8');
     const appJs = fs.readFileSync(path.join(tmpDir, 'app.js'), 'utf8');
 

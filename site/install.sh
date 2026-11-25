@@ -24,8 +24,9 @@ if [[ -z "$arch" ]]; then
   fi
 fi
 
-api_url="${AGS_RELEASE_API:-https://api.github.com/repos/xjzc-mt/agent-switcher/releases/latest}"
+api_url="${AGS_RELEASE_API:-}"
 releases_url="${AGS_RELEASES_URL:-https://github.com/xjzc-mt/agent-switcher/releases}"
+releases_url="${releases_url%/}"
 
 stage="$(mktemp -d "${TMPDIR:-/tmp}/ags-install.XXXXXXXX")"
 chmod 700 "$stage"
@@ -39,9 +40,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "正在查询 AgentSwitcher 最新正式版本 (${arch})..."
-/usr/bin/curl -fsSL -H 'Accept: application/vnd.github+json' "$api_url" -o "$stage/release.json"
-
-metadata="$(/usr/bin/osascript -l JavaScript - "$stage/release.json" "$arch" "$releases_url" <<'JXA'
+if [[ -n "$api_url" ]]; then
+  /usr/bin/curl -fsSL -H 'Accept: application/vnd.github+json' "$api_url" -o "$stage/release.json"
+  metadata="$(/usr/bin/osascript -l JavaScript - "$stage/release.json" "$arch" "$releases_url" <<'JXA'
 ObjC.import('Foundation');
 function readText(file) {
   const data = $.NSData.dataWithContentsOfFile(file);
@@ -71,18 +72,39 @@ function run(argv) {
 }
 JXA
 )"
-
-IFS=$'\t' read -r version dmg_name expected_size dmg_url manifest_url github_digest <<<"$metadata"
+  IFS=$'\t' read -r version dmg_name expected_size dmg_url manifest_url github_digest <<<"$metadata"
+else
+  final_url="$(/usr/bin/curl -fsSLI -o /dev/null -w '%{url_effective}' "${releases_url}/latest")"
+  tag_prefix="${releases_url}/tag/v"
+  if [[ "$final_url" != "${tag_prefix}"* ]]; then
+    echo "暂未取得可用的正式版本。" >&2
+    exit 1
+  fi
+  version="${final_url#"$tag_prefix"}"
+  version="${version%%\?*}"
+  version="${version%/}"
+  if [[ "$version" == "1.0.0" || "$version" == "1.0.1" || ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    echo "暂未取得可用的正式版本。" >&2
+    exit 1
+  fi
+  dmg_name="AgentSwitcher-${version}-${arch}.dmg"
+  dmg_url="${releases_url}/download/v${version}/${dmg_name}"
+  manifest_url="${dmg_url}.signed.json"
+  expected_size=""
+  github_digest=""
+fi
 
 /usr/bin/curl -fsSL "$manifest_url" -o "$stage/manifest.json"
-expected_sha256="$(/usr/bin/osascript -l JavaScript - "$stage/manifest.json" "$version" "$dmg_name" "$expected_size" "$github_digest" <<'JXA'
+manifest_info="$(/usr/bin/osascript -l JavaScript - "$stage/manifest.json" "$version" "$dmg_name" "$expected_size" "$github_digest" <<'JXA'
 ObjC.import('Foundation');
 function run(argv) {
   const [manifestFile, version, name, sizeText, digest] = argv;
   const data = $.NSData.dataWithContentsOfFile(manifestFile);
   if (!data || data.isNil()) throw new Error('无法读取签名清单');
   const m = JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding)));
-  if (!m || m.version !== version || m.name !== name || String(m.size) !== sizeText ||
+  if (!m || m.version !== version || m.name !== name ||
+      !Number.isSafeInteger(m.size) || m.size <= 0 || m.size > 2147483647 ||
+      (sizeText && String(m.size) !== sizeText) ||
       typeof m.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.sha256) ||
       typeof m.signature !== 'string' || m.signature.length !== 88) {
     throw new Error('签名清单格式或版本信息不匹配');
@@ -90,15 +112,17 @@ function run(argv) {
   if (digest && digest.toLowerCase() !== `sha256:${m.sha256}`) {
     throw new Error('签名清单哈希与发布记录不一致');
   }
-  return m.sha256;
+  return `${m.size}\t${m.sha256}`;
 }
 JXA
 )"
+IFS=$'\t' read -r expected_size expected_sha256 <<<"$manifest_info"
 
 dmg_path="$stage/$dmg_name"
 echo "正在下载 ${dmg_name} (v${version})..."
 if [[ -t 2 ]]; then
-  /usr/bin/curl -fL --progress-bar "$dmg_url" -o "$dmg_path"
+  tty_cols="$(/usr/bin/tput cols </dev/tty 2>/dev/null || echo 72)"
+  COLUMNS="$tty_cols" /usr/bin/curl -fL --progress-bar "$dmg_url" -o "$dmg_path"
 else
   /usr/bin/curl -fsSL "$dmg_url" -o "$dmg_path"
 fi
