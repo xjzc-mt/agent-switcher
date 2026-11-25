@@ -10,9 +10,8 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | [AGS-0001](AGS-0001-antigravity-file-auth.md) | 缺陷 | `待验收` | macOS | local | Antigravity 凭据 | CLI 认证文件并存时的保存、切换与长凭据迁移；隔离回归已过，待双测试账号真机往返核验 |
 | [AGS-0003](AGS-0003-desktop-only-accounts.md) | 架构 | `待分析` | 全平台 | local | 桌面端发现 | 只装官方桌面版（未单装 CLI）时，各 Agent 账号读取、切换与额度能力边界梳理 |
-| [AGS-0008](AGS-0008-windows-runtime-and-sandbox.md) | 缺陷/架构 | `待验收` | Windows | local | 沙箱与多平台底座 | Windows 受限令牌沙箱、进程容错与多平台拆文件解耦；源码返修已过，待 Windows 10/11 真机验收 |
+| [AGS-0008](AGS-0008-windows-runtime-and-sandbox.md) | 缺陷/架构 | `待验收` | Windows | local | 沙箱与多平台底座 | Windows 受限令牌沙箱、进程容错与多平台拆文件解耦；CI 标准用户沙箱已过，待 Windows 10/11 真机验收 |
 | [AGS-0009](AGS-0009-windows-codex-desktop-support.md) | 缺陷 | `待验收` | Windows | local | Codex 桌面端 | Windows 仅装商店版 Codex 桌面端时的内置 CLI 发现、关窗等待与按原安装重开；待 Windows 真机验收 |
-| [AGS-0016](AGS-0016-release-0.1.0-and-one-click-install.md) | 需求/发布 | `待验收` | 全平台 | local | 更新与分发 | 版本体系回调至 `0.1.0`、历史 `1.0.x` 防回跳保护与官网跨平台一键安装脚本（`install.sh` / `install.ps1`） |
 
 ## 2. 线上 GitHub Issues 分流映射（Online Inbox）
 
@@ -20,13 +19,13 @@
 
 | GitHub Issue | 线上状态 | 反馈摘要 | 关联本地单 / 落地情况 | 线上关单条件 |
 | --- | --- | --- | --- | --- |
-| [#1 提几个建议](https://github.com/xjzc-mt/agent-switcher/issues/1) | `open` | ①隐藏未完成入口 ②列表宽度自适应 ③名称列加宽 ④在线更新 ⑤支持代理 ⑥下载链接 | ①~④、⑥ 已在 `1.0.1` 上线；⑤ macOS 已支持、Windows 本机代理随 [AGS-0008](AGS-0008-windows-runtime-and-sandbox.md) 待发版 | 下一版本发布后汇总回复各项落地情况并关闭 `#1` |
-| [#3 正常号和异常号 UI 没对齐 + 定期刷新间隔配置](https://github.com/xjzc-mt/agent-switcher/issues/3) | `open` | ① 正常双栏卡与单行凭据失效卡底边未对齐<br>② 建议增加可配置的定期刷新间隔 | [AGS-0010](archive/AGS-0010-expired-account-group-and-alignment.md) 与 [AGS-0011](archive/AGS-0011-configurable-quota-refresh-interval.md) 均已验收归档 | 随下一版本发布后回复版本号并关闭 `#3` |
+| [#1 提几个建议](https://github.com/xjzc-mt/agent-switcher/issues/1) | `closed` | ①隐藏未完成入口 ②列表宽度自适应 ③名称列加宽 ④在线更新 ⑤支持代理 ⑥下载链接 | ①~⑥ 均已在 `v0.1.0` 完整上线（含应用内一键更新、双平台本机代理与官网一行命令安装） | 已随 `v0.1.0` 发布汇总回复并关闭 `#1` |
+| [#3 正常号和异常号 UI 没对齐 + 定期刷新间隔配置](https://github.com/xjzc-mt/agent-switcher/issues/3) | `closed` | ① 正常双栏卡与单行凭据失效卡底边未对齐<br>② 建议增加可配置的定期刷新间隔 | [AGS-0010](archive/AGS-0010-expired-account-group-and-alignment.md) 与 [AGS-0011](archive/AGS-0011-configurable-quota-refresh-interval.md) 已随 `v0.1.0` 上线 | 已随 `v0.1.0` 发布回复并关闭 `#3` |
 
 ## 3. 已关闭归档索引（Archive）
 
 <details>
-<summary>已归档 11 项（位于 <code>issues/archive/</code>，点击展开）</summary>
+<summary>已归档 12 项（位于 <code>issues/archive/</code>，点击展开）</summary>
 
 | 编号 | 来源 | 平台 | 关闭日期 / 版本 | 归档记录 |
 | --- | --- | --- | --- | --- |
@@ -41,6 +40,7 @@
 | AGS-0013 | local | 全平台 | 2026-11-24 (`v0.1.0`) | [Codex 有效期内只读优先查额与挂起临时目录自动对账自愈](archive/AGS-0013-codex-quota-pending-recovery.md) |
 | AGS-0014 | local | macOS | 2026-11-24 (`v0.1.0`) | [macOS 菜单栏小菜单重设计：常驻展开、额度优先与定宽双列语义胶囊](archive/AGS-0014-macos-tray-redesign.md) |
 | AGS-0015 | local | 全平台 | 2026-11-25 (`v0.1.0`) | [Codex 查询失败精确分流自愈与账号详情恢复指引直出](archive/AGS-0015-codex-error-classification-and-detail-guidance.md) |
+| AGS-0016 | local | 全平台 | 2026-11-25 (`v0.1.0`) | [版本体系回调至 0.1.0、历史 1.0.x 防回跳与官网跨平台一键安装脚本](archive/AGS-0016-release-0.1.0-and-one-click-install.md) |
 
 </details>
 

@@ -38,7 +38,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "正在查询 AgentSwitcher 最新正式版本 ($arch)..."
+echo "正在查询 AgentSwitcher 最新正式版本 (${arch})..."
 /usr/bin/curl -fsSL -H 'Accept: application/vnd.github+json' "$api_url" -o "$stage/release.json"
 
 metadata="$(/usr/bin/osascript -l JavaScript - "$stage/release.json" "$arch" "$releases_url" <<'JXA'
@@ -96,7 +96,7 @@ JXA
 )"
 
 dmg_path="$stage/$dmg_name"
-echo "正在下载 $dmg_name (v$version)..."
+echo "正在下载 ${dmg_name} (v${version})..."
 if [[ -t 2 ]]; then
   /usr/bin/curl -fL --progress-bar "$dmg_url" -o "$dmg_path"
 else
@@ -154,7 +154,7 @@ else
   mv "$staged_app" "$target_app"
 fi
 
-echo "AgentSwitcher v$version 已安装至 $target_app（后续可在「设置 → 应用与更新」一键升级）。"
+echo "AgentSwitcher v${version} 已安装至 ${target_app}（后续可在「设置 → 应用与更新」一键升级）。"
 if [[ "${AGS_NO_OPEN:-0}" != "1" ]]; then
   /usr/bin/open "$target_app"
 fi

@@ -158,27 +158,30 @@ test('install.sh checks syntax and verifies signed DMG installation and atomic r
       return { base, api: `file://${releaseJson}` };
     };
 
+    const bashBin = fs.existsSync('/bin/bash') ? '/bin/bash' : 'bash';
+    const baseEnv = { ...process.env, LC_ALL: 'C', AGS_ARCH: 'arm64', AGS_INSTALL_DIR: installDir, AGS_NO_OPEN: '1' };
     const first = makeRelease('0.1.0');
-    const run1 = spawnSync('bash', [scriptPath], {
+    const run1 = spawnSync(bashBin, [scriptPath], {
       encoding: 'utf8',
-      env: { ...process.env, AGS_ARCH: 'arm64', AGS_RELEASE_API: first.api, AGS_RELEASES_URL: first.base, AGS_INSTALL_DIR: installDir, AGS_NO_OPEN: '1' },
+      env: { ...baseEnv, AGS_RELEASE_API: first.api, AGS_RELEASES_URL: first.base },
     });
     assert.equal(run1.status, 0, run1.stderr);
+    assert.match(run1.stdout, /AgentSwitcher v0\.1\.0 已安装至 /);
     const bin = path.join(installDir, 'AgentSwitcher.app/Contents/MacOS/AgentSwitcher');
     assert.match(fs.readFileSync(bin, 'utf8'), /0\.1\.0/);
 
     const bad = makeRelease('0.1.1', true);
-    const runBad = spawnSync('bash', [scriptPath], {
+    const runBad = spawnSync(bashBin, [scriptPath], {
       encoding: 'utf8',
-      env: { ...process.env, AGS_ARCH: 'arm64', AGS_RELEASE_API: bad.api, AGS_RELEASES_URL: bad.base, AGS_INSTALL_DIR: installDir, AGS_NO_OPEN: '1' },
+      env: { ...baseEnv, AGS_RELEASE_API: bad.api, AGS_RELEASES_URL: bad.base },
     });
     assert.notEqual(runBad.status, 0);
     assert.match(fs.readFileSync(bin, 'utf8'), /0\.1\.0/);
 
     const second = makeRelease('0.1.1');
-    const run2 = spawnSync('bash', [scriptPath], {
+    const run2 = spawnSync(bashBin, [scriptPath], {
       encoding: 'utf8',
-      env: { ...process.env, AGS_ARCH: 'arm64', AGS_RELEASE_API: second.api, AGS_RELEASES_URL: second.base, AGS_INSTALL_DIR: installDir, AGS_NO_OPEN: '1' },
+      env: { ...baseEnv, AGS_RELEASE_API: second.api, AGS_RELEASES_URL: second.base },
     });
     assert.equal(run2.status, 0, run2.stderr);
     assert.match(fs.readFileSync(bin, 'utf8'), /0\.1\.1/);

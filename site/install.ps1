@@ -50,7 +50,7 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 $exePath = Join-Path $stage $exeName
 
 try {
-  Write-Host "正在下载 $exeName (v$version)..."
+  Write-Host "正在下载 ${exeName} (v${version})..."
   Invoke-WebRequest -Uri $exeAsset.browser_download_url -OutFile $exePath -UseBasicParsing
   $item = Get-Item -LiteralPath $exePath
   $actualHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -59,14 +59,14 @@ try {
   }
 
   $installerArgs = if ($env:AGS_INSTALLER_ARGS) { $env:AGS_INSTALLER_ARGS } elseif ($env:AGS_NO_OPEN -eq '1') { '/S' } else { '/S --force-run' }
-  Write-Host "正在安装 AgentSwitcher v$version..."
+  Write-Host "正在安装 AgentSwitcher v${version}..."
   $proc = [Diagnostics.Process]::Start($exePath, $installerArgs)
   if ($null -eq $proc) { throw '无法启动安装程序。' }
   $proc.WaitForExit()
   $exitCode = $proc.ExitCode
   $proc.Dispose()
-  if ($exitCode -ne 0) { throw "安装程序异常退出 (代码: $exitCode)。" }
-  Write-Host "AgentSwitcher v$version 安装完成（后续可在「设置 → 应用与更新」一键升级）。"
+  if ($exitCode -ne 0) { throw "安装程序异常退出 (代码: ${exitCode})。" }
+  Write-Host "AgentSwitcher v${version} 安装完成（后续可在「设置 → 应用与更新」一键升级）。"
 } finally {
   for ($i = 0; $i -lt 4 -and (Test-Path -LiteralPath $stage); $i++) {
     if ($i -gt 0) { Start-Sleep -Milliseconds 250 }
