@@ -480,3 +480,60 @@ test('a signed DMG with no application stays unavailable until the release asset
   assert.equal((await check(bytes.length, sha)).release.downloadable, false);
   assert.equal((await check(payload.length, digest)).release.downloadable, true);
 });
+
+test('zero-download GitHub release signing verifies commit, build workflow, and SHA-256 digests without downloading installers', t => {
+  const f = fixture(), version = '0.1.2', sha = 'ab'.repeat(20);
+  const manifestMod = require('../dist/release-manifest');
+  t.mock.method(manifestMod, 'trustedReleaseKey', () => key.publicKey);
+  const privateFile = path.join(f.root, 'offline-private.pem');
+  fs.writeFileSync(privateFile, key.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  const expectedAssets = [
+    { name: `AgentSwitcher-${version}-arm64.dmg`, size: 120001, state: 'uploaded', digest: 'sha256:' + '1'.repeat(64) },
+    { name: `AgentSwitcher-${version}-x64.dmg`, size: 120002, state: 'uploaded', digest: 'sha256:' + '2'.repeat(64) },
+    { name: `AgentSwitcher-Setup-${version}-x64.exe`, size: 110003, state: 'uploaded', digest: 'SHA256:' + 'A'.repeat(64) },
+  ];
+  const { signGithubRelease } = require('../scripts/release-checksums.cjs');
+  const uploaded = new Map(), calls = [];
+  const makeExec = ({ target = sha, conclusion = 'success', assets = expectedAssets } = {}) => (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (cmd === 'gh' && args[0] === 'api' && args[1].includes('/releases?')) {
+      return JSON.stringify([{ tag_name: `v${version}`, draft: true, target_commitish: target, assets }]);
+    }
+    if (cmd === 'gh' && args[0] === 'api' && args[1].includes('release-build.yml/runs')) {
+      return JSON.stringify({ workflow_runs: [{ head_sha: sha, conclusion }] });
+    }
+    if (cmd === 'gh' && args[0] === 'release' && args[1] === 'upload') {
+      for (const file of args.slice(args.indexOf('--clobber') + 1)) {
+        uploaded.set(path.basename(file), fs.readFileSync(file, 'utf8'));
+      }
+      return '';
+    }
+    if (cmd === 'gh' && args[0] === 'release' && args[1] === 'edit') return '';
+    throw new Error(`Unexpected command: ${cmd} ${args.join(' ')}`);
+  };
+
+  assert.throws(() => signGithubRelease({ releaseTag: 'v1.0.1', keyFile: privateFile, commit: sha }, makeExec()), /已退役/);
+  assert.throws(() => signGithubRelease({ releaseTag: `v${version}`, keyFile: privateFile, commit: sha },
+    makeExec({ target: 'cd'.repeat(20) })), /不一致/);
+  assert.throws(() => signGithubRelease({ releaseTag: `v${version}`, keyFile: privateFile, commit: sha },
+    makeExec({ conclusion: 'failure' })), /release-build\.yml/);
+  assert.throws(() => signGithubRelease({ releaseTag: `v${version}`, keyFile: privateFile, commit: sha },
+    makeExec({ assets: expectedAssets.slice(0, 2) })), /缺少已上传的安装包/);
+  assert.throws(() => signGithubRelease({ releaseTag: `v${version}`, keyFile: privateFile, commit: sha },
+    makeExec({ assets: [{ ...expectedAssets[0], digest: '' }, ...expectedAssets.slice(1)] })), /SHA-256/);
+  assert.equal(uploaded.size, 0);
+
+  calls.length = 0;
+  signGithubRelease({ releaseTag: `v${version}`, keyFile: privateFile, commit: sha, publish: true }, makeExec());
+  assert.equal(uploaded.size, 4);
+  assert.equal(uploaded.get('SHA256SUMS'), [
+    `${'1'.repeat(64)}  AgentSwitcher-${version}-arm64.dmg`,
+    `${'2'.repeat(64)}  AgentSwitcher-${version}-x64.dmg`,
+    `${'a'.repeat(64)}  AgentSwitcher-Setup-${version}-x64.exe`,
+  ].join('\n') + '\n');
+  for (const item of expectedAssets) {
+    const doc = JSON.parse(uploaded.get(item.name + '.signed.json'));
+    assert.equal(manifestMod.verifyReleaseManifest(doc, { version, name: item.name, size: item.size }, key.publicKey), true);
+  }
+  assert.ok(calls.some(c => c[0] === 'gh' && c[1] === 'release' && c[2] === 'edit' && c.includes('--latest') && c.includes('--draft=false')));
+});

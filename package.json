@@ -16,6 +16,7 @@
     "dist:zip": "tsc && electron-builder --mac zip --publish never",
     "size:audit": "node scripts/size-audit.cjs",
     "release:checksums": "node scripts/release-checksums.cjs",
+    "release:sign": "node scripts/release-checksums.cjs",
     "screenshots": "electron scripts/capture-screenshots.cjs",
     "site:build": "node scripts/build-site.cjs",
     "dev": "npm run build && node dist/index.js",
