@@ -6,7 +6,7 @@ const { BrowserWindow, ipcMain } = require('electron');
 
 module.exports = suite(
   { width: 880, height: 700, titleBarStyle: 'hiddenInset', trafficLightPosition: {x: 18, y: 18}, additionalArguments: ['--test-tray-menu'] },
-  async ({ window, run, load, pause, capture }) => {
+  async ({ window, run, until, load, pause, capture }) => {
     const tray = new EventEmitter();
     tray.setIgnoreDoubleClickEvents = () => {};
     tray.getBounds = () => ({ x:320, y:0, width:20, height:24 });
@@ -79,9 +79,9 @@ module.exports = suite(
     assert.equal(modalToast.topmost,true,JSON.stringify(modalToast));assert.equal(modalToast.dialogs,1);assert.equal(modalToast.top,toast.top,'Details must not move feedback back to the center');
     await run(`document.querySelector('.account-modal[open]').dismissAccountDialog()`);await pause(180);
     assert.equal(await run(`document.querySelector('#toastBox').parentElement===document.body&&document.querySelector('#toastBox').matches(':popover-open')`),true,'Closing details must preserve its pending feedback');
-    await run(`document.querySelector('.toast-close').click()`);await pause(180);assert.equal(await run(`document.querySelector('#toastBox').matches(':popover-open')`),false);
+    await run(`document.querySelector('.toast-close').click()`);await until(`!document.querySelector('#toastBox').matches(':popover-open')`);
     await run(`showToast('连接失败，请稍后再试','error')`);assert.equal(await run(`document.querySelector('.toast-item').getAttribute('role')`),'alert');
-    await run(`document.querySelector('.toast-close').click()`);await pause(180);
+    await run(`document.querySelector('.toast-close').click()`);await until(`!document.querySelector('#toastBox').matches(':popover-open')`);
     await run(`window.providerTestApi.native(); window.accountTestApi.alias('个人主力','私人-demo@example.test');
       for(let i=0;i<16;i++) window.accountTestApi.alias('团队账号','团队联合测试账号'.repeat(4)+i); loadStatus()`);
     await run(`{
