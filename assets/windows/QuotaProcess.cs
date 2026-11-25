@@ -29,6 +29,7 @@ internal static class QuotaProcess {
         public int Size; public IntPtr Reserved, Desktop, Title; public uint X, Y, Width, Height, CharsX, CharsY, Fill, Flags;
         public ushort Show, Reserved2; public IntPtr Buffer, Input, Output, Error;
     }
+    [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int Size; public IntPtr Descriptor; public bool Inherit; }
     [StructLayout(LayoutKind.Sequential)] struct ExtendedStartup { public Startup Info; public IntPtr Attributes; }
     [StructLayout(LayoutKind.Sequential)] struct ProcessInfo { public IntPtr Process, Thread; public uint Pid, Tid; }
     [StructLayout(LayoutKind.Sequential)] struct FileInformation {
@@ -38,8 +39,17 @@ internal static class QuotaProcess {
 
     [DllImport("shell32.dll", ExactSpelling=true)] static extern int SHGetKnownFolderPath(ref Guid id, uint flags, IntPtr token, out IntPtr path);
     [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string text, uint revision, out IntPtr descriptor, IntPtr size);
+    [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor, out bool present, out IntPtr acl, out bool defaulted);
     [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorSacl(IntPtr descriptor, out bool present, out IntPtr acl, out bool defaulted);
+    [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(IntPtr handle, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
     [DllImport("advapi32.dll", CharSet=CharSet.Unicode)] static extern uint SetNamedSecurityInfo(string path, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr GetProcessWindowStation();
+    [DllImport("user32.dll", SetLastError=true)] static extern bool SetProcessWindowStation(IntPtr station);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateWindowStation(string name, uint flags, uint access, ref SecurityAttributes security);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool CloseWindowStation(IntPtr station);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateDesktop(string name, string device, IntPtr mode, uint flags, uint access, ref SecurityAttributes security);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool CloseDesktop(IntPtr desktop);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetUserObjectInformation(IntPtr handle, int index, StringBuilder text, uint length, out uint needed);
     [DllImport("advapi32.dll", SetLastError=true)] static extern bool DuplicateToken(SafeFileHandle token, int level, out SafeFileHandle impersonation);
     [DllImport("advapi32.dll", SetLastError=true)] static extern bool AccessCheck(byte[] descriptor, SafeFileHandle token, uint access,
         ref GenericMapping mapping, IntPtr privileges, ref uint size, out uint granted, out bool allowed);
@@ -78,6 +88,7 @@ internal static class QuotaProcess {
         public IntPtr Handles(params IntPtr[] handles) {
             IntPtr p = Alloc(handles.Length * IntPtr.Size); Marshal.Copy(handles, 0, p, handles.Length); return p;
         }
+        public IntPtr WideString(string text) { IntPtr p = Marshal.StringToHGlobalUni(text); blocks.Add(p); return p; }
         public void Dispose() { foreach (IntPtr p in blocks) Marshal.FreeHGlobal(p); }
     }
     static void Attribute(IntPtr list, int key, IntPtr value, int size) {
@@ -433,6 +444,40 @@ internal static class QuotaProcess {
         } while (wait.ElapsedMilliseconds < 5000);
         return 125;
     }
+    static IntPtr IsolatedDesktop(WindowsIdentity user, SecurityIdentifier logon, SecurityIdentifier sid, Memory mem, out IntPtr station, out IntPtr desktop) {
+        station = IntPtr.Zero; desktop = IntPtr.Zero;
+        IntPtr winstaDesc = IntPtr.Zero, deskDesc = IntPtr.Zero;
+        try {
+            string baseAcl = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;" + user.User.Value + ")(A;;GA;;;" + logon.Value + ")";
+            Check(ConvertStringSecurityDescriptorToSecurityDescriptor(baseAcl + "(A;;GA;;;S-1-5-32-545)S:(ML;;NW;;;LW)", 1, out winstaDesc, IntPtr.Zero));
+            Check(ConvertStringSecurityDescriptorToSecurityDescriptor(baseAcl + "(A;;GA;;;" + sid.Value + ")S:(ML;;NW;;;LW)", 1, out deskDesc, IntPtr.Zero));
+            IntPtr current = GetProcessWindowStation(); Check(current != IntPtr.Zero);
+            var winstaSa = new SecurityAttributes { Size = Size<SecurityAttributes>(), Descriptor = winstaDesc };
+            station = CreateWindowStation(null, 0, 0x0006037FU, ref winstaSa); Check(station != IntPtr.Zero);
+            IntPtr dacl, sacl; bool daclPresent, saclPresent, defaulted;
+            Check(GetSecurityDescriptorDacl(winstaDesc, out daclPresent, out dacl, out defaulted) && daclPresent);
+            Check(GetSecurityDescriptorSacl(winstaDesc, out saclPresent, out sacl, out defaulted) && saclPresent);
+            uint error = SetSecurityInfo(station, 7, 4U | 0x10U, IntPtr.Zero, IntPtr.Zero, dacl, sacl);
+            if (error != 0) throw new Win32Exception((int)error);
+            var stationName = new StringBuilder(256); uint needed;
+            Check(GetUserObjectInformation(station, 2, stationName, (uint)(stationName.Capacity * 2), out needed));
+            string deskName = "ags-" + Guid.NewGuid().ToString("N").Substring(0, 12);
+            var deskSa = new SecurityAttributes { Size = Size<SecurityAttributes>(), Descriptor = deskDesc };
+            Check(SetProcessWindowStation(station));
+            try {
+                desktop = CreateDesktop(deskName, null, IntPtr.Zero, 0, 0x01FFU, ref deskSa);
+                Check(desktop != IntPtr.Zero);
+            } finally { SetProcessWindowStation(current); }
+            return mem.WideString(stationName.ToString() + "\\" + deskName);
+        } catch {
+            if (desktop != IntPtr.Zero) { CloseDesktop(desktop); desktop = IntPtr.Zero; }
+            if (station != IntPtr.Zero) { CloseWindowStation(station); station = IntPtr.Zero; }
+            throw;
+        } finally {
+            if (winstaDesc != IntPtr.Zero) LocalFree(winstaDesc);
+            if (deskDesc != IntPtr.Zero) LocalFree(deskDesc);
+        }
+    }
     // 0/1 = official job drained, 124 = CLI never started, 125 = unconfirmed.
     static int Run(string[] args, Process parent, Memory mem, bool isolated, string cwd, ref bool started) {
         using (WindowsIdentity user = isolated ? WindowsIdentity.GetCurrent(TokenAccessLevels.Query | TokenAccessLevels.Duplicate |
@@ -453,50 +498,58 @@ internal static class QuotaProcess {
             SecurityIdentifier sid = isolated ? NewQuerySid() : null;
             using (SafeFileHandle restricted = isolated ? QuotaToken(user, sid, mem) : null)
             using (FileStream image = isolated ? Executable(exe, restricted, user, mem) : null) {
-                if (isolated) {
-                    SecurityIdentifier logon = LogonSid(user, mem);
-                    Directory.CreateDirectory(cwd); AuthorizeHome(cwd, logon, sid);
-                    exe = FinalPath(image.SafeFileHandle);
-                    string temp = Path.Combine(cwd, "tmp"), local = Path.Combine(cwd, "AppData", "Local"), roaming = Path.Combine(cwd, "AppData", "Roaming");
-                    foreach (string dir in new [] { temp, local, roaming }) Directory.CreateDirectory(dir);
-                    string cache = Path.Combine(cwd, ".gemini", "antigravity-cli", "cache"); Directory.CreateDirectory(cache);
-                    File.WriteAllBytes(Path.Combine(cache, "antigravity-keyring-unavailable"), new byte[0]);
-                    foreach (string name in new [] { "HOME", "USERPROFILE" }) Environment.SetEnvironmentVariable(name, cwd);
-                    foreach (string name in new [] { "TMP", "TEMP" }) Environment.SetEnvironmentVariable(name, temp);
-                    Environment.SetEnvironmentVariable("APPDATA", roaming); Environment.SetEnvironmentVariable("LOCALAPPDATA", local);
-                }
-                const int count = 2; IntPtr length = IntPtr.Zero;
-                InitializeProcThreadAttributeList(IntPtr.Zero, count, 0, ref length);
-                Check(length != IntPtr.Zero); IntPtr attrs = mem.Alloc(length.ToInt32());
-                Check(InitializeProcThreadAttributeList(attrs, count, 0, ref length));
-                ProcessInfo info;
+                IntPtr station = IntPtr.Zero, desktop = IntPtr.Zero, desktopName = IntPtr.Zero;
                 try {
-                    IntPtr stdin = input.DangerousGetHandle(), stdout = output.DangerousGetHandle(), stderr = error.DangerousGetHandle();
-                    Attribute(attrs, 0x20002, mem.Handles(stdin, stdout, stderr), 3 * IntPtr.Size); // HANDLE_LIST
-                    Attribute(attrs, 0x2000D, mem.Handles(job.DangerousGetHandle()), IntPtr.Size); // JOB_LIST, atomic at creation
-                    ExtendedStartup start = new ExtendedStartup { Attributes = attrs, Info = new Startup { Size = Size<ExtendedStartup>(),
-                        Flags = 0x100, Input = stdin, Output = stdout, Error = stderr } };
-                    StringBuilder command = new StringBuilder(Quote(exe));
-                    for (int i = 3; i < args.Length; i++) command.Append(' ').Append(Quote(args[i]));
-                    if (parent.HasExited || File.Exists(stopFile)) return 124;
-                    const uint flags = 0x08080000; // CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT
-                    if (isolated) started = CreateProcessAsUser(restricted, exe, command, IntPtr.Zero, IntPtr.Zero, true, flags, IntPtr.Zero, cwd, ref start, out info);
-                    else started = CreateProcess(exe, command, IntPtr.Zero, IntPtr.Zero, true, flags, IntPtr.Zero, cwd, ref start, out info);
-                    Check(started);
-                } finally { DeleteProcThreadAttributeList(attrs); }
-                try {
-                    IntPtr[] handles = new [] { parent.Handle, info.Process };
-                    uint ended;
-                    do {
-                        ended = WaitForMultipleObjects(2, handles, false, 100);
-                    } while (ended == 258 && !File.Exists(stopFile)); // WAIT_TIMEOUT
-                    Check(ended <= 1 || ended == 258); uint exit = 125;
-                    if (ended == 1) {
-                        Check(GetExitCodeProcess(info.Process, out exit));
-                        if (exit >= 0xC0000000U) Console.Error.WriteLine("Windows CLI exited ({0:X8})", exit);
+                    if (isolated) {
+                        SecurityIdentifier logon = LogonSid(user, mem);
+                        Directory.CreateDirectory(cwd);
+                        exe = FinalPath(image.SafeFileHandle);
+                        string temp = Path.Combine(cwd, "tmp"), local = Path.Combine(cwd, "AppData", "Local"), roaming = Path.Combine(cwd, "AppData", "Roaming");
+                        foreach (string dir in new [] { temp, local, roaming }) Directory.CreateDirectory(dir);
+                        string cache = Path.Combine(cwd, ".gemini", "antigravity-cli", "cache"); Directory.CreateDirectory(cache);
+                        File.WriteAllBytes(Path.Combine(cache, "antigravity-keyring-unavailable"), new byte[0]);
+                        AuthorizeHome(cwd, logon, sid);
+                        desktopName = IsolatedDesktop(user, logon, sid, mem, out station, out desktop);
+                        foreach (string name in new [] { "HOME", "USERPROFILE" }) Environment.SetEnvironmentVariable(name, cwd);
+                        foreach (string name in new [] { "TMP", "TEMP" }) Environment.SetEnvironmentVariable(name, temp);
+                        Environment.SetEnvironmentVariable("APPDATA", roaming); Environment.SetEnvironmentVariable("LOCALAPPDATA", local);
                     }
-                    return DrainJob(job, ended == 1 && exit == 0 ? 0 : 1);
-                } finally { CloseHandle(info.Thread); CloseHandle(info.Process); }
+                    const int count = 2; IntPtr length = IntPtr.Zero;
+                    InitializeProcThreadAttributeList(IntPtr.Zero, count, 0, ref length);
+                    Check(length != IntPtr.Zero); IntPtr attrs = mem.Alloc(length.ToInt32());
+                    Check(InitializeProcThreadAttributeList(attrs, count, 0, ref length));
+                    ProcessInfo info;
+                    try {
+                        IntPtr stdin = input.DangerousGetHandle(), stdout = output.DangerousGetHandle(), stderr = error.DangerousGetHandle();
+                        Attribute(attrs, 0x20002, mem.Handles(stdin, stdout, stderr), 3 * IntPtr.Size); // HANDLE_LIST
+                        Attribute(attrs, 0x2000D, mem.Handles(job.DangerousGetHandle()), IntPtr.Size); // JOB_LIST, atomic at creation
+                        ExtendedStartup start = new ExtendedStartup { Attributes = attrs, Info = new Startup { Size = Size<ExtendedStartup>(),
+                            Desktop = desktopName, Flags = 0x100, Input = stdin, Output = stdout, Error = stderr } };
+                        StringBuilder command = new StringBuilder(Quote(exe));
+                        for (int i = 3; i < args.Length; i++) command.Append(' ').Append(Quote(args[i]));
+                        if (parent.HasExited || File.Exists(stopFile)) return 124;
+                        const uint flags = 0x08080000; // CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT
+                        if (isolated) started = CreateProcessAsUser(restricted, exe, command, IntPtr.Zero, IntPtr.Zero, true, flags, IntPtr.Zero, cwd, ref start, out info);
+                        else started = CreateProcess(exe, command, IntPtr.Zero, IntPtr.Zero, true, flags, IntPtr.Zero, cwd, ref start, out info);
+                        Check(started);
+                    } finally { DeleteProcThreadAttributeList(attrs); }
+                    try {
+                        IntPtr[] handles = new [] { parent.Handle, info.Process };
+                        uint ended;
+                        do {
+                            ended = WaitForMultipleObjects(2, handles, false, 100);
+                        } while (ended == 258 && !File.Exists(stopFile)); // WAIT_TIMEOUT
+                        Check(ended <= 1 || ended == 258); uint exit = 125;
+                        if (ended == 1) {
+                            Check(GetExitCodeProcess(info.Process, out exit));
+                            if (exit >= 0xC0000000U) Console.Error.WriteLine("Windows CLI exited ({0:X8})", exit);
+                        }
+                        return DrainJob(job, ended == 1 && exit == 0 ? 0 : 1);
+                    } finally { CloseHandle(info.Thread); CloseHandle(info.Process); }
+                } finally {
+                    if (desktop != IntPtr.Zero) CloseDesktop(desktop);
+                    if (station != IntPtr.Zero) CloseWindowStation(station);
+                }
             }
         }
     }
