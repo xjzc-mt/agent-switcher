@@ -209,11 +209,11 @@ test('Windows quota runner isolates credential files, carries ACP and usage resp
   assert.equal(fs.statSync(cached, { bigint: true }).mtimeNs, stamp.mtimeNs);
   fs.appendFileSync(installed, 'new fixture version'); // An overlay leaves the small PE executable.
   assert.notEqual(await imagePath(), cached);
-  execFileSync(icacls, [installed, '/grant', '*S-1-5-11:RX', '*S-1-15-2-1:RX']);
+  execFileSync(icacls, [installed, '/grant', '*S-1-5-11:RX', '*S-1-5-32-545:RX']);
   assert.equal((await imagePath()).toLowerCase(), fs.realpathSync.native(installed).toLowerCase());
 
   // The actual credential behind the profile junction must still be private before launch.
-  execFileSync(icacls, [sentinel, '/grant', '*S-1-1-0:R', '*S-1-15-2-1:R']);
+  execFileSync(icacls, [sentinel, '/grant', '*S-1-1-0:R', '*S-1-5-32-545:R']);
   const unsafe = await run(args, true, fixture, settings);
   assert.equal(unsafe.code, 124, unsafe.err); assert.equal(unsafe.state, 'exported'); assert.equal(requests, 2);
   fs.unlinkSync(sentinel);

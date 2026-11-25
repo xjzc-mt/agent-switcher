@@ -106,9 +106,13 @@ internal static class QuotaProcess {
         // Medium-integrity, protected files may have been seeded by AGS before launch.
         // Give the low-integrity query both the enabled logon SID and its unique restricting SID.
         List<string> entries = new List<string>(); CollectHome(dir, entries);
-        IntPtr descriptor; Check(ConvertStringSecurityDescriptorToSecurityDescriptor("S:(ML;OICI;NW;;;LW)", 1, out descriptor, IntPtr.Zero));
+        IntPtr dirDesc = IntPtr.Zero, fileDesc = IntPtr.Zero;
         try {
-            IntPtr sacl; bool present, defaulted; Check(GetSecurityDescriptorSacl(descriptor, out present, out sacl, out defaulted) && present);
+            Check(ConvertStringSecurityDescriptorToSecurityDescriptor("S:(ML;OICI;NW;;;LW)", 1, out dirDesc, IntPtr.Zero));
+            Check(ConvertStringSecurityDescriptorToSecurityDescriptor("S:(ML;;NW;;;LW)", 1, out fileDesc, IntPtr.Zero));
+            IntPtr dirSacl, fileSacl; bool present, defaulted;
+            Check(GetSecurityDescriptorSacl(dirDesc, out present, out dirSacl, out defaulted) && present);
+            Check(GetSecurityDescriptorSacl(fileDesc, out present, out fileSacl, out defaulted) && present);
             foreach (string entry in entries) {
                 bool directory = Directory.Exists(entry);
                 FileSystemSecurity acl = directory ? (FileSystemSecurity)Directory.GetAccessControl(entry) : File.GetAccessControl(entry);
@@ -117,10 +121,10 @@ internal static class QuotaProcess {
                     acl.AddAccessRule(new FileSystemAccessRule(who, FileSystemRights.Modify, inherit, PropagationFlags.None, AccessControlType.Allow));
                 if (directory) Directory.SetAccessControl(entry, (DirectorySecurity)acl);
                 else File.SetAccessControl(entry, (FileSecurity)acl);
-                uint error = SetNamedSecurityInfo(entry, 1, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl); // LABEL_SECURITY_INFORMATION
+                uint error = SetNamedSecurityInfo(entry, 1, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, directory ? dirSacl : fileSacl); // LABEL_SECURITY_INFORMATION
                 if (error != 0) throw new Win32Exception((int)error);
             }
-        } finally { LocalFree(descriptor); }
+        } finally { if (dirDesc != IntPtr.Zero) LocalFree(dirDesc); if (fileDesc != IntPtr.Zero) LocalFree(fileDesc); }
     }
     static IntPtr TokenInfo(IntPtr token, int kind, Memory mem) {
         int size; GetTokenInformation(token, kind, IntPtr.Zero, 0, out size);
@@ -173,7 +177,7 @@ internal static class QuotaProcess {
         string path = Path.Combine(local, "AgentSwitcher-QuotaCLI");
         var acl = new DirectorySecurity();
         acl.SetOwner(user.User); acl.SetAccessRuleProtection(true, false);
-        foreach (var sid in new [] { user.User, new SecurityIdentifier("S-1-5-11"), new SecurityIdentifier("S-1-15-2-1") })
+        foreach (var sid in new [] { user.User, new SecurityIdentifier("S-1-5-11"), new SecurityIdentifier("S-1-5-32-545") })
             acl.AddAccessRule(new FileSystemAccessRule(sid, sid.Equals(user.User) ? FileSystemRights.FullControl : FileSystemRights.ReadAndExecute,
                 InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
         Directory.CreateDirectory(path, acl);
@@ -295,11 +299,10 @@ internal static class QuotaProcess {
     }
     static SafeFileHandle QuotaToken(WindowsIdentity user, SecurityIdentifier querySid, Memory mem) {
         IntPtr deny = mem.Struct(new SidAttr { Sid = mem.Sid(user.User) });
-        // The second access check permits our private workspace and public Windows runtime resources.
-        // Do not include Everyone, Users or the shared logon SID in the list of restricting SIDs.
+        // The second access check permits our private workspace and standard installed system binaries.
         int stride = Size<SidAttr>(); IntPtr allow = mem.Alloc(2 * stride);
         Marshal.StructureToPtr(new SidAttr { Sid = mem.Sid(querySid) }, allow, false);
-        var runtime = new SecurityIdentifier("S-1-15-2-1");
+        var runtime = new SecurityIdentifier("S-1-5-32-545");
         Marshal.StructureToPtr(new SidAttr { Sid = mem.Sid(runtime) }, IntPtr.Add(allow, stride), false);
         SafeFileHandle token; Check(CreateRestrictedToken(user.Token, 1, 1, deny, 0, IntPtr.Zero, 2, allow, out token));
         try {
@@ -513,7 +516,8 @@ internal static class QuotaProcess {
             }
         } catch (Exception e) {
             var native = e as Win32Exception;
-            Console.Error.WriteLine("Windows CLI launch failed ({0:X8})", native == null ? e.HResult : native.NativeErrorCode);
+            string site = e.TargetSite == null ? e.GetType().Name : e.TargetSite.Name;
+            Console.Error.WriteLine("Windows CLI launch failed ({0:X8} in {1})", native == null ? e.HResult : native.NativeErrorCode, site);
             return started ? 125 : 124;
         }
     }
