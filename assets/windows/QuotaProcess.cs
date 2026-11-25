@@ -301,8 +301,8 @@ internal static class QuotaProcess {
     static SafeFileHandle QuotaToken(WindowsIdentity user, SecurityIdentifier logon, SecurityIdentifier querySid, Memory mem) {
         IntPtr deny = mem.Struct(new SidAttr { Sid = mem.Sid(user.User) });
         // Permit our private workspace, installed system binaries, kernel IPC/Winsock, and the session window station.
-        SecurityIdentifier runtime = new SecurityIdentifier("S-1-5-32-545"), restrictedCode = new SecurityIdentifier("S-1-5-12");
-        SecurityIdentifier[] sids = new [] { querySid, runtime, restrictedCode, logon };
+        SecurityIdentifier everyone = new SecurityIdentifier("S-1-1-0"), runtime = new SecurityIdentifier("S-1-5-32-545"), restrictedCode = new SecurityIdentifier("S-1-5-12");
+        SecurityIdentifier[] sids = new [] { querySid, everyone, runtime, restrictedCode, logon };
         int stride = Size<SidAttr>(); IntPtr allow = mem.Alloc(sids.Length * stride);
         for (int i = 0; i < sids.Length; i++)
             Marshal.StructureToPtr(new SidAttr { Sid = mem.Sid(sids[i]) }, IntPtr.Add(allow, i * stride), false);
@@ -316,6 +316,13 @@ internal static class QuotaProcess {
             var expected = new HashSet<SecurityIdentifier>(sids);
             for (int i = 0; i < sids.Length; i++)
                 if (!expected.Remove(new SecurityIdentifier(Marshal.ReadIntPtr(groups, IntPtr.Size + i * stride)))) throw new UnauthorizedAccessException();
+            RawAcl dacl = new RawAcl(2, 4);
+            foreach (SecurityIdentifier who in new [] { new SecurityIdentifier("S-1-5-18"), user.User, new SecurityIdentifier("S-1-5-11"), querySid })
+                dacl.InsertAce(dacl.Count, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 0x10000000, who, false, null));
+            byte[] daclBytes = new byte[dacl.BinaryLength]; dacl.GetBinaryForm(daclBytes, 0);
+            IntPtr daclInfo = mem.Alloc(IntPtr.Size + daclBytes.Length), daclPtr = IntPtr.Add(daclInfo, IntPtr.Size);
+            Marshal.WriteIntPtr(daclInfo, daclPtr); Marshal.Copy(daclBytes, 0, daclPtr, daclBytes.Length);
+            Check(SetTokenInformation(token, 6, daclInfo, IntPtr.Size + daclBytes.Length)); // TokenDefaultDacl
             var low = new SecurityIdentifier("S-1-16-4096");
             IntPtr label = mem.Alloc(stride + low.BinaryLength), labelSid = IntPtr.Add(label, stride);
             byte[] bytes = new byte[low.BinaryLength]; low.GetBinaryForm(bytes, 0); Marshal.Copy(bytes, 0, labelSid, bytes.Length);
