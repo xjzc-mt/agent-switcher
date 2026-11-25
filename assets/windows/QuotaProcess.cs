@@ -300,10 +300,10 @@ internal static class QuotaProcess {
     }
     static SafeFileHandle QuotaToken(WindowsIdentity user, SecurityIdentifier logon, SecurityIdentifier querySid, Memory mem) {
         IntPtr deny = mem.Struct(new SidAttr { Sid = mem.Sid(user.User) });
-        // Permit our private workspace, installed system binaries, and the session window station.
-        int stride = Size<SidAttr>(); IntPtr allow = mem.Alloc(3 * stride);
-        var runtime = new SecurityIdentifier("S-1-5-32-545");
-        SecurityIdentifier[] sids = new [] { querySid, runtime, logon };
+        // Permit our private workspace, installed system binaries, kernel IPC/Winsock, and the session window station.
+        var runtime = new SecurityIdentifier("S-1-5-32-545"), restrictedCode = new SecurityIdentifier("S-1-5-12");
+        SecurityIdentifier[] sids = new [] { querySid, runtime, restrictedCode, logon };
+        int stride = Size<SidAttr>(); IntPtr allow = mem.Alloc(sids.Length * stride);
         for (int i = 0; i < sids.Length; i++)
             Marshal.StructureToPtr(new SidAttr { Sid = mem.Sid(sids[i]) }, IntPtr.Add(allow, i * stride), false);
         SafeFileHandle token; Check(CreateRestrictedToken(user.Token, 1, 1, deny, 0, IntPtr.Zero, (uint)sids.Length, allow, out token));
