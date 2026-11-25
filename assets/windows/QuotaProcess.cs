@@ -232,7 +232,7 @@ internal static class QuotaProcess {
             string path = FinalPath(input.SafeFileHandle);
             if (CanExecute(path, token)) return input;
             string dir = CacheDirectory(user, token, mem), slot;
-            using (var sha = SHA256.Create()) slot = Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(path.ToUpperInvariant())));
+            using (var sha = SHA256.Create()) slot = Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(path.ToUpperInvariant()))).Substring(0, 16);
             string prefix = Path.Combine(dir, slot), index = prefix + ".index", stamp = FileStamp(input, false);
             // Serialize cold copies and index publication across simultaneous AGS processes.
             using (LockCache(prefix + ".lock")) {
@@ -522,6 +522,8 @@ internal static class QuotaProcess {
         }
     }
     public static int Main(string[] args) {
+        AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling", false);
+        AppContext.SetSwitch("Switch.System.IO.BlockLongPaths", false);
         int result = Launch(args);
         if (args.Length == 0 || args[0] != "isolated" || result == 125) return result;
         // A killed Windows process may also exit with 1. Only the unrestricted launcher
