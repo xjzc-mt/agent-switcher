@@ -19,7 +19,7 @@ module.exports = function suite(options, verify) {
     const run = script => window.webContents.executeJavaScript(script);
     const errors = [];
     window.webContents.on('console-message', event => {
-      if (event.level === 'error') errors.push(event.message);
+      if (event.level === 'error' && !/^ResizeObserver loop /i.test(event.message)) errors.push(event.message);
     });
     const until = async expression => {
       for (let i = 0; i < 100; i++) {

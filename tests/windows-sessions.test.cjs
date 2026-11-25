@@ -27,7 +27,7 @@ test('Windows Antigravity guards shared sessions and only reopens the desktop it
   assert.deepEqual(windows.sharedWindowsAntigravityPids([{...rows[1], ownerKnown:false}], new Set()), []);
   assert.throws(() => windows.sharedWindowsAntigravityPids([{...rows[3], file:null}], new Set()), /无法确认/);
 
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ags-desktop-test-')));
+  const root = (fs.realpathSync.native || fs.realpathSync)(fs.mkdtempSync(path.join(os.tmpdir(), 'ags-desktop-test-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   asWindows(t);
   const clients = require('../dist/clients'), { EventEmitter } = require('node:events');
@@ -59,7 +59,7 @@ test('Windows Antigravity guards shared sessions and only reopens the desktop it
 });
 
 test('Windows restarts the registered Codex desktop and waits for its backend while preserving independent terminals', async t => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ags-codex-desktop-')));
+  const root = (fs.realpathSync.native || fs.realpathSync)(fs.mkdtempSync(path.join(os.tmpdir(), 'ags-codex-desktop-')));
   t.after(() => fs.rmSync(root, { recursive:true, force:true }));
   asWindows(t);
   const clients = require('../dist/clients'), { EventEmitter } = require('node:events');

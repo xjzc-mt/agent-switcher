@@ -179,7 +179,7 @@ export async function withStoreLock<T>(work: () => Promise<T>, quotaIdentity?: s
   ensureDir(STORE_DIR);
   const root = fs.lstatSync(STORE_DIR);
   if (!root.isDirectory()) throw new Error('账号池必须是普通目录，不能是符号链接');
-  if (process.platform !== 'win32' && (root.mode & 0o777) !== 0o700) {
+  if (path.sep !== '\\' && process.platform !== 'win32' && (root.mode & 0o777) !== 0o700) {
     const fd = fs.openSync(STORE_DIR, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     try { fs.fchmodSync(fd, 0o700); } finally { fs.closeSync(fd); }
   }
