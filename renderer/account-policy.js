@@ -4,23 +4,38 @@
     ? (status?.quota?.buckets || []).flatMap(bucket => bucket.windows) : [status?.quota?.primaryWindow, status?.quota?.secondaryWindow])
     .filter(w => w && Number.isFinite(w.usedPercent));
   const remaining = w => Math.max(0, Math.min(100, 100 - w.usedPercent));
+  function resetText(timestamp, countdown = false) {
+    if (!Number.isFinite(timestamp) || timestamp <= 0) return '—';
+    if (!countdown) return new Date(timestamp * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+    const diff = timestamp * 1000 - Date.now();
+    if (diff <= 0) return '待刷新';
+    const totalMins = Math.ceil(diff / 60000);
+    if (totalMins < 60) return `${totalMins}分`;
+    const days = Math.floor(totalMins / 1440);
+    const remMins = totalMins % 1440;
+    const hours = Math.floor(remMins / 60);
+    if (days >= 1) {
+      return hours > 0 ? `${days}天${hours}时` : `${days}天`;
+    }
+    const mins = remMins % 60;
+    return mins > 0 ? `${hours}时${String(mins).padStart(2,'0')}分` : `${hours}时`;
+  }
   function modelBucket(status, model) {
     const name = model === 'gemini' ? /^gemini(?: models)?$/i : /^claude\s*(?:and|\/)\s*gpt(?: models)?$/i;
     return status?.quota?.buckets?.find(bucket => name.test(bucket.id) || name.test(bucket.label));
   }
-  function comparisonStatus(status, agent) {
-    if (agent !== 'agy') return status;
-    // Keep other model limits available for refresh/detail, but compare Gemini only.
-    return { ...status, quota: { buckets: [modelBucket(status, 'gemini')].filter(Boolean) } };
-  }
   const plan = status => String(status?.plan || status?.quota?.plan || '未识别套餐').trim().toLowerCase();
   function planInfo(status, agent = 'codex') {
     const raw = plan(status);
+    // Double-underscore keys are reserved for groups that do not represent a plan.
+    const key = raw.startsWith('__') ? '_' + raw : raw;
     const normalized = raw.replace(/[\s·_$-]/g, '');
-    if (agent !== 'codex') {
-      const labels = { pro:'Pro', max:'Max', ultra:'Ultra', free:'Free', team:'Team', enterprise:'Enterprise' };
-      const display = agent === 'agy' ? raw.replace(/^google ai (pro|ultra)$/, '$1') : raw;
-      return { key:raw, label:labels[display] || (['unknown','未识别套餐'].includes(raw) ? '已保存账号' : (status?.plan || status?.quota?.plan || raw)), tier:'' };
+    if (agent === 'agy') {
+      const ultra = /^google ai ultra (5×|20×)$/.exec(raw);
+      if (ultra) return { key:raw, label:`Ultra ${ultra[1]}`, tier:'' };
+      const labels = { pro:'Pro', ultra:'Ultra', free:'Free', team:'Team', enterprise:'Enterprise' };
+      const display = raw.replace(/^google ai (pro|ultra)$/, '$1');
+      return { key, label:labels[display] || (['unknown','未识别套餐'].includes(raw) ? '已保存账号' : (status?.plan || status?.quota?.plan || raw)), tier:'' };
     }
     // Official plan IDs distinguish Pro 100 (prolite), 200 (pro), and 500 (promax).
     // Keep explicit numeric labels compatible with imported snapshots.
@@ -29,7 +44,7 @@
       return { key:'pro', label:'Pro', tier: proTiers[normalized] || normalized.slice(3) };
     }
     const labels = { plus:'Plus', go:'Go', free:'Free', team:'Team', business:'Business', enterprise:'Enterprise', edu:'Edu', '未识别套餐':'套餐未知', unknown:'套餐未知' };
-    return { key:raw, label:labels[raw] || raw, tier:'' };
+    return { key, label:labels[raw] || raw, tier:'' };
   }
   function columns(status) {
     const ws = windows(status).sort((a, b) => (a.windowMins || 0) - (b.windowMins || 0));
@@ -43,13 +58,14 @@
     if (agent !== 'codex' || planInfo(status, agent).key !== 'plus' || !ws.length) return ws;
     return columns(status).map((w, i) => w || { windowMins: i ? 10080 : 300 });
   }
-  function invalidated(status, now = Date.now(), agent = 'codex') {
+  function invalidated(status, now = Date.now(), agent = 'codex', samples = windows(status, agent)) {
     const fetched = Date.parse(status?.fetchedAt);
     return !!status?.authExpired || status?.state !== 'ok' || !Number.isFinite(fetched) ||
-      windows(status, agent).some(w => Number.isFinite(w.resetsAt) && w.resetsAt * 1000 <= now);
+      samples.some(w => Number.isFinite(w.resetsAt) && w.resetsAt * 1000 <= now);
   }
-  function stale(status, now = Date.now(), agent = 'codex') {
-    return invalidated(status, now, agent) || now - Date.parse(status?.fetchedAt) > 300000;
+  function stale(status, now = Date.now(), agent = 'codex', interval = '5m') {
+    const minutes = { '15m': 16, '30m': 31, manual: 30 }[interval] ?? 5;
+    return invalidated(status, now, agent) || now - Date.parse(status?.fetchedAt) > minutes * 60000;
   }
   function resetExpiryDays(summary, now = Date.now()) {
     // Compare local calendar dates, not elapsed hours (also stable across DST).
@@ -61,60 +77,41 @@
       .filter(n => Number.isFinite(n) && n >= 0);
     return days.length ? Math.min(...days) : null;
   }
-  function health(status, now = Date.now(), agent = 'codex') {
-    status = comparisonStatus(status, agent);
-    if (status?.authExpired || ['expired', 'signed-out'].includes(status?.state)) return { rank: 4, label: '需要登录', kind: 'error' };
-    if (status?.state === 'unsupported') return { rank: 3, label: '额度未提供', kind: 'unknown' };
-    const ws = windows(status, agent);
-    // Refresh age alone must not discard the last successful comparison or
-    // reshuffle every account before a background refresh has returned.
-    const incomplete = agent === 'agy' ? quotaSlots(status, agent).some(w => !Number.isFinite(w.usedPercent)) : agent === 'codex' && planInfo(status).key === 'plus' && columns(status).some(w => !w);
-    if (invalidated(status, now, agent) || !ws.length || incomplete) return { rank: 3, label: status?.state === 'error' ? '刷新失败' : '待确认额度', kind: 'unknown' };
-    const minimum = Math.min(...ws.map(remaining));
-    const prefix = stale(status, now, agent) ? '上次查询：' : '';
-    if (minimum <= 0) return { rank: 2, label: `${prefix}${agent === 'agy' ? 'Gemini 额度耗尽' : '订阅额度耗尽'}`, kind: 'blocked' };
-    if (minimum <= 10) return { rank: 1, label: `${prefix}余额偏低`, kind: 'low' };
-    return { rank: 0, label: `${prefix}已知额度可用`, kind: 'ready' };
+  function needsCredentialUpdate(status) {
+    return !!status?.authExpired || status?.state === 'expired' || !!status?.stagedReplacement ||
+      (status?.state === 'error' && ['authentication-rejected','account-unavailable','quota-recovery-required'].includes(status.authFailure));
+  }
+  function quotaConfirmed(status, now = Date.now(), agent = 'codex', slots = quotaSlots(status, agent)) {
+    return status?.available !== false && !status?.stagedReplacement && !invalidated(status, now, agent, slots) &&
+      slots.length > 0 && slots.every(w => Number.isFinite(w.usedPercent));
   }
   function compare(a, b, now = Date.now(), agent = 'codex') {
-    a = { ...a, status: comparisonStatus(a.status, agent) };
-    b = { ...b, status: comparisonStatus(b.status, agent) };
     const byName = () => a.name.localeCompare(b.name, 'zh-CN');
     const ap = planInfo(a.status, agent), bp = planInfo(b.status, agent);
     const byPlan = ap.key.localeCompare(bp.key, 'zh-CN');
     if (byPlan) return byPlan;
-    const arank = health(a.status, now, agent).rank, brank = health(b.status, now, agent).rank;
-    // Known quotas share one bucket; low percentages must not override amount ordering.
-    const bucket = rank => rank < 3 ? 0 : rank;
-    const difference = bucket(arank) - bucket(brank);
-    if (difference) return difference;
-    if (arank >= 3) return byName();
-    const headroom = status => Math.min(...windows(status, agent).map(remaining));
-    if (agent === 'agy') {
-      const amounts = status => {
-        const ws = quotaSlots(status, agent), longer = ws.slice(1);
-        return [headroom(status) > 0 ? remaining(ws[0]) : 0, longer.length ? Math.min(...longer.map(remaining)) : remaining(ws[0])];
+    const left = quotaSlots(a.status, agent), right = quotaSlots(b.status, agent);
+    const aConfirmed = quotaConfirmed(a.status, now, agent, left), bConfirmed = quotaConfirmed(b.status, now, agent, right);
+    if (aConfirmed !== bConfirmed) return aConfirmed ? -1 : 1;
+    if (!aConfirmed) return byName();
+    const headroom = slots => Math.min(...slots.map(remaining));
+    if (agent === 'agy' || (agent === 'codex' && ap.key === 'plus')) {
+      const amounts = slots => {
+        const short = remaining(slots[0]);
+        const long = slots.length > 1 ? headroom(slots.slice(1)) : short;
+        return [long > 0 ? short : 0, long];
       };
-      const [acurrent, along] = amounts(a.status), [bcurrent, blong] = amounts(b.status);
-      return bcurrent - acurrent || blong - along || byName();
-    }
-    if (agent === 'codex' && ap.key === 'plus') {
-      const amounts = status => {
-        const [short, long] = columns(status), weekly = remaining(long);
-        return [weekly > 0 ? remaining(short) : 0, weekly];
-      };
-      const [acurrent, aweekly] = amounts(a.status), [bcurrent, bweekly] = amounts(b.status);
+      const [acurrent, aweekly] = amounts(left), [bcurrent, bweekly] = amounts(right);
       return bcurrent - acurrent || bweekly - aweekly || byName();
     }
     if (agent === 'codex' && ap.key === 'pro') {
       // Prices identify tiers, not a server-provided absolute quota. Preserve any
       // additional limiting window if one is actually returned for this account.
-      const amount = (status, info) => headroom(status) * Number(info.tier);
-      return amount(b.status, bp) - amount(a.status, ap) || byName();
+      return headroom(right) * Number(bp.tier) - headroom(left) * Number(ap.tier) || byName();
     }
-    return headroom(b.status) - headroom(a.status) || byName();
+    return headroom(right) - headroom(left) || byName();
   }
-  const policy = { windows, remaining, modelBucket, plan, planInfo, columns, quotaSlots, invalidated, stale, resetExpiryDays, health, compare };
+  const policy = { windows, remaining, resetText, modelBucket, plan, planInfo, columns, quotaSlots, invalidated, stale, resetExpiryDays, needsCredentialUpdate, quotaConfirmed, compare };
   if (typeof module !== 'undefined' && module.exports) module.exports = policy;
   else root.AccountPolicy = policy;
 })(typeof globalThis === 'undefined' ? this : globalThis);

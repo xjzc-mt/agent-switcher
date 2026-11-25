@@ -1,73 +1,27 @@
+import { agentMetadata } from './agents/metadata';
+import { hasUnsafeParent } from './private-files';
 import fs from 'fs';
 import { isolatedCliPids } from './antigravity-cli';
 import { runningClients } from './clients';
 import os from 'os';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { KEYRING_PREFIX, type KeychainEntry, canWriteOfficialItem, keychainWriteIssue, prepareRetirement, readKeychain,
+  replaceKeychain, retireKeychain, sharedKeychainRevision } from './antigravity-keyring';
+import { canReadNormalQuotaLogin, keychainAccessBlocked, keychainAccessError, keychainWriteBlocked, readMacKeychainAsync } from './antigravity-mac';
 import { sharedCliSessions } from './temporary-credentials';
+import { windowsAntigravitySessions } from './windows-processes';
 import { fingerprint, jwtInfo } from './utils';
+import { privateWindowsFile, writePrivateWindowsFile } from './antigravity-windows';
 import { beginSwitchRecovery, finishSwitchRecovery, hasPendingAntigravitySwitch, keepRecoveryForReview, recoverPendingSwitch, type RecoveryFile } from './antigravity-switch-recovery';
+import { credentialStateFromFiles, CredentialChangedError } from './credential-state';
 import type { StatusResult, LiveMutationJournal } from './agents/base';
 
-const KEYRING_PREFIX = 'go-keyring-base64:';
+export { retryNativeKeychainAccess } from './antigravity-mac';
 const CLI_TOKEN_FILE = 'antigravity-cli/antigravity-oauth-token';
 const DESKTOP_MARKER_FILE = 'cache/antigravity-keyring-unavailable';
 const CLI_MARKER_FILE = 'antigravity-cli/cache/antigravity-keyring-unavailable';
 const MARKER_TTL_MS = 3600_000;
-const JXA_KEYCHAIN_QUERY = [
-  'ObjC.import("Foundation");ObjC.import("Security");ObjC.import("stdlib");',
-  'if($.SecKeychainSetUserInteractionAllowed(false)!==0)$.exit(1);',
-  'const q=$.NSMutableDictionary.alloc.init;',
-  'q.setObjectForKey($("genp"),$("class"));q.setObjectForKey($("gemini"),$("svce"));q.setObjectForKey($("antigravity"),$("acct"));',
-].join('');
-const JXA_KEYCHAIN_READ = [
-  JXA_KEYCHAIN_QUERY,
-  'q.setObjectForKey($.NSNumber.numberWithBool(true),$("r_Data"));',
-  'const out=Ref();const s=$.SecItemCopyMatching($.CFBridgingRetain(q),out);',
-  'if(s===-25300)$.exit(44);if(s===-25293||s===-25308)$.exit(77);',
-  'if(s!==0)throw new Error("OSStatus:"+s);',
-  '$.NSFileHandle.fileHandleWithStandardOutput.writeData(ObjC.castRefToObject(out[0]));',
-].join('');
-// Use an item's persistent reference across queries. Several search-list keychains can match the same name.
-const JXA_UNIQUE_ITEM = JXA_KEYCHAIN_QUERY + `
-  function copy(query) {
-    const out = Ref();
-    const status = $.SecItemCopyMatching($.CFBridgingRetain(query), out);
-    if (status !== 0) $.exit(status === -25300 ? 44 : 77);
-    return ObjC.castRefToObject(out[0]);
-  }
-  q.setObjectForKey($.NSNumber.numberWithBool(true), $("r_PersistentRef"));
-  q.setObjectForKey($.NSNumber.numberWithBool(true), $("r_Attributes"));
-  q.setObjectForKey($("m_LimitAll"), $("m_Limit"));
-  function uniqueItem() {
-    const results = copy(q);
-    if (results.count !== 1) $.exit(78);
-    const item = results.objectAtIndex(0);
-    const ref = item.objectForKey($("v_PersistentRef"));
-    const date = item.objectForKey($("mdat")).timeIntervalSinceReferenceDate;
-    if (!ref.length || !Number.isFinite(date)) $.exit(78);
-    return { ref, revision: ObjC.unwrap(ref.base64EncodedStringWithOptions(0)) + "/" + date };
-  }
-`;
-const JXA_KEYCHAIN_REVISION = JXA_UNIQUE_ITEM + '\n// AGS_KEYCHAIN_REVISION\nuniqueItem().revision;';
-function keychainRetirementScript(nativeReader: boolean): string {
-  return JXA_UNIQUE_ITEM + `
-    const data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
-    const expected = JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data, 4)));
-    const current = uniqueItem();
-    if (current.revision !== expected.revision) $.exit(78);
-    const one = $.NSMutableDictionary.alloc.init;
-    one.setObjectForKey($.NSArray.arrayWithObject(current.ref), $("m_ItemList"));
-    ${nativeReader ? `
-      const query = one.mutableCopy;
-      query.setObjectForKey($.NSNumber.numberWithBool(true), $("r_Data"));
-      if (!copy(query).isEqualToData($(expected.raw).dataUsingEncoding(4))) $.exit(78);
-    ` : ''}
-    const status = $.SecItemDelete($.CFBridgingRetain(one));
-    if (status !== 0) $.exit(status === -25300 ? 44 : 77);
-  `;
-}
-export const NATIVE_TOKEN_FILE = 'jetski-standalone-oauth-token';
+export const NATIVE_TOKEN_FILE = agentMetadata.agy.credential;
 export interface NativeToken {
   auth_method: string;
   id_token?: string;
@@ -87,7 +41,13 @@ type KeychainState =
   | { kind: 'consumer'; consumer: ConsumerEntry }
   | { kind: 'corrupt'; error: Error }
   | { kind: 'protected'; error: Error };
-interface FileSnapshot { path: string; exists: boolean; bytes: Buffer | null; mode?: number; ino?: number; atimeMs?: number; mtimeMs?: number; activeMarker?: boolean; unsafe?: boolean }
+interface FileSnapshot extends RecoveryFile {
+  exists: boolean;
+  dev?: bigint;
+  ino?: bigint;
+  mtimeNs?: bigint;
+  activeMarker?: boolean;
+}
 
 function recoverableError(message: string): Error {
   return Object.assign(new Error(message), { recoverableNativeCorruption: true });
@@ -99,7 +59,7 @@ export function isRecoverableNativeError(error: unknown): boolean {
     error.message === 'Antigravity 凭据格式无效';
 }
 
-function tokenEmail(token: NativeToken): string | undefined {
+export function tokenEmail(token: NativeToken): string | undefined {
   const direct = typeof token.id_token_email === 'string' ? token.id_token_email.trim() : '';
   const fromJwt = jwtInfo(token.id_token).email?.trim() || '';
   return direct || fromJwt || undefined;
@@ -174,8 +134,8 @@ function latestSessionCopy(primary: ConsumerEntry, candidates: Array<ConsumerEnt
   return best;
 }
 
-function assertMacOS(): void {
-  if (process.platform !== 'darwin') throw new Error('Keychain 仅支持 macOS');
+function supportedNativePlatform(): boolean {
+  return process.platform === 'darwin' || process.platform === 'win32';
 }
 
 function nativePaths() {
@@ -189,20 +149,9 @@ function nativePaths() {
   };
 }
 
-function hasUnsafeGeminiAncestor(file: string): boolean {
-  const gemini = path.resolve(nativePaths().gemini);
-  let current = path.dirname(path.resolve(file));
-  while (current === gemini || current.startsWith(gemini + path.sep)) {
-    try {
-      const stat = fs.lstatSync(current);
-      if (stat.isSymbolicLink() || !stat.isDirectory()) return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true;
-    }
-    if (current === gemini) break;
-    current = path.dirname(current);
-  }
-  return false;
+function hasUnsafeGeminiAncestor(file: string, requireOwner = false): boolean {
+  try { return hasUnsafeParent(file, path.resolve(nativePaths().gemini), requireOwner); }
+  catch { return true; }
 }
 
 function inspectMarker(file: string): { exists: boolean; active: boolean; blocked?: string } {
@@ -299,55 +248,49 @@ function resolvePrimary(
   return null;
 }
 
-const keychainItem = ['-s', 'gemini', '-a', 'antigravity'];
-const keychainAccessError = '无法读取 Antigravity 登录钥匙串，请先解锁并在官方客户端确认当前登录，再手动保存或切换';
-let keychainAccessBlocked = false;
-let keychainWriteBlocked = false;
+const sharedObservations = new WeakMap<Buffer, { canonical: ConsumerEntry; revision: string }>();
+const observedFileLogins = new WeakSet<Buffer>();
 
-export function retryNativeKeychainAccess(): void {
-  keychainAccessBlocked = false;
-  keychainWriteBlocked = false;
+let readSnapshot: { entry?: KeychainEntry; failed?: boolean } | undefined;
+/** Only synchronous observations share a read. Revalidation after locks/awaits and all writes read afresh. */
+export function withNativeReadSnapshot<T>(observe: () => T): T {
+  const previous = readSnapshot;
+  readSnapshot ??= {};
+  try { return observe(); } finally { readSnapshot = previous; }
+}
+export async function withDashboardNativeSnapshot<T>(usesNativeLogin: boolean, buildDashboard: () => T): Promise<T> {
+  if (!usesNativeLogin || process.platform !== 'darwin' || !usingRealRead() || hasPendingAntigravitySwitch()) return buildDashboard();
+  let snapshot: NonNullable<typeof readSnapshot>;
+  try { snapshot = { entry: await readMacKeychainAsync() }; }
+  catch { snapshot = { failed: true }; }
+  const previous = readSnapshot;
+  readSnapshot = snapshot;
+  try { return buildDashboard(); } finally { readSnapshot = previous; }
 }
 
-interface KeychainEntry { raw: string | null; nativeReadable?: boolean }
-
-function readKeychainEntry(): KeychainEntry {
-  if (keychainAccessBlocked) throw new Error(keychainAccessError);
-  try {
-    // Metadata for this item only. Avoid starting a native reader when the official client uses files.
-    execFileSync('/usr/bin/security', ['find-generic-password', ...keychainItem], {
-      timeout: 1500, stdio: 'pipe',
-    });
-    // Old AGS releases created some items under osascript's partition. This probe never asks for UI.
-    try {
-      const raw = execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', JXA_KEYCHAIN_READ], {
-        encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, timeout: 1500, stdio: ['ignore', 'pipe', 'pipe'],
-      }).trim();
-      return { raw, nativeReadable: true };
-    } catch (error) {
-      if ((error as { status?: number }).status !== 77) throw error;
-    }
-    const raw = execFileSync('/usr/bin/security', ['find-generic-password', ...keychainItem, '-w'], {
-      encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, timeout: 1500, stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
-    return { raw };
-  } catch (error) {
-    if ((error as { status?: number }).status === 44) return { raw: null };
-    keychainAccessBlocked = true;
-    throw new Error(keychainAccessError);
-  }
+function readKeychainEntry(observeShared = false): KeychainEntry {
+  if (readSnapshot?.failed) throw new Error(keychainAccessError);
+  if (observeShared || !readSnapshot) return readKeychain();
+  return readSnapshot.entry ??= readKeychain();
 }
 
 function readRawKeychain(): string | null { return readKeychainEntry().raw; }
 
 export function readNativeToken(quotaCopies?: Buffer[]): Buffer | null {
-  assertMacOS();
+  if (!supportedNativePlatform()) throw new Error('当前系统尚不支持 Antigravity 原生登录');
   const paths = nativePaths();
   const desktopMarker = inspectMarker(paths.desktopMarker);
-  const keychain = decodeKeychain(readRawKeychain());
+  const entry = readKeychainEntry(quotaCopies !== undefined);
+  const keychain = decodeKeychain(entry.raw);
   const desktop = classifyFallback(paths.desktop), cli = classifyFallback(paths.cli);
   const primary = resolvePrimary(keychain, desktop, cli, desktopMarker.active);
   if (primary && quotaCopies) {
+    if (keychain.kind === 'absent' && cli.kind === 'consumer' && sameSession(primary, cli)) {
+      observedFileLogins.add(primary.bytes);
+    }
+    if (entry.sharedRevision && keychain.kind === 'consumer' && sameSession(primary, keychain.consumer)) {
+      sharedObservations.set(primary.bytes, { canonical: keychain.consumer, revision: entry.sharedRevision });
+    }
     for (const entry of [keychain.kind === 'consumer' && keychain.consumer, desktop, cli]) {
       if (entry && 'id' in entry && entry !== primary && sameSession(entry, primary)) quotaCopies.push(entry.bytes);
     }
@@ -355,11 +298,87 @@ export function readNativeToken(quotaCopies?: Buffer[]): Buffer | null {
   return primary?.bytes ?? null;
 }
 
+function privateLoginFile(file: string): boolean {
+  if (process.platform === 'win32') return privateWindowsFile(file);
+  if (hasUnsafeGeminiAncestor(file, true)) return false;
+  const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+  return !!stat && stat.isFile() && stat.nlink === 1 && stat.uid === process.getuid!() && (stat.mode & 0o777) === 0o600;
+}
+
+/** Bind a shared CLI renewal to the current official login observed for this quota snapshot. */
+export function readSharedQuotaLogin(expected: Buffer): Buffer | undefined {
+  const seen = sharedObservations.get(expected);
+  if (keychainAccessBlocked || (!seen && !observedFileLogins.has(expected))) return;
+  try {
+    const paths = nativePaths();
+    if ([paths.desktopMarker, paths.cliMarker].map(inspectMarker).some(m => m.active || m.blocked)) return;
+    if (!seen) {
+      if (readKeychainEntry(true).raw !== null) return;
+      const cli = classifyFallback(paths.cli), desktop = classifyFallback(paths.desktop);
+      if (cli.kind !== 'consumer' || !sameSession(cli, toConsumer(expected)) || !privateLoginFile(paths.cli)) return;
+      if ((process.platform === 'darwin' && desktop.kind !== 'consumer') || desktop.kind === 'blocked' ||
+          (desktop.kind === 'consumer' && (!sameSession(cli, desktop) || !privateLoginFile(paths.desktop)))) return;
+      return cli.bytes;
+    }
+    for (const file of [paths.desktop, paths.cli]) {
+      const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+      if (stat && (!stat.isFile() || stat.nlink !== 1 || (process.platform === 'win32'
+        ? !privateWindowsFile(file) : stat.uid !== process.getuid!() || (stat.mode & 0o022)))) return;
+      const copy = classifyFallback(file);
+      if (copy.kind === 'blocked' || (copy.kind === 'consumer' && !sameSession(copy, seen.canonical))) return;
+    }
+    if (sameSession(toConsumer(expected), seen.canonical) && sharedKeychainRevision() === seen.revision) return seen.canonical.bytes;
+  } catch { /* A source disappeared or became unreadable; leave this lookup in read-only mode. */ }
+}
+
 const usingRealRead = () => (exports as { readNativeToken?: unknown }).readNativeToken === readNativeToken;
 const usingRealWrite = () => (exports as { writeNativeToken?: unknown }).writeNativeToken === writeNativeToken;
 
+/** An active desktop fallback can identify its own read-only quota request while Keychain is unavailable. */
+export function readActiveDesktopQuotaFile(quotaCopies?: Buffer[]): Buffer | undefined {
+  if (process.platform !== 'darwin' || !usingRealRead()) return;
+  const { desktop, desktopMarker, cli } = nativePaths();
+  const trusted = (stat: fs.Stats) => stat.isFile() && stat.nlink === 1 &&
+    stat.uid === process.getuid!() && (stat.mode & 0o022) === 0;
+  const unchanged = (before: fs.Stats, after: fs.Stats) => trusted(after) &&
+    before.dev === after.dev && before.ino === after.ino && before.ctimeMs === after.ctimeMs && before.mtimeMs === after.mtimeMs;
+  function readFile(file: string) {
+    let fd: number | undefined;
+    try {
+      if (hasUnsafeGeminiAncestor(file, true)) return;
+      const stat = fs.lstatSync(file);
+      if (!trusted(stat)) return;
+      fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      if (!unchanged(stat, fs.fstatSync(fd))) return;
+      const entry = toConsumer(fs.readFileSync(fd));
+      if (!hasUnsafeGeminiAncestor(file, true) && unchanged(stat, fs.lstatSync(file))) return { stat, entry };
+    } catch { return; }
+    finally { if (fd !== undefined) fs.closeSync(fd); }
+  }
+  try {
+    if (hasUnsafeGeminiAncestor(desktopMarker, true)) return;
+    const marker = fs.lstatSync(desktopMarker);
+    if (!trusted(marker) || Date.now() - marker.mtimeMs >= MARKER_TTL_MS) return;
+    const primary = readFile(desktop);
+    if (!primary) return;
+    const copy = quotaCopies && readFile(cli);
+    if (hasUnsafeGeminiAncestor(desktopMarker, true) || !unchanged(primary.stat, fs.lstatSync(desktop)) ||
+        !unchanged(marker, fs.lstatSync(desktopMarker)) || Date.now() - marker.mtimeMs >= MARKER_TTL_MS) return;
+    if (quotaCopies && copy && sameSession(primary.entry, copy.entry)) quotaCopies.push(copy.entry.bytes);
+    return primary.entry.bytes;
+  } catch { return; }
+}
+
+/** Recheck the marker after probing so an expired marker cannot select a stale desktop file. */
+export function readUnavailableDesktopQuotaFile(): Buffer | undefined {
+  if (hasPendingAntigravitySwitch()) throw new Error('上次 Antigravity 切换中断，请从账号列表重新切换以核对并恢复登录');
+  if (readSnapshot?.entry) return;
+  if (readSnapshot?.failed) return readActiveDesktopQuotaFile();
+  if (readActiveDesktopQuotaFile() && !canReadNormalQuotaLogin()) return readActiveDesktopQuotaFile();
+}
+
 export function readAuxiliaryNativeTokens(primaryBytes?: Buffer | null, requireAllReadable = false): Buffer[] {
-  if (process.platform !== 'darwin') return [];
+  if (!supportedNativePlatform()) return [];
   const paths = nativePaths();
   let primary: ConsumerEntry | null = null;
   if (primaryBytes) {
@@ -390,17 +409,23 @@ export function readAuxiliaryNativeTokens(primaryBytes?: Buffer | null, requireA
 }
 
 export function hasPendingNativeCleanup(): boolean {
-  if (process.platform !== 'darwin' || !usingRealRead()) return false;
+  if (!supportedNativePlatform() || !usingRealRead()) return false;
   const paths = nativePaths();
-  if ([paths.desktop, paths.cli].some(file => classifyFallback(file).kind !== 'absent')) return true;
-  return [paths.desktopMarker, paths.cliMarker].some(file => inspectMarker(file).exists) ||
-    readKeychainEntry().nativeReadable === true;
+  if ([paths.desktopMarker, paths.cliMarker].some(file => inspectMarker(file).exists)) return true;
+  const desktop = classifyFallback(paths.desktop), cli = classifyFallback(paths.cli);
+  const keychain = readKeychainEntry();
+  if (keychain.raw === null && desktop.kind === 'consumer' && cli.kind === 'consumer' &&
+      sameSession(desktop, cli) && privateLoginFile(desktop.path) && privateLoginFile(cli.path)) return false;
+  return desktop.kind !== 'absent' || cli.kind !== 'absent' || keychain.nativeReadable === true;
 }
 
 export function nativeSwitchFingerprint(): string | undefined {
-  if (process.platform !== 'darwin' || !usingRealRead()) return undefined;
+  if (!supportedNativePlatform() || !usingRealRead()) return undefined;
+  return fingerprintNativeSources(readRawKeychain());
+}
+
+function fingerprintNativeSources(raw: string | null): string {
   const paths = nativePaths();
-  const raw = readRawKeychain();
   const tokenParts = [paths.desktop, paths.cli].map(file => {
     if (hasUnsafeGeminiAncestor(file)) return `unsafe:${file}`;
     try {
@@ -449,7 +474,7 @@ function fallbackLogoutConflict(
 }
 
 export function nativeLogoutSupport(primaryBytes?: Buffer | null): string | undefined {
-  if (process.platform !== 'darwin') return '此系统的客户端退出尚未验证，请在官方客户端退出';
+  if (!supportedNativePlatform()) return '此系统的客户端退出尚未验证，请在官方客户端退出';
   const paths = nativePaths();
   let primary: ConsumerEntry | null = null;
   if (primaryBytes) {
@@ -461,22 +486,6 @@ export function nativeLogoutSupport(primaryBytes?: Buffer | null): string | unde
     paths.desktopMarker, paths.cliMarker, primary, previous?.raw,
   ) || (previous && keychainWriteIssue(null, previous));
   return conflict ? `${conflict}，请在官方客户端退出` : undefined;
-}
-
-function keychainCommand(encoded: string): string {
-  return `add-generic-password -U -s gemini -a antigravity -w "${encoded}"\n`;
-}
-
-function canWriteOfficialItem(raw: string): boolean {
-  return Buffer.byteLength(keychainCommand(raw)) < 4000 && /^[A-Za-z0-9+/=:_-]*$/.test(raw);
-}
-
-function keychainWriteIssue(encoded: string | null, previous: KeychainEntry): string | undefined {
-  if (previous.raw === encoded && !previous.nativeReadable) return;
-  if (previous.nativeReadable || (previous.raw !== null && !canWriteOfficialItem(previous.raw)) ||
-      (encoded !== null && !canWriteOfficialItem(encoded))) {
-    return '本次写入无法保留官方客户端的钥匙串访问权限，已保留原登录';
-  }
 }
 
 function usesOfficialFallbacks(encoded: string | null, previous: KeychainEntry, fallbacks: FallbackEntry[]): boolean {
@@ -516,31 +525,26 @@ export function assertNativeSwitchReady(bytes: Buffer | null): 'files' | undefin
   return switchStorage(encoded, previous, fallbacks) === 'migrate' ? 'files' : undefined;
 }
 
+/** Only an existing macOS Keychain login can cross into the dual-file format on renewal. */
+export function needsNativeRenewalMigration(bytes: Buffer): boolean {
+  return process.platform === 'darwin' && usingRealWrite() &&
+    !canWriteOfficialItem(KEYRING_PREFIX + bytes.toString('base64')) && readRawKeychain() !== null;
+}
+
 function writeRawKeychain(encoded: string | null, previous = readKeychainEntry()): void {
-  const issue = keychainWriteIssue(encoded, previous);
-  if (issue) throw new Error(`${issue}。请在 Antigravity 官方客户端切换或重新登录`);
-  if (encoded === previous.raw) return;
-  try {
-    if (encoded === null) {
-      execFileSync('/usr/bin/security', ['delete-generic-password', ...keychainItem], { stdio: 'pipe', timeout: 1500 });
-    } else {
-      execFileSync('/usr/bin/security', ['-i'], { input: keychainCommand(encoded), timeout: 2000, stdio: ['pipe', 'pipe', 'pipe'] });
-    }
-  } catch (error) {
-    if (encoded === null && (error as { status?: number }).status === 44) return;
-    const failure = error as NodeJS.ErrnoException & { status?: number };
-    if (failure.code === 'ETIMEDOUT' || failure.status === 36 || failure.status === 51 || failure.status === 128) keychainWriteBlocked = true;
-    throw new Error(encoded === null ? '无法还原 Antigravity 未登录状态' : '无法更新 Antigravity Keychain 凭据');
-  }
+  replaceKeychain(encoded, previous);
 }
 
 function captureSingleFile(file: string): FileSnapshot {
   if (hasUnsafeGeminiAncestor(file)) return { path: file, exists: true, bytes: null, unsafe: true };
   try {
-    const stat = fs.lstatSync(file);
+    const stat = fs.lstatSync(file, { bigint: true });
     if (stat.isSymbolicLink() || !stat.isFile()) return { path: file, exists: true, bytes: null, unsafe: true };
-    return { path: file, exists: true, bytes: fs.readFileSync(file), mode: stat.mode & 0o777, ino: stat.ino, atimeMs: stat.atimeMs, mtimeMs: stat.mtimeMs,
-      activeMarker: path.basename(file) === 'antigravity-keyring-unavailable' ? Date.now() - stat.mtimeMs < MARKER_TTL_MS : undefined };
+    const mode = process.platform === 'win32' ? (privateWindowsFile(file) ? 0o600 : 0o666) : Number(stat.mode & 0o777n);
+    const mtimeMs = Number(stat.mtimeNs) / 1e6;
+    return { path: file, exists: true, bytes: fs.readFileSync(file), mode, dev: stat.dev, ino: stat.ino,
+      mtimeNs: stat.mtimeNs, mtimeMs, atimeMs: Number(stat.atimeNs) / 1e6,
+      activeMarker: path.basename(file) === 'antigravity-keyring-unavailable' ? Date.now() - mtimeMs < MARKER_TTL_MS : undefined };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path: file, exists: false, bytes: null };
     return { path: file, exists: true, bytes: null, unsafe: true };
@@ -556,7 +560,7 @@ interface FileMutation {
   before: FileSnapshot;
   afterExists: boolean;
   afterBytes: Buffer | null;
-  afterStat?: fs.Stats;
+  afterStat?: fs.BigIntStats;
 }
 class NativeMutationJournal implements LiveMutationJournal {
   keychainOp?: KeychainMutation;
@@ -596,7 +600,7 @@ class NativeMutationJournal implements LiveMutationJournal {
       const current = captureSingleFile(op.path);
       if (op.before.unsafe || current.unsafe || (op.afterExists
         ? !op.afterBytes || !current.bytes?.equals(op.afterBytes) || current.mode !== 0o600 ||
-          current.ino !== op.afterStat?.ino || current.mtimeMs !== op.afterStat?.mtimeMs
+          current.dev !== op.afterStat?.dev || current.ino !== op.afterStat?.ino || current.mtimeNs !== op.afterStat?.mtimeNs
         : current.exists)) {
         preserved.push(`已保留外部变更的 ${op.path}`);
         this.externalChange = true;
@@ -644,7 +648,7 @@ class NativeMutationJournal implements LiveMutationJournal {
 }
 
 export function createNativeMutationJournal(): LiveMutationJournal | undefined {
-  if (process.platform !== 'darwin' || !usingRealRead() || !usingRealWrite()) return undefined;
+  if (!supportedNativePlatform() || !usingRealRead() || !usingRealWrite()) return undefined;
   return new NativeMutationJournal();
 }
 
@@ -662,7 +666,8 @@ function removeUnrecordedFile(file: string): void {
 function assertFileUnchanged(before: FileSnapshot): void {
   const current = captureSingleFile(before.path);
   if (before.unsafe || current.unsafe) throw new Error(`Antigravity 认证文件不是普通文件（${before.path}）`);
-  if (before.exists !== current.exists || before.ino !== current.ino || before.mtimeMs !== current.mtimeMs || before.mode !== current.mode || before.activeMarker !== current.activeMarker ||
+  if (before.exists !== current.exists || before.dev !== current.dev || before.ino !== current.ino || before.mtimeNs !== current.mtimeNs ||
+      before.mode !== current.mode || before.activeMarker !== current.activeMarker ||
       (before.bytes && !before.bytes.equals(current.bytes ?? Buffer.alloc(0)))) {
     throw new Error(`切换期间认证文件已变化，已保留外部更改（${before.path}）`);
   }
@@ -676,18 +681,21 @@ function removeRecordedFile(before: FileSnapshot, journal: NativeMutationJournal
   journal.fileOps.push({ path: file, before, afterExists: false, afterBytes: null });
 }
 
-function replaceFallback(before: FileSnapshot, bytes: Buffer, restore?: RecoveryFile): fs.Stats {
+function replaceFallback(before: FileSnapshot, bytes: Buffer, restore?: RecoveryFile): fs.BigIntStats {
   const file = before.path;
   assertFileUnchanged(before);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
   try {
-    fs.writeFileSync(temp, bytes, { mode: 0o600, flag: 'wx' });
-    if (restore?.mode !== undefined) fs.chmodSync(temp, restore.mode);
+    if (process.platform === 'win32') writePrivateWindowsFile(temp, bytes);
+    else {
+      fs.writeFileSync(temp, bytes, { mode: 0o600, flag: 'wx' });
+      if (restore?.mode !== undefined) fs.chmodSync(temp, restore.mode);
+    }
     if (restore?.mtimeMs !== undefined && restore.atimeMs !== undefined) {
       fs.utimesSync(temp, restore.atimeMs / 1000, restore.mtimeMs / 1000);
     }
-    const installed = fs.statSync(temp);
+    const installed = fs.statSync(temp, { bigint: true });
     assertFileUnchanged(before);
     fs.renameSync(temp, file);
     return installed;
@@ -743,10 +751,7 @@ function prepareFileSwitch(entry: KeychainEntry, target: Buffer, files: FileSnap
     if (previous !== null) {
       // Bracket the already-authorized reader with checks of the exact item and its modification date.
       try {
-        revision = execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', JXA_KEYCHAIN_REVISION], {
-          encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'pipe'],
-        }).trim();
-        if (!revision) throw new Error();
+        revision = prepareRetirement();
       } catch (error) {
         if ((error as { status?: number }).status === 44) journal.markExternalLogout();
         throw new Error('无法唯一识别原钥匙串条目，已取消切换');
@@ -761,9 +766,7 @@ function prepareFileSwitch(entry: KeychainEntry, target: Buffer, files: FileSnap
     if (previous === null) return;
     let refused = false;
     try {
-      execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', keychainRetirementScript(entry.nativeReadable === true)], {
-        input: JSON.stringify({ raw: previous, revision }), timeout: 2000, stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      retireKeychain(entry, revision);
     } catch (error) {
       const status = (error as { status?: number }).status;
       refused = status === 44 || status === 77 || status === 78;
@@ -794,10 +797,11 @@ function prepareFileSwitch(entry: KeychainEntry, target: Buffer, files: FileSnap
 
 export function writeNativeToken(
   bytes: Buffer | null,
-  options: { clearFallbacks?: 'same' | 'all'; expectedFingerprint?: string; journal?: LiveMutationJournal; allowFileMigration?: boolean } = {},
+  options: { clearFallbacks?: 'same' | 'all'; expectedFingerprint?: string; expectedRevision?: string; journal?: LiveMutationJournal; allowFileMigration?: boolean } = {},
 ): 'files' | undefined {
+  readSnapshot = undefined; // Mutations and their read-backs never reuse an earlier observation.
   const target = bytes ? toConsumer(bytes) : null;
-  assertMacOS();
+  if (!supportedNativePlatform()) throw new Error('当前系统尚不支持 Antigravity 原生登录');
   if (hasPendingAntigravitySwitch()) throw new Error('上次 Antigravity 切换尚待核对，请先从账号列表完成恢复再更新登录');
   if (keychainWriteBlocked) throw new Error('钥匙串写入被拒绝或超时，请解锁后手动重试保存或切换');
   const paths = nativePaths();
@@ -813,7 +817,7 @@ export function writeNativeToken(
   const desktopMarker = inspectMarker(paths.desktopMarker);
   const cliMarker = inspectMarker(paths.cliMarker);
   const fallbacks = [desktop, cli];
-  if (options.expectedFingerprint && nativeSwitchFingerprint() !== options.expectedFingerprint) {
+  if (options.expectedFingerprint && fingerprintNativeSources(previous) !== options.expectedFingerprint) {
     throw new Error('确认期间当前凭据已变化，未执行切换，请重新核对');
   }
   const clearMode = options.clearFallbacks || 'same';
@@ -846,10 +850,22 @@ export function writeNativeToken(
   }
   const encodedTarget = target ? KEYRING_PREFIX + bytes!.toString('base64') : null;
   try {
-    if (target && encodedTarget && clearMode === 'all') {
+    if (options.expectedRevision !== undefined) {
+      if (!source || !target || source.id !== target.id ||
+          credentialStateFromFiles('agy', [[NATIVE_TOKEN_FILE, source.bytes]]).revision !== options.expectedRevision) throw new CredentialChangedError();
+    }
+    const migrateRenewal = !!source && !!encodedTarget && options.allowFileMigration === true && previous !== null && !canWriteOfficialItem(encodedTarget);
+    if (migrateRenewal) {
+      assertSwitchSources(fallbacks, [desktopMarker, cliMarker]);
+      if (keychain.kind !== 'consumer' || !belongsToRenewal(keychain.consumer) || fallbacks.some(entry => entry.kind === 'consumer' && !belongsToRenewal(entry))) {
+        throw new Error('当前认证存储中包含其他登录，已保留现有凭据');
+      }
+    }
+    if (target && encodedTarget && (clearMode === 'all' || migrateRenewal)) {
       const route = switchStorage(encodedTarget, previousEntry, fallbacks);
       if (route === 'migrate' && options.allowFileMigration !== true) {
-        throw new Error('此凭据需要使用桌面和 CLI 各自的 0600 登录文件，请确认文件存储后切换（CLI 使用 --allow-file-storage）');
+        const permission = process.platform === 'win32' ? '当前 Windows 用户专用的' : '0600';
+        throw new Error(`此凭据需要使用桌面和 CLI 各自的 ${permission} 登录文件，请确认文件存储后切换（CLI 使用 --allow-file-storage）`);
       }
       if (route !== 'keychain') {
         const files = fallbacks.map(entry => confirmed.get(entry.path)!);
@@ -903,6 +919,7 @@ export function writeNativeToken(
 }
 
 export async function sharedAntigravitySessions(): Promise<number[]> {
+  if (process.platform === 'win32') return windowsAntigravitySessions(isolatedCliPids);
   const desktopApps = ['/Applications/Antigravity.app/', path.join(os.homedir(), 'Applications/Antigravity.app/')];
   return sharedCliSessions(isolatedCliPids, command => {
     if (desktopApps.some(prefix => command.startsWith(prefix))) return false;

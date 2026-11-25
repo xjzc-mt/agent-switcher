@@ -2,36 +2,46 @@ import { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, clipboard
 import path from 'path';
 import fs from 'fs';
 import { pathToFileURL } from 'url';
-import { ALL_AGENTS, resolveAgent, dashboard, saveAccount, useAccount, removeAccount, previewRemoveAccount, needsUnmanagedChoice, clientSwitchRevision, setCriticalCommitTracker, renameAccount, refreshAccount, prepareLogin, loginStatus, cancelLogin, RemovalPreview } from './accounts';
+import { ALL_AGENTS, resolveAgent, dashboard, saveAccount, useAccount, prepareSwitchTarget, removeAccount, previewRemoveAccount, needsUnmanagedChoice, clientSwitchRevision, setCriticalCommitTracker, renameAccount, refreshAccount, prepareLogin, loginStatus, cancelLogin, RemovalPreview } from './accounts';
 import { antigravityLogin } from './antigravity-login';
-import { assertNativeSwitchReady, retryNativeKeychainAccess } from './antigravity-native';
-import { profileDir, withStoreLock } from './store';
-import { hasPendingAntigravitySwitch } from './antigravity-switch-recovery';
+import { withDashboardNativeSnapshot } from './antigravity-native';
+import { withStoreLock } from './store';
 import { codexLogin } from './codex-login';
-import { runningClients, quitClients, openClients, loginInTerminal, findClaudeBinary } from './clients';
-import { exportBackup, parseBackup, parseImport, isEncryptedBackup, installBackup, ParsedBackup, BackupItem, previewCredentialUpdate, installCredentialUpdate } from './backup';
+import { runningClients, quitClients, openClients } from './clients';
+import { exportBackup, parseBackup, parseCredentials, isEncryptedBackup, installBackup, ParsedBackup, BackupItem, previewCredentialUpdate, installCredentialUpdate } from './backup';
 import { CredentialBatch, editableBackup, parseCredentialBatch, installCredentialBatch } from './credential-import';
 import type { CredentialUpdateTarget } from './accounts';
 import { atomicWrite } from './utils';
 import { readSettings, saveSettings } from './settings';
 import { randomUUID } from 'crypto';
+import { installApplicationMenu } from './application-menu';
 import { minimumWidth, defaultWidth, updateWindowSidebarLayout } from './window-layout';
 import { openPrivateBrowser } from './private-browser';
 import { CODEX_CLEANUP_PROMPT } from './cleanup-prompt';
 import { maintainCredentialStorage } from './storage-maintenance';
 import { AppUpdates } from './app-updates';
 import { createQuitGuard } from './app-quit';
-import { createTrayPanel, type TraySnapshot, type TrayCommand } from './tray-menu';
+import { createTrayPanel, type TraySnapshot, type WindowCommand } from './tray-menu';
 import { initializeDiagnostics, runDiagnostic, resultDiagnostic, stepDiagnostic, exportDiagnostics, sourceDiagnosticVersion } from './diagnostics';
 import type { StatusResult } from './agents/base';
 const deletePreviews = new Map<string, { id: string; preview: RemovalPreview; expires: number }>();
 let pendingImport: { id: string; parsed?: ParsedBackup; encrypted?: Buffer; target?: CredentialUpdateTarget; batch?: CredentialBatch } | undefined;
+let importGeneration = 0;
+function beginImportPreview() {
+  const generation = ++importGeneration, previous = pendingImport;
+  return () => generation === importGeneration && previous === pendingImport;
+}
+function cancelImportPreview() {
+  importGeneration++;
+  pendingImport = undefined;
+}
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let trayPanel: ReturnType<typeof createTrayPanel> | undefined;
 let traySnapshot: TraySnapshot | undefined;
 let trayReady = false;
-let pendingTrayCommand: TrayCommand | undefined;
+let updateMenu: ReturnType<typeof installApplicationMenu> | undefined;
+let pendingTrayCommand: WindowCommand | undefined;
 let appUpdates: AppUpdates | undefined;
 const projectUrl = 'https://github.com/xjzc-mt/agent-switcher';
 const rendererFile = path.join(__dirname, '..', 'renderer', 'index.html');
@@ -57,14 +67,13 @@ const quitGuard = createQuitGuard({
   },
   cleanup: async () => {
     await Promise.all([...loginManagers.values()].map(login => login.cancel()));
-    pendingImport = undefined;
-    appUpdates?.stop();
+    cancelImportPreview();
   },
   quit: () => app.quit(),
   onError: error => dialog.showErrorBox('暂时无法退出 AgentSwitcher', error.message),
   onWaiting: waiting => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app-quit-state', { waiting }); },
 });
-setCriticalCommitTracker(work => quitGuard.trackCritical(work));
+setCriticalCommitTracker(quitGuard.trackCritical, quitGuard.run);
 // ── Window ───────────────────────────────────────────────────────────────────
 
 function createWindow(show = true) {
@@ -76,9 +85,10 @@ function createWindow(show = true) {
     minWidth: minimumWidth(152),
     minHeight: 620,
     title: 'AgentSwitcher',
+    autoHideMenuBar: process.platform === 'win32',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 18, y: 18 },
-    backgroundColor: '#f8fafc',
+    backgroundColor: '#f7f9fc',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -98,7 +108,7 @@ function createWindow(show = true) {
   mainWindow.on('closed', () => {
     mainWindow = null;
     resetTrayWindow();
-    pendingImport = undefined;
+    cancelImportPreview();
     deletePreviews.clear();
     void endWindowLogin();
   });
@@ -110,6 +120,7 @@ function createWindow(show = true) {
 function resetTrayWindow() {
   pendingTrayCommand = undefined;
   trayReady = false;
+  updateMenu?.({ tab: 'codex', layout: 'cards', blocked: false });
   if (traySnapshot) {
     traySnapshot = { ...traySnapshot, refreshing: false, switching: false, windowClosed: true };
     trayPanel?.update();
@@ -124,7 +135,7 @@ function revealMainWindow() {
   mainWindow.focus();
 }
 
-function dispatchTrayCommand(command: TrayCommand) {
+function dispatchTrayCommand(command: WindowCommand) {
   if (quitGuard.isClosing()) return;
   if (command.action === 'quit') { app.quit(); return; }
   const show = command.action !== 'refresh' && command.action !== 'switch';
@@ -139,37 +150,26 @@ function dispatchTrayCommand(command: TrayCommand) {
 }
 
 function createTray() {
-  const iconPath = path.join(__dirname, '..', 'assets', 'trayTemplate.png');
-  let img: Electron.NativeImage;
-  if (fs.existsSync(iconPath)) {
-    img = nativeImage.createFromPath(iconPath);
-  } else {
-    img = nativeImage.createEmpty();
-  }
-  img.setTemplateImage(true);
-
+  const windows = process.platform === 'win32';
+  const iconPath = path.join(__dirname, '..', 'assets', windows ? 'gate-mark.png' : 'trayTemplate.png');
+  const img = nativeImage.createFromPath(iconPath);
+  if (!windows) img.setTemplateImage(true);
   tray = new Tray(img);
   if (process.platform === 'darwin') {
     tray.setToolTip('AgentSwitcher');
     trayPanel = createTrayPanel(tray, () => traySnapshot, dispatchTrayCommand);
     return;
   }
+  const openMain = () => dispatchTrayCommand({ action: 'open' });
   tray.setToolTip('AgentSwitcher — AI Agent Quota & Account Manager');
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      {
-        label: 'Open AgentSwitcher',
-        click: () => {
-          mainWindow ? mainWindow.focus() : createWindow();
-        },
-      },
+      { label: windows ? '打开 AgentSwitcher' : 'Open AgentSwitcher', click: openMain },
       { type: 'separator' },
-      { label: 'Quit', click: () => app.quit() },
+      { label: windows ? '退出' : 'Quit', click: () => app.quit() },
     ])
   );
-  tray.on('click', () => {
-    mainWindow ? mainWindow.focus() : createWindow();
-  });
+  tray.on('click', openMain);
 }
 
 // ── App lifecycle ─────────────────────────────────────────────────────────────
@@ -188,9 +188,13 @@ app.whenReady().then(async () => {
   catch { downloadsDir = path.join(userDataDir, 'downloads'); }
   appUpdates = new AppUpdates({
     currentVersion: app.getVersion(), userDataDir, downloadsDir,
-    platform: process.platform, arch: process.arch,
+    platform: process.platform, arch: process.arch, isPackaged: app.isPackaged,
     onChange: state => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app-update-state', state); },
   });
+  if (process.platform === 'darwin') {
+    updateMenu = installApplicationMenu(operation => dispatchTrayCommand({ action: 'menu', operation }),
+      () => dispatchTrayCommand({ action: 'open' }), issues => { void shell.openExternal(issues ? projectUrl + '/issues' : projectUrl); }, app.isPackaged);
+  }
   createWindow();
   createTray();
   if (app.isPackaged) appUpdates.start();
@@ -205,8 +209,9 @@ app.on('window-all-closed', () => {
 app.on('before-quit', event => {
   if (!app.isReady() || quitGuard.canQuit()) return;
   event.preventDefault();
-  void quitGuard.request();
+  void quitGuard.finishQuit();
 });
+app.on('will-quit', () => appUpdates?.stop());
 
 
 // IPC validates its sender once; domain logic is shared with the CLI.
@@ -228,7 +233,8 @@ function handle(channel: string, callback: (...args: any[]) => unknown) {
       const execute = async () => accountOperations.has(channel) ? quitGuard.run(invoke) : invoke();
       switch (channel) {
         case 'refresh-account': {
-          const trigger = args[3] === 'tray' ? 'tray' : (args[2] || args[3] === 'manual') ? 'manual' : 'automatic';
+          const trigger = args[3] === 'tray' ? 'tray' : args[3] === 'automatic' ? 'automatic' :
+            (args[2] || args[3] === 'manual') ? 'manual' : 'automatic';
           return await runDiagnostic('refresh', args[0], trigger, args[1], execute);
         }
         case 'use-profile': return await runDiagnostic('switch', args[0], args[2] === 'tray' ? 'tray' : 'manual', args[1], execute);
@@ -256,6 +262,7 @@ if (process.platform === 'darwin') {
   ipcMain.handle('tray-state', (event, snapshot: TraySnapshot) => {
     if (!fromMainWindow(event)) return;
     traySnapshot = snapshot;
+    if (snapshot.menu) updateMenu?.(snapshot.menu);
     trayPanel?.update();
   });
   ipcMain.handle('tray-ready', event => {
@@ -276,9 +283,11 @@ handle('download-app-update', () => {
   return updates().download();
 });
 handle('cancel-app-update', () => { updates().cancel(); return updates().getState(); });
-handle('open-app-update', async () => { await updates().openDownloaded(); return { ok: true }; });
+handle('install-app-update', async () => {
+  await quitGuard.installUpdate(() => updates().prepareInstall());
+  return { ok: true };
+});
 handle('set-auto-update-check', (enabled: boolean) => { updates().setAutoCheck(enabled); return updates().getState(); });
-handle('quit-for-app-update', () => { setImmediate(() => app.quit()); return { ok: true }; });
 handle('open-project-page', async () => {
   await shell.openExternal(projectUrl);
   return { ok: true };
@@ -287,22 +296,8 @@ handle('get-settings', readSettings);
 handle('set-sidebar-layout', (collapsed: boolean, width: number) => updateWindowSidebarLayout(mainWindow, collapsed, width));
 handle('save-settings', saveSettings);
 handle('copy-cleanup-prompt', () => { clipboard.writeText(CODEX_CLEANUP_PROMPT); return { ok: true }; });
-let externalStatusAt = 0;
-handle('get-status', async (refresh = false, selectedAgent = 'codex') => {
-  // A slow/unavailable unrelated CLI must not delay opening the Codex account pool.
-  if (selectedAgent === 'claude' && (refresh === true || !externalStatusAt || Date.now() - externalStatusAt > 30000)) {
-    await resolveAgent('claude').status();
-    externalStatusAt = Date.now();
-  }
-  return dashboard();
-});
-handle('login-status', async (id: string) => {
-  const agent = resolveAgent(id);
-  const login = isolatedLogin(id);
-  if (login) return login.status();
-  if (id === 'claude') await agent.status();
-  return loginStatus(agent);
-});
+handle('get-status', () => withDashboardNativeSnapshot(resolveAgent('agy').management().quota, dashboard));
+handle('login-status', (id: string) => isolatedLogin(id)?.status() ?? loginStatus(resolveAgent(id)));
 handle('refresh-account', async (id: string, name?: string, force = false) => {
   if (quitGuard.isClosing()) throw new Error('正在准备退出 AgentSwitcher，请稍后重试');
   const result: StatusResult = await refreshAccount(resolveAgent(id), name, force);
@@ -326,8 +321,9 @@ handle('export-diagnostics', async () => {
   return { ok: true };
 });
 handle('save-profile', (id: string, name: string, attempt?: number) => {
-  if (id === 'agy') retryNativeKeychainAccess();
-  return isolatedLogin(id)?.save(name, attempt) ?? saveAccount(resolveAgent(id), name);
+  const agent = resolveAgent(id);
+  agent.retryCredentialAccess?.();
+  return isolatedLogin(id)?.save(name, attempt) ?? saveAccount(agent, name);
 });
 handle('update-from-login', (id: string, name: string, attempt: number) => {
   const login = isolatedLogin(id);
@@ -385,8 +381,8 @@ handle('use-profile', async (id: string, name: string) => {
   // Reject unsupported adapters before prompting to quit or touching a client.
   const unsupported = agent.switchSupport();
   if (unsupported) throw new Error(unsupported);
-  if (id === 'agy') retryNativeKeychainAccess();
-  const native = id === 'agy' && agent.management().storage === 'keychain';
+  agent.retryCredentialAccess?.();
+  const native = agent.management().storage === 'keychain';
   const closed = new Set<string>();
   function confirmSwitch(options: Electron.MessageBoxOptions) {
     stepDiagnostic('confirm');
@@ -398,7 +394,7 @@ handle('use-profile', async (id: string, name: string) => {
     for (const client of clients) closed.add(client);
   }
   async function switchFromWindow() {
-    if (native && hasPendingAntigravitySwitch()) {
+    if (agent.hasInterruptedSwitch?.()) {
       const clients = await runningClients(id, { failClosed: true });
       if (clients.length) {
         const { response } = await confirmSwitch({
@@ -426,12 +422,16 @@ handle('use-profile', async (id: string, name: string) => {
       if (response === 0) return { canceled: true };
       saveUnmanaged = response === 2;
     }
+    const prepared = native ? await prepareSwitchTarget(agent, name, expectedCurrentRevision) : undefined;
+    if (prepared?.alreadySelected) return { ok: true, files: [], warnings: [] };
     const clients = await runningClients(id, { failClosed: native });
-    const allowFileMigration = native && assertNativeSwitchReady(agent.credentials(profileDir(id, name))[agent.authFiles[0]]) === 'files';
+    const allowFileMigration = !!prepared && agent.needsFileMigration?.(prepared.target[agent.authFiles[0]]) === true;
     if (clients.length || allowFileMigration) {
       const details = [];
       if (clients.length) details.push('请先完成或停止正在运行的任务。切换完成后会重新打开客户端。');
-      if (allowFileMigration) details.push('完整凭据将保存到 Antigravity 桌面和 CLI 的两个本机认证文件（权限 0600）。两份文件核对成功后，AGS 才会移除该平台原有的个人登录钥匙串项。');
+      if (allowFileMigration) details.push(process.platform === 'win32'
+        ? '完整凭据将保存到 Antigravity 桌面和 CLI 的两个私有登录文件。两份文件核对成功后，AGS 才会移除 Windows 凭据管理器中该客户端原有的登录项。'
+        : '完整凭据将保存到 Antigravity 桌面和 CLI 的两个本机认证文件（权限 0600）。两份文件核对成功后，AGS 才会移除该平台原有的个人登录钥匙串项。');
       const { response } = await confirmSwitch({
         type: 'question', buttons: ['取消', clients.length ? '退出并切换' : '使用文件并切换'], defaultId: 0, cancelId: 0,
         message: clients.length ? `需要退出 ${clients.join('、')} 才能切换账号` : '使用官方文件保存长凭据并切换账号？',
@@ -485,41 +485,36 @@ async function exportItems(items: BackupItem[], password: string) {
   return { ok: true, count: items.length };
 }
 handle('export-profiles', exportItems);
-function importPreview(parsed: ParsedBackup, pending: typeof pendingImport) {
-  if (pendingImport !== pending) return { canceled: true };
+function batchPreview(batch: CredentialBatch) {
+  pendingImport = { id: randomUUID(), batch };
+  return { id: pendingImport.id, kind: 'credentials', items: batch.items, skippedProfiles: batch.parsed.skippedProfiles };
+}
+function importPreview(parsed: ParsedBackup, current: () => boolean) {
+  if (!current()) return { canceled: true };
   const batch = editableBackup(parsed);
-  if (batch) {
-    pendingImport = { id: randomUUID(), batch };
-    return { id: pendingImport.id, kind: 'credentials', items: batch.items };
-  }
+  if (batch) return batchPreview(batch);
   pendingImport = {id:randomUUID(),parsed};
-  return {id:pendingImport.id,items:parsed.items};
+  return {id:pendingImport.id,items:parsed.items,skippedProfiles:parsed.skippedProfiles};
 }
 handle('preview-import', async (kind = 'backup', agent?: string) => {
   if (kind === 'credentials') {
     if (agent) resolveAgent(agent);
-    const pending = { id: randomUUID() };
-    pendingImport = pending;
+    const current = beginImportPreview();
     const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow!, {
       title: '选择账号凭据', properties: ['openFile'],
       filters: [{ name: '客户端凭据', extensions: ['json', 'jsonl', 'ndjson', 'jsonc'] }, { name: '所有文件', extensions: ['*'] }],
     });
-    if (pendingImport !== pending) return { canceled: true };
-    if (canceled || !filePaths.length) {
-      pendingImport = undefined;
-      return { canceled: true };
-    }
+    if (!current()) return { canceled: true };
+    if (canceled || !filePaths.length) return { canceled: true };
     if (filePaths.length !== 1) throw new Error('请选择一个凭据文件，文件中可以包含多个账号');
     const file = filePaths[0], stat = await fs.promises.stat(file);
     if (!stat.isFile()) throw new Error('请选择凭据文件');
     if (stat.size > 32 * 1024 * 1024) throw new Error('凭据文件超过 32 MB');
     const batch = await parseCredentialBatch(await fs.promises.readFile(file), agent, path.basename(file));
-    if (pendingImport !== pending) return { canceled: true };
-    pendingImport = { id: randomUUID(), batch };
-    return { id: pendingImport.id, kind: 'credentials', items: batch.items };
+    if (!current()) return { canceled: true };
+    return batchPreview(batch);
   }
-  const pending = { id: randomUUID() };
-  pendingImport = pending;
+  const current = beginImportPreview();
   const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow!, {
     title: '导入账号或备份', properties: ['openFile'],
     filters: [{ name: '账号备份', extensions: ['ags', 'zip'] }],
@@ -527,45 +522,37 @@ handle('preview-import', async (kind = 'backup', agent?: string) => {
   if (canceled || !filePaths[0]) return { canceled: true };
   if ((await fs.promises.stat(filePaths[0])).size > 32 * 1024 * 1024) throw new Error('文件过大');
   const data = await fs.promises.readFile(filePaths[0]);
-  if (pendingImport !== pending) return { canceled: true };
+  if (!current()) return { canceled: true };
   if (isEncryptedBackup(data)) {
     pendingImport = {id:randomUUID(),encrypted:data};
     return {id:pendingImport.id,needsPassword:true,fileName:path.basename(filePaths[0])};
   }
-  return importPreview(await parseImport(data), pending);
+  const parsed = data.subarray(0, 2).toString() === 'PK' ? await parseBackup(data) : await parseCredentials(data);
+  return importPreview(parsed, current);
 });
 handle('unlock-import', async (id: string, password: string) => {
   if (!pendingImport?.encrypted || pendingImport.id !== id) throw new Error('请重新选择备份文件');
   const pending = pendingImport;
-  return importPreview(await parseBackup(pending.encrypted!, password), pending);
+  return importPreview(await parseBackup(pending.encrypted!, password), () => pendingImport === pending);
 });
 handle('preview-credentials', async (text: string, id: string) => {
   resolveAgent(id);
-  const pending = { id: randomUUID() };
-  pendingImport = pending;
+  const current = beginImportPreview();
   if (typeof text !== 'string') throw new Error('请输入客户端凭据 JSON');
   const batch = await parseCredentialBatch(Buffer.from(text), id);
-  if (pendingImport !== pending) return { canceled: true };
+  if (!current()) return { canceled: true };
   if (batch.items[0].state === 'error' && !batch.items[0].sourceIndex) throw new Error(batch.items[0].error);
-  pendingImport = { id: randomUUID(), batch };
-  return { id: pendingImport.id, kind: 'credentials', items: batch.items };
+  return batchPreview(batch);
 });
 handle('commit-import', async (id: string, keys: string[], names?: Record<string, string>) => {
-  if (pendingImport?.batch && pendingImport.id === id) {
-    const pending = pendingImport;
-    const result = await installCredentialBatch(pending.batch!, keys, names || {});
-    if (pendingImport === pending) pendingImport = undefined;
-    return { ok: true, ...result };
-  }
-  if (!pendingImport?.parsed || pendingImport.target || pendingImport.id !== id) throw new Error('请重新选择备份文件');
   const pending = pendingImport;
-  const result = await installBackup(pending.parsed!, keys);
+  if (!pending || pending.id !== id || pending.target || (!pending.batch && !pending.parsed)) throw new Error('请重新选择备份文件');
+  const result = pending.batch ? await installCredentialBatch(pending.batch, keys, names || {}) : await installBackup(pending.parsed!, keys);
   if (pendingImport === pending) pendingImport = undefined;
   return { ok: true, ...result };
 });
 handle('preview-credential-update', async (id: string, name: string, text?: string) => {
-  const pending = { id: randomUUID() };
-  pendingImport = pending;
+  const current = beginImportPreview();
   resolveAgent(id);
   let data: Buffer;
   if (text === undefined) {
@@ -579,9 +566,9 @@ handle('preview-credential-update', async (id: string, name: string, text?: stri
     if (typeof text !== 'string') throw new Error('请输入客户端凭据 JSON');
     data = Buffer.from(text);
   }
-  if (pendingImport !== pending) return { canceled: true };
+  if (!current()) return { canceled: true };
   const { parsed, target } = await previewCredentialUpdate(data, id, name);
-  if (pendingImport !== pending) return { canceled: true };
+  if (!current()) return { canceled: true };
   pendingImport = { id: randomUUID(), parsed, target };
   return { id: pendingImport.id, items: parsed.items, updating: true, profile: target.profile };
 });
@@ -592,7 +579,7 @@ handle('commit-credential-update', async (id: string) => {
   if (pendingImport === pending) pendingImport = undefined;
   return result;
 });
-handle('cancel-import', () => { pendingImport = undefined; });
+handle('cancel-import', cancelImportPreview);
 handle('cancel-login', async (id?: string) => {
   for (const agent of id ? [resolveAgent(id)] : ALL_AGENTS) {
     const login = loginManagers.get(agent.id);
@@ -635,8 +622,6 @@ handle('launch-login', async (id: string, mode: 'open' | 'copy' | 'private' = 'o
   if (updateProfile !== undefined) throw new Error('此平台暂不支持通过重新登录更新凭据');
   if (mode !== 'open') throw new Error('此平台不支持无痕登录入口');
   await prepareLogin(agent);
-  if (id === 'claude') await loginInTerminal(findClaudeBinary(), ['auth', 'login'], { CLAUDE_CONFIG_DIR: agent.homeDir });
-  else await openClients(['Antigravity']);
-  externalStatusAt = 0;
-  return { ok: true, message: agent.management().canSaveCurrent ? '请在官方客户端完成登录，再返回保存账号' : id === 'claude' ? '已打开 Claude Code 官方登录；完成后刷新登录状态' : '已打开 Antigravity，请在客户端中管理登录账号' };
+  await openClients(['Antigravity']);
+  return { ok: true, message: agent.management().canSaveCurrent ? '请在官方客户端完成登录，再返回保存账号' : '已打开 Antigravity，请在客户端中管理登录账号' };
 });

@@ -7,7 +7,7 @@ const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_OUT = path.join(ROOT, 'out', 'site');
 
-const STATIC_FILES = ['index.html', 'styles.css', 'app.js'];
+const STATIC_FILES = ['index.html', 'styles.css', 'app.js', 'install.sh', 'install.ps1'];
 
 const SHARED_ASSETS = [
   ['packaging/app-icon.png', 'assets/app-icon.png'],

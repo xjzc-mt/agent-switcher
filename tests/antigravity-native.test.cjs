@@ -1,9 +1,9 @@
-const { test, after } = require('node:test');
+const { mockKeychainCommands, createTestHome, installMockKeychain, readCredentialFile, jwt } = require('./helpers/test-env.cjs');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const childProcess = require('node:child_process');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-native-test-'));
-os.homedir = () => root;
+const root = createTestHome('ags-native-test-', { mockKeychain: false });
 // The recovery entry rechecks shared sessions. Keep its inventory independent of the desktop running the tests.
 const { promisify } = require('node:util');
 const originalExecFile = childProcess.execFile;
@@ -14,8 +14,7 @@ fixtureExec[promisify.custom] = (file, args, ...rest) =>
 childProcess.execFile = fixtureExec;
 const { readNativeToken: realReadNative, writeNativeToken: realWriteNative } = require('../dist/antigravity-native');
 childProcess.execFile = originalExecFile;
-const { readCredentialFile } = require('./vault-fixture.cjs');
-after(() => fs.rmSync(root, { recursive: true, force: true }));
+installMockKeychain();
 const native = require('../dist/antigravity-native');
 const clients = require('../dist/clients');
 const { AntigravityAgent } = require('../dist/agents/antigravity');
@@ -35,7 +34,7 @@ const agent = new AntigravityAgent(() => 'unified', true);
 
 test('legacy JWT and unified email retain the same personal identity after refresh', () => {
   const legacy = { auth_method: 'consumer', token: { refresh_token: 'fake-refresh' },
-    id_token: `x.${Buffer.from(JSON.stringify({ sub: 'google-subject', email: 'b@example.test' })).toString('base64url')}.x` };
+    id_token: jwt({ sub: 'google-subject', email: 'b@example.test' }) };
   assert.equal(agent.identityFromAuth(legacy).id, agent.identityFromAuth(JSON.parse(token('b@example.test'))).id);
   assert.doesNotThrow(() => native.parseNativeToken(Buffer.from(JSON.stringify(legacy))));
   const unsupported = [{}, { auth_method: 'business', token: { refresh_token: 'fake' } },
@@ -314,22 +313,115 @@ test('background refresh never migrates a Keychain login and explicit switching 
   });
 });
 
-test('background reads and writes stop retrying a denied Keychain until the user retries', { skip: process.platform !== 'darwin' }, async () => {
+test('long renewal migrates the exact idle login and reuses private same-session files while the desktop stays open', { skip: process.platform !== 'darwin' }, async t => {
+  const name = 'renew-long', small = token('renew-long@example.test'), big = largeToken('renew-long@example.test');
+  await withMockKeychain(small, async ({ paths, state, encode, writeFile }) => {
+    const revision = credentialState(agent).revision, files = { [agent.authFiles[0]]: big };
+    let running = ['Antigravity'];
+    t.mock.method(clients, 'runningClients', async () => running);
+    const accounts = require('../dist/accounts');
+    const providers = accounts.ALL_AGENTS.splice(0, accounts.ALL_AGENTS.length, agent);
+    t.after(() => accounts.ALL_AGENTS.splice(0, 1, ...providers));
+    const poolFile = path.join(profileDir('agy', name), agent.authFiles[0]);
+    atomicWrite(poolFile, small);
+    store.writeProfileMeta('agy', name, { snapshot: { available: true, state: 'expired', authExpired: true, credentialRevision: revision } });
+    const saved = await accounts.updateAccountCredentials(accounts.credentialUpdateTarget(agent, name), files, undefined, { trusted: true });
+    assert.match(saved.warning, /切换/);
+    assert.deepEqual(readCredentialFile(poolFile), big);
+    assert.equal(state.stored, encode(small));
+    assert.equal(accounts.dashboard()[0].profiles.find(p => p.name === name).isActive, false);
+    running = [];
+    writeFile(paths.cli, token('other-login@example.test'));
+    await assert.rejects(agent.writeRenewedCredentials(files, revision), /其他登录/);
+    assert.equal(state.stored, encode(small));
+    fs.unlinkSync(paths.cli);
+    await useAccount(agent, name, { allowFileMigration: true });
+    assert.deepEqual(readCredentialFile(poolFile), big);
+    assert.equal(store.readProfileMeta('agy', name).pendingLiveRevision, undefined);
+    assertBothClients(state, paths, big);
+    assert.equal(state.stored, null);
+    assert.deepEqual(native.readSharedQuotaLogin(realReadNative([])), big);
+    running = ['Antigravity'];
+    assert.deepEqual((await useAccount(agent, name)).files, []);
+    assert.equal(native.hasPendingNativeCleanup(), false);
+    fs.chmodSync(paths.cli, 0o640);
+    assert.equal(native.readSharedQuotaLogin(realReadNative([])), undefined);
+    assert.equal(native.hasPendingNativeCleanup(), true);
+  });
+});
+
+test('idle current-account refresh writes the long official successor to the pool and both clients', { skip: process.platform !== 'darwin' }, async t => {
+  const name = 'idle-long', email = 'idle-long@example.test', small = token(email), long = largeToken(email);
+  await withMockKeychain(small, async ({ paths, state }) => {
+    const file = path.join(profileDir('agy', name), agent.authFiles[0]);
+    atomicWrite(file, small);
+    t.mock.method(agent, 'queryCredential', async () => ({ status: { available: true, state: 'ok' }, rotated: long }));
+    assert.equal((await refreshAccount(agent, name, true)).state, 'ok');
+    assert.deepEqual(readCredentialFile(file), long);
+    assertBothClients(state, paths, long);
+  });
+});
+
+test('first-screen reads keep helpers asynchronous and show an interrupted switch before reading a login', { skip: process.platform !== 'darwin' }, async t => {
+  await withMockKeychain(token('dashboard@example.test'), async ({ state, encode }) => {
+    const sync = childProcess.execFileSync, launched = [];
+    let switchDuringRead = false;
+    const asyncRead = t.mock.method(childProcess, 'execFile', (file, args, opts, cb) => {
+      launched.push(file);
+      setImmediate(() => {
+        try {
+          const raw = sync(file, args, opts);
+          if (switchDuringRead && file === '/usr/bin/security') {
+            state.itemRevision = 'replaced-during-read';
+            state.stored = encode(token('new-desktop@example.test'));
+            switchDuringRead = false;
+          }
+          cb(null, raw);
+        } catch (error) { cb(Object.assign(error, { code: error.status })); }
+      });
+    });
+    const wrapper = read => native.withDashboardNativeSnapshot(true, read);
+    childProcess.execFileSync = () => assert.fail('dashboard blocked on a native credential helper');
+    try {
+      assert.deepEqual(await wrapper(() => realReadNative()), token('dashboard@example.test'));
+      assert.deepEqual(launched, ['/usr/bin/osascript', '/usr/bin/security', '/usr/bin/osascript']);
+      assert.equal(state.routeReads, 1);
+      const journal = path.join(root, '.agent-switcher', '.antigravity-switch.pending');
+      fs.mkdirSync(path.dirname(journal), { recursive: true });
+      fs.writeFileSync(journal, 'synthetic unfinished switch');
+      try {
+        await assert.rejects(wrapper(() => native.readUnavailableDesktopQuotaFile()), /切换中断/);
+        assert.equal(asyncRead.mock.callCount(), 3);
+      } finally { fs.unlinkSync(journal); }
+      switchDuringRead = true;
+      await assert.rejects(wrapper(() => realReadNative()), /无法读取/);
+      assert.deepEqual(await wrapper(() => realReadNative()), token('new-desktop@example.test'));
+    } finally { childProcess.execFileSync = sync; }
+  });
+});
+
+test('denied tool reads stay blocked for the same item revision and a changed official login becomes visible', { skip: process.platform !== 'darwin' }, async () => {
   const initial = token('permission@example.test');
   await withMockKeychain(initial, async ({ state, encode }) => {
     try {
       state.deniedReads = 0;
       for (let i = 0; i < 3; i++) assert.throws(realReadNative, /无法读取/);
       assert.equal(state.deniedReads, 1);
-      delete state.deniedReads;
-      native.retryNativeKeychainAccess();
+      state.allowNoUiRead = true;
       assert.deepEqual(realReadNative(), initial);
+      assert.equal(state.deniedReads, 1, 'an available no-UI reader skips the denied tool');
+      delete state.deniedReads;
+      delete state.allowNoUiRead;
+      const changed = token('official-switch@example.test');
+      state.stored = encode(changed);
+      state.itemRevision = 'official-replaced-item';
+      assert.deepEqual(realReadNative(), changed, 'observe an external switch without clearing the denial manually');
 
       state.deniedWrites = 0;
       const target = token('target@example.test');
       for (let i = 0; i < 3; i++) assert.throws(() => realWriteNative(target), /无法更新|写入被拒/);
       assert.equal(state.deniedWrites, 1);
-      assert.equal(state.stored, encode(initial));
+      assert.equal(state.stored, encode(changed));
       delete state.deniedWrites;
       native.retryNativeKeychainAccess();
       realWriteNative(target);
@@ -361,7 +453,6 @@ test('partial native write corruption during switch still rolls back to previous
 });
 
 function withMockKeychain(initial, fn) {
-  const exec = childProcess.execFileSync;
   const gemini = path.join(root, '.gemini');
   const paths = {
     desktop: path.join(gemini, native.NATIVE_TOKEN_FILE),
@@ -369,62 +460,8 @@ function withMockKeychain(initial, fn) {
     desktopMarker: path.join(gemini, 'cache/antigravity-keyring-unavailable'),
     cliMarker: path.join(gemini, 'antigravity-cli/cache/antigravity-keyring-unavailable'),
   };
-  const encode = bytes => bytes ? 'go-keyring-base64:' + bytes.toString('base64') : null;
-  const state = { stored: encode(initial), itemRevision: 'original-ref-and-date', writes: 0, failWrite: false, failDelete: false, corruptAfterWrite: false, corruptNextRead: false };
   fs.rmSync(gemini, { recursive: true, force: true });
-  childProcess.execFileSync = (cmd, args, opts) => {
-    assert.ok(args.every(arg => !String(arg).includes('go-keyring-base64:')));
-    const nativeDelete = cmd === '/usr/bin/osascript' && args.some(arg => String(arg).includes('SecItemDelete'));
-    if (nativeDelete || (cmd === '/usr/bin/security' && args[0] === 'delete-generic-password')) {
-      if (nativeDelete) {
-        assert.ok(args.some(arg => String(arg).includes('SecKeychainSetUserInteractionAllowed(false)')));
-        assert.ok(args.some(arg => String(arg).includes('m_ItemList')));
-        assert.ok(args.every(arg => !String(arg).includes('NSTask')));
-        const { raw, revision } = JSON.parse(String(opts.input));
-        state.beforeRetireCheck?.();
-        if (state.stored === null) throw Object.assign(new Error('missing'), { status: 44 });
-        if (revision !== state.itemRevision || (state.nativeReadable && raw !== state.stored)) {
-          throw Object.assign(new Error('item changed'), { status: 78 });
-        }
-      }
-      state.onDelete?.();
-      if (state.failDelete) throw new Error('mock delete failed');
-      state.stored = null;
-      state.nativeReadable = false;
-      return '';
-    }
-    if (cmd === '/usr/bin/osascript') {
-      assert.equal(opts?.input, undefined);
-      if (args.some(arg => String(arg).includes('AGS_KEYCHAIN_REVISION'))) {
-        if (state.stored === null) throw Object.assign(new Error('missing'), { status: 44 });
-        return state.itemRevision;
-      }
-      if (state.nativeReadable) return state.stored;
-      throw Object.assign(new Error('fixture is readable by the official security tool'), { status: 77 });
-    }
-    assert.equal(cmd, '/usr/bin/security');
-    if (args[0] === 'find-generic-password') {
-      if (args.includes('-w') && state.deniedReads !== undefined) {
-        state.deniedReads++;
-        throw Object.assign(new Error('fixture read denied'), { status: 51 });
-      }
-      if (state.corruptNextRead && args.includes('-w')) { state.corruptNextRead = false; return 'go-keyring-base64:' + Buffer.from('corrupt').toString('base64'); }
-      if (state.stored === null) throw Object.assign(new Error('missing'), { status: 44 });
-      return state.stored;
-    }
-    assert.equal(args[0], '-i');
-    assert.ok(Buffer.byteLength(opts.input) < 4000);
-    if (state.deniedWrites !== undefined) {
-      state.deniedWrites++;
-      throw Object.assign(new Error('fixture write denied'), { status: 51 });
-    }
-    if (state.failWrite) throw new Error('mock security write failed');
-    state.writes++;
-    state.onWrite?.();
-    state.stored = opts.input.match(/-w "([^"]*)"/)[1];
-    if (state.corruptAfterWrite) { state.corruptAfterWrite = false; state.corruptNextRead = true; }
-    return '';
-  };
+  const { state, encode, restore } = mockKeychainCommands(initial);
   native.readNativeToken = realReadNative;
   native.writeNativeToken = realWriteNative;
   const writeFile = (file, content, ageMs = 0) => {
@@ -438,15 +475,131 @@ function withMockKeychain(initial, fn) {
   const finish = () => {
     native.retryNativeKeychainAccess();
     fs.rmSync(gemini, { recursive: true, force: true });
-    childProcess.execFileSync = exec;
+    restore();
     native.readNativeToken = () => live;
     native.writeNativeToken = bytes => { live = bytes; };
   };
   return Promise.resolve().then(() => fn({ state, paths, encode, writeFile })).finally(finish);
 }
 
+test('read-only desktop quota observes only a trusted active desktop file, without opening Keychain', { skip: process.platform !== 'darwin' }, async t => {
+  const read = native.readActiveDesktopQuotaFile;
+  await withMockKeychain(token('other@example.test'), async ({ paths, writeFile }) => {
+    let toolCalls = 0;
+    childProcess.execFileSync = () => { toolCalls++; assert.fail('read-only desktop probe started a system tool'); };
+    const expired = JSON.parse(token('desktop@example.test'));
+    expired.token.expiry = '2000-01-01T00:00:00Z';
+    const bytes = Buffer.from(JSON.stringify(expired));
+    writeFile(paths.desktop, bytes);
+    writeFile(paths.cli, token('cli@example.test'));
+    assert.equal(read(), undefined);
+    writeFile(paths.desktopMarker, '', 7200_000);
+    assert.equal(read(), undefined);
+    writeFile(paths.desktopMarker, '');
+    const copies = [];
+    const observed = read(copies);
+    assert.deepEqual(observed, bytes);
+    assert.deepEqual(copies, []);
+    assert.equal(native.readSharedQuotaLogin(observed), undefined);
+    const cli = JSON.parse(bytes);
+    cli.token.access_token = 'new-cli-access';
+    cli.token.expiry = new Date(Date.now() + 3600_000).toISOString();
+    writeFile(paths.cli, JSON.stringify(cli));
+    assert.deepEqual(read(copies), bytes);
+    assert.equal(native.findQuotaBearer(expired, copies).accessToken, cli.token.access_token);
+    copies.length = 0;
+    fs.chmodSync(paths.cli, 0o666);
+    assert.deepEqual(read(copies), bytes);
+    assert.deepEqual(copies, []);
+    fs.chmodSync(paths.cli, 0o600);
+    cli.token.refresh_token = 'independent-file-login';
+    writeFile(paths.cli, JSON.stringify(cli));
+    assert.deepEqual(read(copies), bytes);
+    assert.deepEqual(copies, []);
+    for (const file of [paths.desktop, paths.desktopMarker]) {
+      fs.chmodSync(file, 0o666);
+      assert.equal(read(), undefined);
+      fs.chmodSync(file, 0o600);
+      const alias = file + '.alias';
+      fs.linkSync(file, alias);
+      assert.equal(read(), undefined);
+      fs.unlinkSync(file);
+      fs.symlinkSync(alias, file);
+      assert.equal(read(), undefined);
+      fs.unlinkSync(file);
+      fs.renameSync(alias, file);
+    }
+    const getuid = t.mock.method(process, 'getuid', () => -1);
+    try { assert.equal(read(), undefined); } finally { getuid.mock.restore(); }
+    fs.chmodSync(path.dirname(paths.desktopMarker), 0o777);
+    assert.equal(read(), undefined);
+    fs.chmodSync(path.dirname(paths.desktopMarker), 0o700);
+    assert.deepEqual(read(), bytes);
+    const readFile = fs.readFileSync;
+    const changeMarker = t.mock.method(fs, 'readFileSync', (...args) => {
+      const data = readFile(...args);
+      if (typeof args[0] === 'number') fs.unlinkSync(paths.desktopMarker);
+      return data;
+    });
+    try { assert.equal(read(), undefined); } finally { changeMarker.mock.restore(); }
+    writeFile(paths.desktopMarker, '');
+    for (const invalid of ['{}', '{"auth_method":"business"}', '{']) {
+      writeFile(paths.desktop, invalid);
+      assert.equal(read(), undefined);
+    }
+    assert.equal(toolCalls, 0);
+  });
+});
+
+test('trusted desktop fallback yields to a readable login and survives an unavailable or ambiguous one', { skip: process.platform !== 'darwin' }, async () => {
+  await withMockKeychain(null, async ({ paths, writeFile, state, encode }) => {
+    const desktop = token('desktop@example.test'), normal = token('keychain@example.test');
+    writeFile(paths.desktop, desktop);
+    writeFile(paths.desktopMarker, '');
+    const read = native.readUnavailableDesktopQuotaFile;
+    assert.equal(read(), undefined, 'an absent keychain item is readable normally');
+    state.stored = encode(normal);
+    assert.equal(read(), undefined);
+    state.sharedUnavailable = true;
+    assert.deepEqual(read(), desktop);
+    delete state.sharedUnavailable;
+    state.ambiguous = true;
+    assert.throws(realReadNative, /无法读取/);
+    assert.deepEqual(read(), desktop);
+    assert.equal(state.toolReads, undefined, 'an ambiguous item must not select a password from the search list');
+    delete state.ambiguous;
+    state.deniedReads = 0;
+    assert.throws(realReadNative, /无法读取/);
+    assert.deepEqual(read(), desktop);
+    assert.equal(state.deniedReads, 1);
+  });
+});
+
 test('fallback files (stub, older/newer same identity, pool spare, markers) resolve cleanly and converge on switch', { skip: process.platform !== 'darwin' }, async () => {
   await withMockKeychain(token('fa@example.test', 2), async ({ state, paths, encode, writeFile }) => {
+    const expected = realReadNative([]), reads = state.toolReads, sharedLogin = () => native.readSharedQuotaLogin(expected);
+    // JXA bridges NSUInteger to a string on macOS. Exercise the actual item selector with inert objects.
+    const selector = state.sharedScript.match(/function uniqueItem\(\) \{[\s\S]*?\n  \}/)[0];
+    const choose = (count, length) => require('node:vm').runInNewContext(selector + '\nuniqueItem().revision', {
+      q: {}, ObjC: { unwrap: x => x }, $: Object.assign(x => x, { exit() { throw new Error('ambiguous'); } }),
+      copy: () => ({ count, objectAtIndex: () => ({ objectForKey: key => key === 'mdat'
+        ? { timeIntervalSinceReferenceDate: 123 } : { length, base64EncodedStringWithOptions: () => 'fixture' } }) }),
+    });
+    assert.equal(choose('1', '4'), 'fixture/123');
+    assert.throws(() => choose('2', '4'), /ambiguous/);
+    assert.throws(() => choose('1', '0'), /ambiguous/);
+    assert.deepEqual(sharedLogin(), expected);
+    assert.equal(native.readSharedQuotaLogin(Buffer.from(expected)), undefined, 'a pool copy has no live-source observation');
+    for (const marker of [paths.cliMarker, paths.desktopMarker]) {
+      writeFile(marker, '1'); assert.equal(sharedLogin(), undefined); fs.unlinkSync(marker);
+    }
+    state.sharedUnavailable = true;
+    assert.equal(sharedLogin(), undefined);
+    for (let i = 0; i < 2; i++) assert.throws(() => realReadNative([]), /无法读取/);
+    delete state.sharedUnavailable;
+    state.itemRevision = 'replaced-ref-or-date'; assert.equal(sharedLogin(), undefined);
+    assert.equal(state.toolReads, reads, 'eligibility checks never invoke the security executable');
+    assert.deepEqual(native.readSharedQuotaLogin(realReadNative([])), expected, 'quota resumes after unlock without a manual reset');
     atomicWrite(path.join(profileDir('agy', 'FB'), agent.authFiles[0]), token('fb@example.test', 1));
     // 1. Logout stub + markers do not block reading, saving, or switching A -> B -> A.
     writeFile(paths.cli, JSON.stringify({ auth_method: 'consumer', token: {} }));
@@ -467,6 +620,7 @@ test('fallback files (stub, older/newer same identity, pool spare, markers) reso
     assert.deepEqual(realReadNative(), token('fa@example.test', 2));
     writeFile(paths.cli, token('fa@example.test', 3));
     assert.deepEqual(realReadNative(), token('fa@example.test', 3));
+    assert.deepEqual(native.readSharedQuotaLogin(realReadNative([])), token('fa@example.test', 2), 'return canonical bytes even when the file bearer is newer');
     await useAccount(agent, 'FB');
     assert.deepEqual(readCredentialFile(path.join(profileDir('agy', 'FA'), agent.authFiles[0])), token('fa@example.test', 3));
     assert.equal(fs.existsSync(paths.cli), false);
@@ -499,6 +653,7 @@ test('fallback files (stub, older/newer same identity, pool spare, markers) reso
       return native.findQuotaBearer(native.parseNativeToken(realReadNative(copies)), copies)?.accessToken;
     };
     assert.equal(quotaBearer(), undefined, 'The desktop fallback belongs to an independent login with the same email');
+    assert.equal(native.readSharedQuotaLogin(realReadNative([])), undefined);
     writeFile(paths.cli, JSON.stringify(shared));
     assert.equal(quotaBearer(), shared.token.access_token);
   });

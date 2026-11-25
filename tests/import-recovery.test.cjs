@@ -1,12 +1,9 @@
-const { accessToken } = require('./codex-token-fixture.cjs');
-const {test,beforeEach,after}=require('node:test');
+const { mockIdleClients, createTestHome, readCredentialFile, jwt, accessToken } = require('./helpers/test-env.cjs');
+const {test,beforeEach}=require('node:test');
 const assert=require('node:assert/strict');
-const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'ags-import-recovery-'));
-os.homedir=()=>root;
-const { readCredentialFile } = require('./vault-fixture.cjs');
-const clients=require('../dist/clients');clients.runningClients=async()=>[];
-const logout=require('../dist/client-logout');logout.runningCodexSessions=async()=>[];
+const fs=require('node:fs'),path=require('node:path');
+const root = createTestHome('ags-import-recovery-');
+mockIdleClients();
 const accounts=require('../dist/accounts'),store=require('../dist/store');
 const backup=require('../dist/backup'),batchImport=require('../dist/credential-import');
 const {codexAgent:agent}=require('../dist/agents/codex');
@@ -14,7 +11,7 @@ const {credentialState}=require('../dist/credential-state');
 const {atomicWrite}=require('../dist/utils');
 const vault = require('../dist/credential-vault');
 Object.defineProperty(agent,'homeDir',{value:path.join(root,'live')});
-const auth=(id,token='new',member='person')=>Buffer.from(JSON.stringify({tokens:{account_id:id,access_token:accessToken(id,member,'same@example.test',token),refresh_token:token,id_token:`h.${Buffer.from(JSON.stringify({sub:member,email:'same@example.test','https://api.openai.com/auth':{chatgpt_account_id:id,user_id:member}})).toString('base64url')}.s`}}));
+const auth=(id,token='new',member='person')=>Buffer.from(JSON.stringify({tokens:{account_id:id,access_token:accessToken(id,member,'same@example.test',token),refresh_token:token,id_token:jwt({sub:member,email:'same@example.test','https://api.openai.com/auth':{chatgpt_account_id:id,user_id:member}})}}));
 const file=name=>path.join(store.profileDir('codex',name),'auth.json');
 const staged=name=>path.join(store.profileDir('codex',name),'auth.json.pending');
 function put(name,id,state='expired',token='old') {
@@ -40,7 +37,6 @@ beforeEach(()=>{
   atomicWrite(path.join(agent.homeDir,'auth.json'),auth('unrelated-current','live'));
   store.setActiveProfile('codex','current');
 });
-after(()=>fs.rmSync(root,{recursive:true,force:true}));
 
 test('a mixed 64-account import reads the vault key only at batch boundaries', async () => {
   const key = Buffer.alloc(32, 7);

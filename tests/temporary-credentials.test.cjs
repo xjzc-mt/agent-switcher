@@ -1,4 +1,4 @@
-const { accessToken } = require('./codex-token-fixture.cjs');
+const { installMockKeychain, accessToken } = require('./helpers/test-env.cjs');
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
@@ -78,14 +78,89 @@ test('a crash cannot reclaim credentials marked as awaiting write-back', () => {
   assert.equal(fs.existsSync(active), false);
 });
 
+test('killing a Codex query with a fresh bearer leaves only a reclaimable read-only copy', () => {
+  const bearer = accessToken('workspace', 'member', 'member@example.test', 'fresh', Math.floor(Date.now() / 1000) + 3600);
+  const child = spawnSync(process.execPath, ['-e', `
+    const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+    os.homedir=()=>process.argv[1]; os.tmpdir=()=>process.argv[2];
+    const { CodexAgent }=require('./dist/agents/codex'), agent=new CodexAgent();
+    agent.queryLiveRpc=dir=>{ fs.writeSync(1,dir); process.kill(process.pid,'SIGKILL'); };
+    const bearer=process.argv[3];
+    agent.queryCredential(Buffer.from(JSON.stringify({refresh_token:'fixture-original',tokens:{account_id:'workspace',id_token:bearer,access_token:bearer,refresh_token:'fixture-original'}})));
+  `, home, temporary, bearer], { encoding: 'utf8', timeout: 5000 });
+  assert.ok(child.signal === 'SIGKILL' || (process.platform === 'win32' && child.status !== 0), child.stderr);
+  const dir = child.stdout, file = path.join(dir, 'auth.json');
+  const copy = fs.readFileSync(file, 'utf8');
+  assert.equal(JSON.parse(copy).tokens.refresh_token, 'ags-refresh-disabled');
+  assert.ok(!copy.includes('fixture-original'));
+  assert.ok(!JSON.parse(fs.readFileSync(marker(dir))).pendingCommit);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o400);
+  assert.ok(lifecycle.reapTemporaryCredentials().removed.includes(dir));
+});
+
+test('a new process cannot replay a lost agy request and can restore its sealed successor after TMPDIR is cleared', { skip: process.platform !== 'darwin' }, t => {
+  installMockKeychain();
+  const email = 'crash@example.test';
+  const credential = token => Buffer.from(JSON.stringify({ auth_method: 'consumer', id_token_email: 'crash@example.test',
+    token: { refresh_token: token, access_token: 'access-' + token, expiry: '2000-01-01T00:00:00Z' } }));
+  const next = credential('successor-token');
+  const blocked = lifecycle.createTemporaryCredentials('agy-quota');
+  lifecycle.markTemporaryCredentialsPending(blocked, email, 'no-record', credential('no-record'));
+  const fault = t.mock.method(fs, 'linkSync', () => { throw new Error('fixture storage unavailable'); });
+  assert.throws(() => lifecycle.withTemporaryProcess(blocked, () => assert.fail('process launched without a durable intent')), /fixture storage unavailable/);
+  fault.mock.restore();
+  assert.equal(lifecycle.releaseTemporaryCredentials(blocked), true);
+  function interrupted(token, output) {
+    const directory = lifecycle.createTemporaryCredentials('agy-quota');
+    lifecycle.markTemporaryCredentialsPending(directory, email, token, credential(token));
+    lifecycle.withTemporaryProcess(directory, () => spawnSync(process.execPath, ['-e', ''], { detached: true }));
+    if (output) lifecycle.recordAntigravityQuotaOutput(directory, email, output);
+    fs.rmSync(directory, { recursive: true });
+  }
+  interrupted('lost-request');
+  interrupted('completed-request', next);
+  const store = path.join(home, '.agent-switcher');
+  const records = fs.readdirSync(store).filter(n => n.startsWith('.antigravity-quota-'));
+  assert.equal(records.length, 2);
+  for (const name of records) {
+    const bytes = fs.readFileSync(path.join(store, name));
+    assert.ok(bytes.subarray(0, 18).equals(Buffer.from('AGS-CREDENTIALS-1\n')));
+    assert.equal(bytes.includes(next), false);
+  }
+  const result = spawnSync(process.execPath, ['-e', `
+    const os=require('node:os'), assert=require('node:assert/strict');
+    os.homedir=()=>${JSON.stringify(home)}; os.tmpdir=()=>${JSON.stringify(temporary)};
+    require(${JSON.stringify(require.resolve('./helpers/test-env.cjs'))}).installMockKeychain();
+    const api=require(${JSON.stringify(modulePath)}), credential=${credential.toString()};
+    const {recoverAntigravityQuota}=require(${JSON.stringify(require.resolve('../dist/antigravity-quota-recovery'))});
+    const {antigravityAgent}=require(${JSON.stringify(require.resolve('../dist/agents/antigravity'))});
+    const get=(id,token)=>api.pendingAntigravityQuota(id,token,credential(token));
+    assert.throws(()=>get('crash@example.test','lost-request'),e=>e.diagnostic==='recovery-missing');
+    const retry=api.createTemporaryCredentials('agy-quota');
+    assert.throws(()=>api.markTemporaryCredentialsPending(retry,'crash@example.test','lost-request',credential('lost-request')),api.PendingQuotaConflict);
+    assert.equal(get('different@example.test','lost-request'),undefined);
+    assert.equal(get('crash@example.test','fresh-login'),undefined);
+    assert.equal(get('crash@example.test','successor-token').alreadyStored,true);
+    let stored=credential('completed-request');
+    const recovered=recoverAntigravityQuota(antigravityAgent,'crash@example.test',stored,{
+      read:()=>stored,write:bytes=>{stored=bytes;},
+    });
+    assert.deepEqual(recovered.bytes,credential('successor-token'));
+    assert.deepEqual(stored,recovered.bytes);
+    assert.equal(get('crash@example.test','completed-request'),undefined);
+  `], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('symlink directories, replaced markers and malformed ownership never authorize cleanup', () => {
   const directory = abandoned().directory;
   const destination = path.join(sandbox, 'unrelated');
   fs.renameSync(directory, destination); fs.symlinkSync(destination, directory, 'dir');
   const linkedMarker = abandoned().directory;
   fs.unlinkSync(marker(linkedMarker)); fs.symlinkSync(marker(destination), marker(linkedMarker));
-  const invalid = abandoned().directory;
-  rewriteOwner(invalid, { pid: 0, path: destination });
+  const invalid = lifecycle.createTemporaryCredentials('agy-quota');
+  fs.writeFileSync(marker(invalid), 'null');
+  assert.equal(lifecycle.pendingAntigravityQuota('other@example.test', 'other', Buffer.from('fixture')), undefined);
   const result = lifecycle.reapTemporaryCredentials();
   for (const item of [directory, linkedMarker, invalid]) assert.ok(result.retained.includes(item));
   assert.equal(fs.readFileSync(path.join(destination, 'credential'), 'utf8'), 'fixture-secret');

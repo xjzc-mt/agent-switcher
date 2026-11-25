@@ -1,16 +1,16 @@
 {
   "name": "agent-switcher",
-  "version": "1.0.1",
+  "version": "0.1.0",
   "description": "Multi-account & quota manager for AI coding agents",
   "main": "dist/main.js",
   "bin": {
     "ags": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/build-windows-helpers.cjs",
     "gui": "electron .",
     "electron": "electron .",
-    "electron:dev": "tsc && electron .",
+    "electron:dev": "npm run build && electron .",
     "dist": "tsc && electron-builder --publish never",
     "dist:dir": "tsc && electron-builder --dir --publish never",
     "dist:zip": "tsc && electron-builder --mac zip --publish never",
@@ -19,13 +19,12 @@
     "screenshots": "electron scripts/capture-screenshots.cjs",
     "site:build": "node scripts/build-site.cjs",
     "dev": "npm run build && node dist/index.js",
-    "lint": "tsc --noEmit && node --check renderer/app.js && node --check renderer/tray.js && node --check renderer/logos.js && node --check renderer/account-policy.js && node --check renderer/tooltips.js && node --check renderer/refresh-queue.js && node --check renderer/layout.js && node --check scripts/release-checksums.cjs && node --check scripts/size-audit.cjs && node --check scripts/capture-screenshots.cjs && node --check scripts/build-site.cjs && node --check site/app.js",
+    "lint": "tsc --noEmit && node --check renderer/app.js && node --check renderer/tray.js && node --check renderer/logos.js && node --check renderer/account-policy.js && node --check renderer/tooltips.js && node --check renderer/refresh-queue.js && node --check renderer/layout.js && node --check renderer/profile-name.js && node --check scripts/release-checksums.cjs && node --check scripts/size-audit.cjs && node --check scripts/capture-screenshots.cjs && node --check scripts/build-windows-helpers.cjs && node --check scripts/build-site.cjs && node --check site/app.js",
     "test": "npm run build && node --test tests/*.test.cjs",
-    "test:ui": "npm run build && electron tests/ui-smoke.cjs && electron tests/ui-layout.cjs && electron tests/ui-account-groups.cjs && electron tests/ui-refresh.cjs && electron tests/ui-interactions.cjs && electron tests/ui-chrome.cjs && electron tests/ui-rename.cjs && electron tests/ui-account-errors-import.cjs && electron tests/ui-account-actions.cjs && electron tests/ui-cleanup.cjs && electron tests/ui-credential-batch.cjs && electron tests/ui-providers.cjs && electron tests/ui-app-updates.cjs"
+    "test:ui": "npm run build && electron tests/ui-runner.cjs"
   },
   "keywords": [
     "codex",
-    "claude",
     "antigravity",
     "account-switcher",
     "ai-tools"
@@ -49,6 +48,7 @@
   },
   "build": {
     "appId": "com.agent-switcher.app",
+    "beforePack": "./scripts/build-windows-helpers.cjs",
     "productName": "AgentSwitcher",
     "mac": {
       "artifactName": "AgentSwitcher-${version}-${arch}.${ext}",
@@ -60,6 +60,9 @@
       "identity": "-"
     },
     "win": {
+      "files": ["dist/windows-helpers/{AgySandbox.exe,AntigravityCredential.exe,DesktopWindows.exe,sha256.json}", "!assets/trayTemplate*.png"],
+      "asarUnpack": ["dist/windows-helpers/*.exe"],
+      "signExts": ["!AgySandbox.exe", "!AntigravityCredential.exe", "!DesktopWindows.exe"],
       "target": ["nsis"],
       "icon": "packaging/app-icon.png",
       "artifactName": "AgentSwitcher-Setup-${version}-${arch}.${ext}"
@@ -86,7 +89,8 @@
       "dist/**/*.js",
       "renderer/**/*",
       "assets/**/*",
-      "!assets/icon-candidates/**/*"
+      "!assets/icon-candidates/**/*",
+      "!assets/windows/**/*"
     ],
     "directories": {
       "output": "release"

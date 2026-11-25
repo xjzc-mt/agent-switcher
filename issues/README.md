@@ -1,37 +1,58 @@
-# AGS 问题记录
+# AGS 问题与需求总览
 
-每个独立问题用一个 Markdown 文件跟踪，从首次反馈、根因与方案、编码修复一直保留到独立验收关闭。
+`issues/README.md` 是仓库问题单与需求单的**唯一总览路由入口**。
+- **LLM / 协作者读取约定**：定位当前待办、缺陷或需求时，**第一步只读本文件**，禁止盲扫 `issues/` 全量文件或 `issues/archive/`；仅根据编号按需读取本次任务对应的 1–2 个活跃单文件。
+- **目录热冷分离**：`issues/` 根目录只保留未关闭的活跃单；一旦验收通过变为 `已关闭`，立即移入 `issues/archive/` 并在下方归档索引登记。
 
-| 编号 | 状态 | 问题 |
-| --- | --- | --- |
-| AGS-0001 | 待验收 | [Antigravity 检测到 CLI 认证文件后无法保存当前账号或切换账号](AGS-0001-antigravity-file-auth.md) |
-| AGS-0002 | 已关闭 | [双屏切换平台时小菜单跳屏，1.0.1 候选源码已通过用户验收](AGS-0002-macos-tray-display.md) |
+## 1. 当前活跃工程单（Active）
 
-## 目录与文档分工
+| 编号 | 类型 | 状态 | 平台 | 来源 | 模块 | 摘要与当前卡点 |
+| --- | --- | --- | --- | --- | --- | --- |
+| [AGS-0001](AGS-0001-antigravity-file-auth.md) | 缺陷 | `待验收` | macOS | local | Antigravity 凭据 | CLI 认证文件并存时的保存、切换与长凭据迁移；隔离回归已过，待双测试账号真机往返核验 |
+| [AGS-0003](AGS-0003-desktop-only-accounts.md) | 架构 | `待分析` | 全平台 | local | 桌面端发现 | 只装官方桌面版（未单装 CLI）时，各 Agent 账号读取、切换与额度能力边界梳理 |
+| [AGS-0008](AGS-0008-windows-runtime-and-sandbox.md) | 缺陷/架构 | `待验收` | Windows | local | 沙箱与多平台底座 | Windows 受限令牌沙箱、进程容错与多平台拆文件解耦；源码返修已过，待 Windows 10/11 真机验收 |
+| [AGS-0009](AGS-0009-windows-codex-desktop-support.md) | 缺陷 | `待验收` | Windows | local | Codex 桌面端 | Windows 仅装商店版 Codex 桌面端时的内置 CLI 发现、关窗等待与按原安装重开；待 Windows 真机验收 |
+| [AGS-0016](AGS-0016-release-0.1.0-and-one-click-install.md) | 需求/发布 | `待验收` | 全平台 | local | 更新与分发 | 版本体系回调至 `0.1.0`、历史 `1.0.x` 防回跳保护与官网跨平台一键安装脚本（`install.sh` / `install.ps1`） |
 
-- 每个独立问题使用单文件 `AGS-四位编号-简短描述.md`；仅在确需保留报错截图、复杂复现样本等附件时，按需创建 `assets/AGS-四位编号/`。
-- `issues/` 记录单次问题的现象、根因、方案取舍、代码量账目与验收证据，关闭后归档备查。
-- 修复改变了正式流程、平台能力或界面约定时，须在修复阶段同步更新 `docs/`（如 [账号管理流程](../docs/account-management.md)、[界面设计约定](../docs/ui-design.md)），不在 `docs/` 中堆叠历史问题排查过程。
-- 开源后通过 [GitHub Issues](https://github.com/xjzc-mt/agent-switcher/issues) 收集反馈。维护者核对后将线上链接补入对应文件元信息，并在线上回复本地编号；本地编号可关联多份重复反馈，GitHub 自有编号独立保留。
+## 2. 线上 GitHub Issues 分流映射（Online Inbox）
 
-## 状态流转与章节结构
+线上 Issues 是面向用户的原始反馈收件箱（可能一帖多事、重复反馈或纯咨询）；维护者核对后按「原子工程闭环」拆入本地 `AGS-xxxx`（1 对多或多对 1），无需改代码的咨询/不采纳项直接在线上回复关闭，不建本地单。
 
-| 状态 | 含义 | 下一步动作 |
-| --- | --- | --- |
-| `待分析` | 已记录现象、环境与复现步骤，尚未敲定修复方案 | 排查根因，补齐第 2 节并改为 `待修复` |
-| `待修复` | 根因、修复方案、代码量基线与验收标准已明确 | 按方案实现、自测、填第 3 节并改为 `待验收` |
-| `待验收` | 代码、测试与文档已就位，等待独立会话或维护者验收 | 复核 diff、运行测试并完成真机核验，填第 4 节 |
-| `已关闭` | 验收通过（未通过则退回 `待修复` 并注明原因） | 发版后补注版本号，同步更新本页总表与线上 Issue |
+| GitHub Issue | 线上状态 | 反馈摘要 | 关联本地单 / 落地情况 | 线上关单条件 |
+| --- | --- | --- | --- | --- |
+| [#1 提几个建议](https://github.com/xjzc-mt/agent-switcher/issues/1) | `open` | ①隐藏未完成入口 ②列表宽度自适应 ③名称列加宽 ④在线更新 ⑤支持代理 ⑥下载链接 | ①~④、⑥ 已在 `1.0.1` 上线；⑤ macOS 已支持、Windows 本机代理随 [AGS-0008](AGS-0008-windows-runtime-and-sandbox.md) 待发版 | 下一版本发布后汇总回复各项落地情况并关闭 `#1` |
+| [#3 正常号和异常号 UI 没对齐 + 定期刷新间隔配置](https://github.com/xjzc-mt/agent-switcher/issues/3) | `open` | ① 正常双栏卡与单行凭据失效卡底边未对齐<br>② 建议增加可配置的定期刷新间隔 | [AGS-0010](archive/AGS-0010-expired-account-group-and-alignment.md) 与 [AGS-0011](archive/AGS-0011-configurable-quota-refresh-interval.md) 均已验收归档 | 随下一版本发布后回复版本号并关闭 `#3` |
 
-单个问题文件固定包含头部元信息与四个顺序章节：
+## 3. 已关闭归档索引（Archive）
 
-1. **现象与复现**：复现步骤、实际与预期结果、影响面、现场已确认事实与待确认项。
-2. **根因与修复方案**：外部与内部根因定位、具体修改点、边界约束（不做什么）、按 [AGENTS.md](../AGENTS.md) 口径统计的基线与预计增删行数、可勾选验收清单。
-3. **修复记录**：实际改动摘要与偏离说明、同口径实际代码量统计、文档同步情况、已执行的自测命令与结果。
-4. **验收记录**：独立代码与边界复核意见、验收清单逐项核对结果（含真机验证记录）及最终结论。
+<details>
+<summary>已归档 11 项（位于 <code>issues/archive/</code>，点击展开）</summary>
 
-## 跨会话协作约束
+| 编号 | 来源 | 平台 | 关闭日期 / 版本 | 归档记录 |
+| --- | --- | --- | --- | --- |
+| AGS-0002 | local | macOS | 2026-11-20 (`v1.0.1`) | [双屏切换平台时小菜单跳屏](archive/AGS-0002-macos-tray-display.md) |
+| AGS-0004 | local | macOS | 2026-11-23 (`v0.1.0`) | [Antigravity 额度续期断层、长凭据切换重入与 macOS 钥匙串主线程阻塞](archive/AGS-0004-antigravity-quota-switch-flow.md) |
+| AGS-0005 | local | 全平台 | 2026-11-23 (`v0.1.0`) | [账号池跨锁并发竞态、孤儿明文临时目录残留与 Linux 密钥误报](archive/AGS-0005-credential-lock-and-temp-cleanup.md) |
+| AGS-0006 | local | 全平台 | 2026-11-23 (`v0.1.0`) | [桌面端样式双源冗余（CSP unsafe-inline）、原生菜单缺失与工程交互细节清理](archive/AGS-0006-desktop-ui-css-and-hygiene.md) |
+| AGS-0007 | local | 全平台 | 2026-11-23 (`v0.1.0`) | [账号编排层平台特判收口、底层重复原语合并与 UI 测试单进程提速](archive/AGS-0007-architecture-and-test-slimming.md) |
+| AGS-0010 | [GH #3](https://github.com/xjzc-mt/agent-switcher/issues/3) | 全平台 | 2026-11-24 (`v0.1.0`) | [凭据失效账号独立置底分组与备用卡片同行对齐](archive/AGS-0010-expired-account-group-and-alignment.md) |
+| AGS-0011 | [GH #3](https://github.com/xjzc-mt/agent-switcher/issues/3) | 全平台 | 2026-11-24 (`v0.1.0`) | [主备独立自动刷新时间间隔、四行紧凑等宽对齐与唤醒调度收敛](archive/AGS-0011-configurable-quota-refresh-interval.md) |
+| AGS-0012 | local | macOS / Win | 2026-11-24 (`v0.1.0`) | [应用内更新下载完成后自动安全退出、安装与重启](archive/AGS-0012-seamless-in-app-update-install.md) |
+| AGS-0013 | local | 全平台 | 2026-11-24 (`v0.1.0`) | [Codex 有效期内只读优先查额与挂起临时目录自动对账自愈](archive/AGS-0013-codex-quota-pending-recovery.md) |
+| AGS-0014 | local | macOS | 2026-11-24 (`v0.1.0`) | [macOS 菜单栏小菜单重设计：常驻展开、额度优先与定宽双列语义胶囊](archive/AGS-0014-macos-tray-redesign.md) |
+| AGS-0015 | local | 全平台 | 2026-11-25 (`v0.1.0`) | [Codex 查询失败精确分流自愈与账号详情恢复指引直出](archive/AGS-0015-codex-error-classification-and-detail-guidance.md) |
 
-1. **追加不篡改**：各阶段会话只填写对应章节并更新顶部状态与本页总表。修复会话如遇方案阻塞或范围明显扩大，先在「修复记录」说明或停下确认，不擅自修改第 2 节的方案与验收标准。
-2. **同口径对账**：方案预估与修复结项使用同一物理行数基线，区分业务源码、测试、开发脚本与文档，排除依赖、构建产物、生成文件及锁文件。
-3. **独立验收**：验收会话须对照第 2 节方案与工作区实际改动独立审查并执行验证，不单凭第 3 节自述关闭问题。
+</details>
+
+## 4. 维护规范与生命周期
+
+| 状态 | 目录位置 | 含义 | 下一步动作 |
+| --- | --- | --- | --- |
+| `待分析` | `issues/` | 已记录现象与环境，尚未敲定方案 | 排查根因，补齐第 2 节并改为 `待修复` |
+| `待修复` | `issues/` | 根因、具体方案、代码量预估与验收清单已锁定 | 编码实现、自测、填第 3 节并改为 `待验收` |
+| `待验收` | `issues/` | 代码、测试与文档已就位，等待独立复核或真机联验 | 独立审查 diff、跑测试与真机探测，填第 4 节 |
+| `已关闭` | `issues/archive/` | 验收通过（未通过则退回 `待修复`） | `git mv` 移入 `issues/archive/`（修正内部 `../` 相对链接为 `../../`），更新本页归档表；发版后同步关闭关联的线上 GitHub Issue |
+
+- **单文件四节固定结构**：头部元信息（状态、日期、平台、来源） + `1. 现象与复现` + `2. 根因与修复方案`（含边界约束、同口径代码量基线与预估、验收清单） + `3. 修复记录` + `4. 验收记录`。
+- **职责不重叠**：正式产品行为与架构规则同步沉淀至 `docs/`（如 [账号管理流程](../docs/account-management.md)、[界面设计约定](../docs/ui-design.md)）；具体问题与需求进度唯一以本页为准，不在 `docs/` 重复维护状态流水账。
+- **跨会话三原则**：① **追加不篡改**（各阶段只填对应章节，范围显著扩大先对齐再改）；② **同口径对账**（按 [AGENTS.md](../AGENTS.md) 物理行数分业务、测试、脚本、文档对账）；③ **独立验收**（对照第 2 节与真实运行环境独立核验，不单凭第 3 节自述关单）。

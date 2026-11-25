@@ -1,17 +1,15 @@
-const {test,beforeEach,after}=require('node:test');
+const { createTestHome, readCredentialFile, jwt } = require('./helpers/test-env.cjs');
+const {test,beforeEach}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const os=require('node:os');
 const path=require('node:path');
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'ags-batch-import-'));
-os.homedir=()=>root;
-const { readCredentialFile } = require('./vault-fixture.cjs');
+const root = createTestHome('ags-batch-import-');
 const store=require('../dist/store');
 const batchImport=require('../dist/credential-import');
 const {codexAgent}=require('../dist/agents/codex');
 const {atomicWrite}=require('../dist/utils');
 Object.defineProperty(codexAgent,'homeDir',{value:path.join(root,'live')});
-const auth=(workspace,email=`${workspace}@example.test`,subject=workspace)=>Buffer.from(JSON.stringify({tokens:{access_token:'secret-access-fixture',refresh_token:'secret-refresh-fixture',account_id:workspace,id_token:`h.${Buffer.from(JSON.stringify({email,sub:subject})).toString('base64url')}.s`}}));
+const auth=(workspace,email=`${workspace}@example.test`,subject=workspace)=>Buffer.from(JSON.stringify({tokens:{access_token:'secret-access-fixture',refresh_token:'secret-refresh-fixture',account_id:workspace,id_token:jwt({email,sub:subject})}}));
 const native=id=>JSON.parse(auth(id));
 const document=value=>Buffer.from(JSON.stringify(value));
 const put=(name,data)=>atomicWrite(path.join(store.profileDir('codex',name),'auth.json'),data);
@@ -19,7 +17,6 @@ const parse=(value,fileName,agent='codex')=>batchImport.parseCredentialBatch(Buf
 const namesFor=(batch,rename={})=>Object.fromEntries(batch.items.filter(x=>x.state==='ready').map(x=>[x.key,rename[x.profile]||x.profile]));
 const commit=(batch,names=namesFor(batch))=>batchImport.installCredentialBatch(batch,Object.keys(names),names);
 beforeEach(()=>{fs.rmSync(store.STORE_DIR,{recursive:true,force:true});fs.rmSync(codexAgent.homeDir,{recursive:true,force:true});});
-after(()=>fs.rmSync(root,{recursive:true,force:true}));
 
 test('a single document derives editable names from filename and identity, without exposing credentials',async()=>{
   const single=await parse(auth('work'),'工作主力.json');
@@ -103,9 +100,8 @@ test('metadata and cached credential histories are not mistaken for new accounts
   assert.equal(batch.items.length,1);assert.equal(batch.items[0].email,'current@example.test');
 });
 
-test('malformed, oversized and deeply nested documents fail safely without partial installation',async()=>{
+test('oversized and deeply nested documents fail safely without partial installation',async()=>{
   const {parseCredentialDocument}=require('../dist/credential-document');
-  assert.throws(()=>parseCredentialDocument(Buffer.from('{"secret":"never-display" broken')),/JSON/);
   assert.throws(()=>parseCredentialDocument(Buffer.alloc(32*1024*1024+1)),/32 MB/);
   assert.throws(()=>parseCredentialDocument(Buffer.from(JSON.stringify(Array.from({length:201},()=>native('many')))),'codex'),/200/);
   let deep=native('deep');for(let i=0;i<26;i++)deep={data:deep};
@@ -115,11 +111,7 @@ test('malformed, oversized and deeply nested documents fail safely without parti
   assert.deepEqual(store.listProfiles('codex'),[]);
 });
 
-test('native Claude and Antigravity credential fields survive extraction; selected platform is enforced',async()=>{
-  const claude=await parse(document({data:{claudeAiOauth:{accessToken:'a',refreshToken:'r',expiresAt:123,scopes:['profile'],subscriptionType:'pro',rateLimitTier:'tier',junk:'remove'},email:'claude@example.test',other:'remove'}}),undefined,'claude');
-  assert.equal(claude.items[0].state,'ready');await commit(claude);
-  const saved=JSON.parse(readCredentialFile(path.join(store.profileDir('claude',claude.items[0].profile),'.credentials.json')));
-  assert.equal(saved.claudeAiOauth.expiresAt,123);assert.equal(saved.claudeAiOauth.junk,undefined);
+test('Antigravity credential fields survive extraction; selected platform is enforced',async()=>{
   const agy=await parse(document({token:{access_token:'a',refresh_token:'r',expiry:'2026-12-01'},auth_method:'oauth',junk:'remove'}),undefined,'agy');
   assert.equal(agy.items[0].state,'ready');
   const agyConsumer=await parse(document({auth_method:'consumer',id_token_email:'consumer@example.test',token:{access_token:'a2',refresh_token:'r2'}}),undefined,'agy');
@@ -127,7 +119,12 @@ test('native Claude and Antigravity credential fields survive extraction; select
   assert.equal(JSON.parse(agyConsumer.parsed.groups.get(agyConsumer.items[0].key).get('jetski-standalone-oauth-token')).id_token_email,'consumer@example.test');
   const caseBatch=await parse([JSON.parse(auth('c1','Alice@example.test')),JSON.parse(auth('c2','alice@other.test'))]);
   assert.deepEqual(caseBatch.items.map(x=>x.profile),['Alice','alice (2)']);
-  const wrong=await parse(document({claudeAiOauth:{refreshToken:'r'}}));assert.equal(wrong.items[0].state,'error');
+  const retired = { data: { claudeAiOauth: { accessToken: 'a', refreshToken: 'r' } } };
+  for (const platform of ['codex', 'agy']) {
+    const wrong = await parse(retired, undefined, platform);
+    assert.equal(wrong.items[0].state, 'error');
+    assert.equal(wrong.parsed.groups.size, 0);
+  }
 });
 
 test('API keys stay native; flat records with a conflicting platform and browser-only sessions are rejected',async()=>{

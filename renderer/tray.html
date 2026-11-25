@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="theme.css">
   <link rel="stylesheet" href="tray.css">
   <script defer src="logos.js"></script>
+  <script defer src="account-policy.js"></script>
   <script defer src="tray.js"></script>
 </head>
 <body>
@@ -21,18 +22,19 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 9a8 8 0 0 0-13-4L3 9m0-5v5h5m-4 6a8 8 0 0 0 13 4l4-4m0 5v-5h-5"/></svg>
       </button>
     </header>
-    <div id="content" role="tabpanel" aria-labelledby="codex"></div>
-    <div id="switcher">
-      <button id="switch" aria-controls="choices" aria-expanded="false">
-        <span id="switchLabel">切换账号</span>
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
-      </button>
-      <div id="choices" role="group" aria-label="可切换账号" hidden></div>
-      <div class="panel-actions">
-        <button id="open">打开主窗口</button>
-        <button id="quit" aria-label="退出 AgentSwitcher">退出</button>
+    <section id="content" role="tabpanel" aria-labelledby="codex">
+      <div id="current"></div>
+      <div class="choice-heading choice-grid" id="choiceHeading" hidden>
+        <span id="choiceCount"></span><span>5h</span><span>7d</span>
       </div>
-    </div>
+      <div id="choices" role="group" aria-labelledby="choiceCount" hidden></div>
+      <button id="add" hidden>添加账号</button>
+      <div class="note empty" id="empty" hidden>暂无可切换账号</div>
+    </section>
+    <footer class="panel-actions">
+      <button id="open">打开主窗口</button>
+      <button id="quit" aria-label="退出 AgentSwitcher">退出</button>
+    </footer>
   </main>
 </body>
 </html>

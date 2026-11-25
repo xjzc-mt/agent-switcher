@@ -12,6 +12,13 @@ async function main() {
   if ((!windows && process.platform !== 'darwin') || !path.isAbsolute(exe || '') || !fs.statSync(exe).isFile() ||
       !['arm64', 'x64'].includes(arch) || arch !== process.arch) throw new Error('Expected an installed executable for the native runner architecture');
   if (windows) {
+    const archive = path.join(path.dirname(exe), 'resources', 'app.asar');
+    const manifest = JSON.parse(require('@electron/asar').extractFile(archive, 'dist/windows-helpers/sha256.json'));
+    for (const name of ['AgySandbox', 'AntigravityCredential', 'DesktopWindows']) {
+      const file = path.join(archive + '.unpacked', 'dist', 'windows-helpers', name + '.exe');
+      const digest = require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+      if (digest !== manifest[name]) throw new Error('Installed Windows helper failed integrity check: ' + name);
+    }
     const image = fs.readFileSync(exe);
     const header = image.readUInt32LE(0x3c);
     if (image.toString('ascii', header, header + 4) !== 'PE\0\0' || image.readUInt16LE(header + 4) !== 0x8664) {

@@ -1,23 +1,20 @@
-const outputPath = require('./ui-support.cjs');
-const {app,BrowserWindow}=require('electron');
-const assert=require('node:assert/strict');
-const fs=require('node:fs');
-const path=require('node:path');
-const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-app.whenReady().then(async()=>{
-  const w=new BrowserWindow({width:880,height:700,show:false,webPreferences:{preload:path.join(__dirname,'fixture-preload.cjs'),contextIsolation:true}});
-  const run=source=>w.webContents.executeJavaScript(source);
-  try{
-    await w.loadFile(path.join(__dirname,'../renderer/index.html'));await pause(150);
+const suite = require('./ui-support.cjs');
+const assert = require('node:assert/strict');
+
+module.exports = suite(
+  { width: 880, height: 700 },
+  async ({ window: w, run, load, pause, capture }) => {
+    await load();
     await run(`localStorage.clear();openSaveModal('codex');selectAddTab('session')`);
     const entry=await run(`(()=>{const text=$('sessionCredentials').getBoundingClientRect(),button=$('btnChooseSessionFile').getBoundingClientRect();return {below:button.top>text.bottom,fullWidth:Math.abs(text.width-button.width)<1};})()`);
     assert.deepEqual(entry,{below:true,fullWidth:true});
-    fs.writeFileSync(outputPath('credential-import-entry.png'),(await w.webContents.capturePage()).toPNG());
+    await capture('credential-import-entry.png');
     // Native form validation must not intercept choosing files with an empty textarea.
     await run(`window.testApi.setImportMode('canceled');$('btnChooseSessionFile').click()`);await pause(30);
-    assert.equal(await run(`!!addPreview`),false);
+    assert.equal(await run(`!!activeDialog.preview`),false);
     await run(`window.testApi.setImportMode('batch');$('btnChooseSessionFile').click()`);await pause(60);
-    assert.equal(await run(`addPreview.kind`),'credentials');
+    await run(`window.testApi.setImportMode('canceled'); chooseImportFile('credentials')`);
+    assert.equal(await run(`activeDialog.preview.kind`),'credentials', 'Canceling a picker must keep the open preview');
     assert.equal(await run(`$('sessionCredentials').required`),false);
     assert.equal(await run(`document.querySelectorAll('.credential-import-row').length`),4);
     assert.equal(await run(`document.querySelectorAll('[name="import-name"]').length`),2);
@@ -42,7 +39,7 @@ app.whenReady().then(async()=>{
     await run(`document.querySelectorAll('[name="account"]')[1].click()`);
     const measure=await run(`(()=>{const dialog=$('saveModalOverlay'),head=document.querySelector('.credential-import-head'),row=document.querySelector('.credential-import-row');return {overflow:dialog.scrollWidth>dialog.clientWidth+1,inside:dialog.getBoundingClientRect().bottom<=innerHeight,align:Math.abs(head.children[2].getBoundingClientRect().left-row.children[2].getBoundingClientRect().left)};})()`);
     assert.equal(measure.overflow,false);assert.equal(measure.inside,true);assert.ok(measure.align<=1);
-    fs.writeFileSync(outputPath('credential-batch-import.png'),(await w.webContents.capturePage()).toPNG());
+    await capture('credential-batch-import.png');
     await run(`$('addAccountForm').requestSubmit()`);await pause(100);
     assert.equal(await run(`$('saveModalOverlay').open`),false);
     const committed=await run(`window.testApi.calls().filter(call=>call.method==='import').at(-1)`);
@@ -61,7 +58,7 @@ app.whenReady().then(async()=>{
     assert.match(await run(`$('credentialImportSummary').textContent`),/1 个待新增 · 1 个待更新/);
     await run(`document.querySelector('[data-state="ready"] [name="account"]').click()`);
     assert.equal(await run(`$('btnConfirmSave').textContent`),'更新 1 个账号');
-    fs.writeFileSync(outputPath('credential-import-recovery.png'),(await w.webContents.capturePage()).toPNG());
+    await capture('credential-import-recovery.png');
     const refreshBefore=await run(`window.testApi.calls().filter(c=>c.method==='refresh').length`);
     await run(`submitAddAccount({preventDefault(){}})`);
     assert.match(await run(`$('toastBox').textContent`),/新增 0 个，更新 1 个，跳过重复 1 个/);
@@ -94,9 +91,8 @@ app.whenReady().then(async()=>{
     const scroll=await run(`(()=>{const list=document.querySelector('.credential-import-list');list.scrollTop=120;const h=document.querySelector('.credential-import-head').getBoundingClientRect(),r=list.getBoundingClientRect(),footer=$('btnConfirmSave').getBoundingClientRect();return {scroll:list.scrollHeight>list.clientHeight,sticky:Math.abs(h.top-r.top)<1,footer:footer.bottom<=innerHeight,overflow:$('saveModalOverlay').scrollWidth>$('saveModalOverlay').clientWidth+1};})()`);
     assert.deepEqual(scroll,{scroll:true,sticky:true,footer:true,overflow:false});
     await run(`$('btnAddBack').click()`);await pause(30);
-    assert.equal(await run(`!!addPreview`),false);
+    assert.equal(await run(`!!activeDialog.preview`),false);
     assert.equal(await run(`$('addPanel-session').hidden`),false);
     await run(`closeSaveModal();localStorage.clear()`);
-    console.log(JSON.stringify({passed:true,singleFileMultipleAccounts:true,inlineNames:true,duplicatesDisabled:true,expiredImportRecovery:true,expiredLoginRecovery:true,originalEntryLayout:true,summary:true,noSwitch:true,layout:true}));app.exit(0);
-  }catch(error){console.error(error);fs.writeFileSync(outputPath('ags-batch-ui-failure.png'),(await w.webContents.capturePage()).toPNG());app.exit(1);}
-});
+  },
+);

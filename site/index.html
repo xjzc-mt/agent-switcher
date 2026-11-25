@@ -193,7 +193,7 @@
           <div class="section-head">
             <h2 data-i18n="features.title">顺手完成三件高频小事</h2>
             <p data-i18n="features.subtitle">
-              在 Mac 上，点击右上角的 AGS 图标可查看当前额度，悬停「切换账号」即可选择备用账号。
+              在 Mac 上，点击右上角的 AGS 图标可查看当前额度，并从菜单中选择备用账号。
             </p>
           </div>
 
@@ -399,21 +399,11 @@
                         macOS 上的 Antigravity 2.x 支持个人 Google 账号登录、保存、切换和模型组额度查询，需官方 agy CLI。企业认证尚未验证。
                       </td>
                     </tr>
-                    <tr>
-                      <td>
-                        <strong>Claude Code</strong>
-                        <span class="code-sub">claude</span>
-                      </td>
-                      <td><span class="status-badge status-planned" data-i18n="support.planned">规划中</span></td>
-                      <td data-i18n="support.claudeDesc">
-                        账号激活和额度查询仍在规划中，桌面入口暂未开放。
-                      </td>
-                    </tr>
                   </tbody>
                 </table>
               </div>
               <p class="panel-foot" data-i18n="support.foot">
-                1.0.1 的两款 Mac 安装包已在对应芯片上启动验证，Windows x64 已验证安装、启动和卸载。Windows 的 Codex 登录、切换与额度，以及 Mac 的 Antigravity 双账号往返切换和跨续期刷新，仍待真实账号验证。
+                0.1.0 的两款 Mac 安装包已在对应芯片上启动验证，Windows x64 已验证安装、启动和卸载。Mac 上个人 Antigravity 账号已在桌面保持打开的状态下连续两次跨期刷新额度；Mac 双账号往返和 Windows 实机全流程待独立验收。
               </p>
             </div>
           </div>
@@ -425,7 +415,7 @@
           <div class="section-head">
             <h2 data-i18n="install.title">下载与快速安装</h2>
             <p data-i18n="install.subtitle">
-              Mac 版需要 macOS 13 或更高版本。可在「关于本机」查看芯片，后续在 AGS 设置中下载更新。Windows x64 用户可在此下载新版安装程序。
+              Mac 版需要 macOS 13 或更高版本。推荐使用一行终端命令自动识别芯片并校验安装，或直接下载对应安装包；安装后 macOS 与 Windows x64 均可在「设置 → 应用与更新」一键升级。
             </p>
           </div>
 
@@ -433,12 +423,42 @@
             <div class="panel install-primary">
               <div class="install-head">
                 <div>
-                  <h3 class="panel-title" data-i18n="install.desktopTitle">桌面版安装包</h3>
+                  <h3 class="panel-title" data-i18n="install.desktopTitle">一键安装与桌面安装包</h3>
                   <p class="install-meta" id="releaseMeta" data-i18n="install.releaseFallback">
-                    可在 GitHub Releases 查看已发布的安装包。
+                    可在下方复制一键安装命令，或在 GitHub Releases 查看安装包。
                   </p>
                 </div>
                 <span class="version-pill" id="installVersionPill" hidden></span>
+              </div>
+
+              <div class="code-box">
+                <div class="code-box-head">
+                  <span data-i18n="install.macCmdLabel">macOS 终端一键安装（自动识别芯片并校验签名）</span>
+                  <button
+                    type="button"
+                    class="copy-btn"
+                    data-copy="curl -fsSL https://xjzc-mt.github.io/agent-switcher/install.sh | bash"
+                    data-i18n="common.copy"
+                  >
+                    复制
+                  </button>
+                </div>
+                <pre><code>curl -fsSL https://xjzc-mt.github.io/agent-switcher/install.sh | bash</code></pre>
+              </div>
+
+              <div class="code-box">
+                <div class="code-box-head">
+                  <span data-i18n="install.winCmdLabel">Windows PowerShell 一键安装（x64）</span>
+                  <button
+                    type="button"
+                    class="copy-btn"
+                    data-copy="irm https://xjzc-mt.github.io/agent-switcher/install.ps1 | iex"
+                    data-i18n="common.copy"
+                  >
+                    复制
+                  </button>
+                </div>
+                <pre><code>irm https://xjzc-mt.github.io/agent-switcher/install.ps1 | iex</code></pre>
               </div>
 
               <div class="install-actions">
@@ -457,15 +477,15 @@
               </div>
 
               <div class="notice-box">
-                <strong data-i18n="install.gatekeeperTitle">macOS 首次打开提示「无法验证开发者」？</strong>
+                <strong data-i18n="install.gatekeeperTitle">手动下载 DMG 首次打开提示「无法验证开发者」？</strong>
                 <p data-i18n="install.gatekeeperDesc">
-                  Mac 安装包采用 ad-hoc 签名，尚未经 Apple 公证。核对下载来源后，可在「系统设置 → 隐私与安全性」中点击「仍要打开」。
+                  Mac 安装包采用 ad-hoc 签名，尚未经 Apple 公证。使用上方终端命令安装会自动校验签名清单；若手动拖入 DMG，核对 SHA256SUMS 后可在「系统设置 → 隐私与安全性」点击「仍要打开」。
                 </p>
               </div>
 
               <div class="code-box">
                 <div class="code-box-head">
-                  <span data-i18n="install.verifyLabel">macOS：将输出与同版 SHA256SUMS 对照</span>
+                  <span data-i18n="install.verifyLabel">手动下载：将输出与同版 SHA256SUMS 对照</span>
                   <button
                     type="button"
                     class="copy-btn"
@@ -532,7 +552,7 @@ ags use codex work    # 切换至指定账号</code></pre>
               <div>
                 <h2 data-i18n="gate.title">门后的彩蛋</h2>
                 <p class="gate-lead" data-i18n="gate.lead">
-                  顶部那扇「AGI 之门」下，人与众 Agent 并肩、人与人彼此托举——AgentSwitcher v1.0 只是序章。
+                  顶部那扇「AGI 之门」下，人与众 Agent 并肩、人与人彼此托举——AgentSwitcher 只是序章。
                 </p>
               </div>
             </div>

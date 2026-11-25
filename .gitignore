@@ -26,3 +26,6 @@ release/
 # Generated UI captures and isolated Electron test data
 test-results/
 artifacts/
+
+# Local design studies
+assets/icon-candidates/

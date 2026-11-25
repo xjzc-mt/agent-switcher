@@ -1,9 +1,10 @@
+const { createTestHome } = require('./helpers/test-env.cjs');
+const locks = require('../dist/file-lock');
 const { test, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const childProcess = require('node:child_process');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-vault-test-'));
-os.homedir = () => root;
+const root = createTestHome('ags-vault-test-', { mockKeychain: false });
 const vault = require('../dist/credential-vault');
 const { atomicWrite, readBuffer, readJsonFile } = require('../dist/utils');
 const pool = path.join(root, '.agent-switcher');
@@ -65,8 +66,8 @@ test('encrypted staged imports and renamed profiles remain readable without rebi
   fs.renameSync(path.dirname(file()), path.dirname(file('renamed')));
   assert.deepEqual(readBuffer(file('renamed')), auth);
   assert.deepEqual(fs.readFileSync(file('renamed')), bytes);
-  rawWrite(file('other', 'claude', '.credentials.json'), bytes);
-  assert.throws(() => readBuffer(file('other', 'claude', '.credentials.json')), /校验失败/);
+  rawWrite(file('other', 'agy', 'jetski-standalone-oauth-token'), bytes);
+  assert.throws(() => readBuffer(file('other', 'agy', 'jetski-standalone-oauth-token')), /校验失败/);
 });
 
 test('legacy migration verifies each encrypted disk copy before replacing its original', () => {
@@ -109,8 +110,25 @@ test('key loss blocks writes while already unlocked reads remain available for r
   assert.deepEqual(fs.readFileSync(file()), encrypted);
   assert.equal(fs.existsSync(file('B')), false);
   const resetSession = vault.setCredentialKeyProvider({ read: () => null, create: () => { throw new Error('must not recreate'); } });
-  try { assert.throws(() => readJsonFile(file()), /密钥不存在/); }
+  try {
+    assert.throws(() => readJsonFile(file()), /密钥不存在/);
+    const retired = file('old-preview', 'agy', '.unknown-encrypted-record');
+    rawWrite(retired, encrypted);
+    fs.unlinkSync(file());
+    assert.throws(() => atomicWrite(file('B'), auth), /密钥不存在/);
+    assert.deepEqual(fs.readFileSync(retired), encrypted);
+  }
   finally { resetSession(); }
+});
+
+test('retired profiles are ignored during migration and still protect their missing vault key', () => {
+  const retired = file('previous', 'claude', '.credentials.json');
+  const old = Buffer.from('AGS-CREDENTIALS-1\nretained backup');
+  rawWrite(retired, old);
+  assert.deepEqual(vault.migrateCredentialPool(), { migrated: 0 });
+  assert.throws(() => atomicWrite(file(), auth), /密钥不存在/);
+  assert.equal(creations, 0);
+  assert.deepEqual(fs.readFileSync(retired), old);
 });
 
 test('replaced key and damaged ciphertext cannot silently overwrite an existing generation', () => {
@@ -224,12 +242,12 @@ test('EPERM keeps an active or unobservable lock owner and only evicts a confirm
       if (!processInfo) throw new Error('process information unavailable');
       return processInfo;
     };
-    assert.equal(vault.evictDeadLock(lock), false);
+    assert.equal(locks.evictDeadLock(lock), false);
     processInfo = `${process.getuid()} Thu Jan 1 00:00:00 1970`;
-    assert.equal(vault.evictDeadLock(lock), false);
+    assert.equal(locks.evictDeadLock(lock), false);
     assert.ok(fs.existsSync(path.join(lock, 'owner')));
     processInfo = `${process.getuid() + 1} Thu Jan 1 00:00:00 1970`;
-    assert.equal(vault.evictDeadLock(lock), true);
+    assert.equal(locks.evictDeadLock(lock), true);
     assert.equal(fs.existsSync(lock), false);
   } finally { process.kill = kill; childProcess.execFileSync = ps; }
 });
@@ -334,4 +352,21 @@ test('macOS system provider uses stdin and verifies the saved key without overwr
     assert.equal(calls.filter(call => call.args[0] === '-i').length, 1);
     for (const call of calls) assert.equal(call.args.join(' ').includes(systemKey), false);
   } finally { childProcess.execFileSync = exec; }
+});
+
+test('Linux key lookup distinguishes a missing key from an inaccessible keyring', t => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'linux' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  restore(); restore = undefined;
+  rawWrite(file(), Buffer.from('AGS-CREDENTIALS-1\nfixture'));
+  let stderr = 'No D-Bus session';
+  t.mock.method(childProcess, 'execFileSync', (cmd, args) => {
+    assert.equal(cmd, 'secret-tool'); assert.equal(args[0], 'lookup');
+    throw Object.assign(new Error('lookup failed'), { status: 1, stderr });
+  });
+  assert.throws(() => atomicWrite(file('B'), auth), /无法读取系统安全存储.*解锁/);
+  stderr = '';
+  assert.throws(() => atomicWrite(file('B'), auth), /密钥不存在/);
+  assert.equal(fs.existsSync(file('B')), false);
 });

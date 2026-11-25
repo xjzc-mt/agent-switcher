@@ -8,6 +8,8 @@ const flags: Record<string, string> = {
   'com.google.Chrome.beta': '--incognito',
   'com.google.Chrome.dev': '--incognito',
   'com.google.Chrome.canary': '--incognito',
+  'company.thebrowser.Browser': '--incognito',
+  'com.vivaldi.Vivaldi': '--incognito',
   'org.chromium.Chromium': '--incognito',
   'com.brave.Browser': '--incognito',
   'com.brave.Browser.beta': '--incognito',

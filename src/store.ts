@@ -1,13 +1,13 @@
+import { agentMetadata } from './agents/metadata';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
 import { atomicWrite, ensureDir, fingerprint, readJsonFile } from './utils';
-import { tryAcquireAtomicLock, evictDeadLock, releaseAtomicLock } from './credential-vault';
+import { tryClaimFileLock, withFileLock, releaseAtomicLock } from './file-lock';
 import type { StatusResult } from './agents/base';
 
 export const STORE_DIR = path.join(os.homedir(), '.agent-switcher');
-export const AGENT_IDS = ['codex', 'claude', 'agy'];
 const META_FILE = path.join(STORE_DIR, 'meta.json');
 export const PENDING_RENAME_FILE = path.join(STORE_DIR, '.pending-rename.json');
 export interface Meta { version: number; activeProfiles: Record<string, string> }
@@ -26,8 +26,10 @@ export interface ProfileMeta {
   quotaNote?: string;
   email?: string;
   savedAt?: string;
+  /** Exact client generation that still needs the newly verified pool credential applied. */
+  pendingLiveRevision?: string;
   snapshot?: StatusResult;
-  stagedCheck?: { revision: string; checkedAt: string };
+  stagedCheck?: { revision: string; checkedAt: string; sourcesUnavailable?: boolean };
 }
 
 export const profileNameError: (name: string, portable?: boolean) => string = require('../renderer/profile-name.js');
@@ -38,12 +40,17 @@ export function validateName(name: string, portable = true): void {
   if (error) throw new Error(error);
 }
 
+/** Older pools can contain names that are valid only on the current filesystem. */
+export function validatePoolName(name: string, existing: boolean): void {
+  validateName(name, !existing || process.platform === 'win32');
+}
+
 let reconcilingRename = false;
 let activeInProcessRename = false;
 export function setInProcessRename(active: boolean): void { activeInProcessRename = active; }
 
 function platformDirectory(agentId: string): string {
-  if (!AGENT_IDS.includes(agentId)) throw new Error('未知平台');
+  if (!Object.hasOwn(agentMetadata, agentId)) throw new Error('未知平台');
   const directory = path.join(STORE_DIR, agentId);
   for (const entry of [STORE_DIR, directory]) {
     if (fs.lstatSync(entry, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('账号目录不能是符号链接');
@@ -59,9 +66,7 @@ function reconcilePendingRename(holdsStoreLock = false): void {
   let owner: string | null = null;
   if (!holdsStoreLock) {
     // Readers may recover a crashed writer, but may never advance a live transaction.
-    const acquire = () => tryAcquireAtomicLock(lock, String(process.pid));
-    owner = acquire();
-    if (!owner && evictDeadLock(lock)) owner = acquire();
+    owner = tryClaimFileLock(lock, String(process.pid));
     if (!owner) return;
   }
   reconcilingRename = true;
@@ -73,7 +78,7 @@ function reconcilePendingRename(holdsStoreLock = false): void {
     // Older versions prefixed the temporary name with the original profile name.
     const suffix = typeof pending?.oldName === 'string' && typeof pending.hopName === 'string' && pending.hopName.startsWith(pending.oldName + '.rename-')
       ? pending.hopName.slice(pending.oldName.length) : pending?.hopName;
-    if (!pending || !AGENT_IDS.includes(pending.agentId) || !validProfileName(pending.oldName) || !validProfileName(pending.newName) ||
+    if (!pending || !Object.hasOwn(agentMetadata, pending.agentId) || !validProfileName(pending.oldName) || !validProfileName(pending.newName) ||
         !sameProfileName(pending.oldName, pending.newName) || pending.oldName === pending.newName ||
         typeof suffix !== 'string' || !/^\.rename-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(suffix)) {
       retainRecord();
@@ -121,7 +126,7 @@ function reconcilePendingRename(holdsStoreLock = false): void {
 export function profileDir(agentId: string, name: string): string {
   const directory = platformDirectory(agentId);
   reconcilePendingRename();
-  validateName(name, process.platform === 'win32');
+  validatePoolName(name, true);
   const dir = path.join(directory, name);
   const entry = fs.lstatSync(dir, { throwIfNoEntry: false });
   if (entry?.isSymbolicLink()) throw new Error('账号目录不能是符号链接');
@@ -179,18 +184,8 @@ export async function withStoreLock<T>(work: () => Promise<T>, quotaIdentity?: s
     try { fs.fchmodSync(fd, 0o700); } finally { fs.closeSync(fd); }
   }
   const lock = path.join(STORE_DIR, quotaIdentity === undefined ? '.lock' : '.quota-' + fingerprint(quotaIdentity));
-  const payload = `${process.pid}\n${randomUUID()}`;
-  const deadline = Date.now() + 20000;
-  let ownerId: string | null = null;
-  while (true) {
-    ownerId = tryAcquireAtomicLock(lock, payload);
-    if (ownerId !== null) break;
-    const evicted = evictDeadLock(lock);
-    if (Date.now() > deadline) throw new Error('另一个账号操作仍在进行，请稍后重试');
-    if (!evicted) await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  try {
+  return withFileLock(lock, async () => {
     if (quotaIdentity === undefined) reconcilePendingRename(true);
     return await work();
-  } finally { releaseAtomicLock(lock, ownerId); }
+  }, quotaIdentity === undefined ? undefined : 5 * 60000); // The identity owner can run ACP, /usage and one generation retry.
 }

@@ -1,13 +1,10 @@
-const { accessToken } = require('./codex-token-fixture.cjs');
-const { test, beforeEach, after } = require('node:test');
+const { createTestHome, readCredentialFile, jwt, accessToken } = require('./helpers/test-env.cjs');
+const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-refresh-coordination-'));
-os.homedir = () => root;
-const { readCredentialFile } = require('./vault-fixture.cjs');
+const root = createTestHome('ags-refresh-coordination-');
 const store = require('../dist/store');
 const accounts = require('../dist/accounts');
 const { codexAgent: agent, CodexQueryError } = require('../dist/agents/codex');
@@ -17,7 +14,7 @@ const success = () => ({ rates: { rateLimits: { primary: { usedPercent: 20 } } }
 function put(name, token = 'first') {
   atomicWrite(path.join(store.profileDir('codex', name), 'auth.json'), JSON.stringify({
     tokens: { account_id: 'fixture-workspace', access_token: accessToken('fixture-workspace','fixture-user'), refresh_token: token,
-      id_token: 'h.' + Buffer.from(JSON.stringify({ sub: 'fixture-user' })).toString('base64url') + '.s' },
+      id_token: jwt({ sub: 'fixture-user' }) },
   }));
 }
 beforeEach(t => {
@@ -25,7 +22,40 @@ beforeEach(t => {
   fs.rmSync(store.STORE_DIR, { recursive: true, force: true });
   agent.queryLiveRpc = async () => success();
 });
-after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+test('an unreadable native login source prevents spare and staged renewal even with the official clients closed', { skip: process.platform !== 'darwin' }, async t => {
+  const native = require('../dist/antigravity-native');
+  const { AntigravityAgent } = require('../dist/agents/antigravity');
+  const agy = new AntigravityAgent(() => 'unified', true), file = agy.authFiles[0];
+  const token = login => Buffer.from(JSON.stringify({ auth_method: 'consumer', id_token_email: login + '@example.test',
+    token: { access_token: 'access-' + login, refresh_token: 'refresh-' + login } }));
+  const spare = token('spare'), live = token('desktop');
+  let denied = true;
+  t.mock.method(native, 'readNativeToken', () => { if (denied) throw Error('unavailable'); return live; });
+  t.mock.method(require('../dist/clients'), 'runningClients', async () => []);
+  t.mock.method(native, 'sharedAntigravitySessions', async () => []);
+  const requests = [];
+  t.mock.method(agy, 'queryCredential', async (_original, options) => {
+    requests.push({ rotates: options.allowRefresh, staged: !!options.verifyTarget });
+    return { status: { available: true, state: 'unverified' } };
+  });
+  const cliFile = path.join(agy.homeDir, 'antigravity-cli', 'antigravity-oauth-token');
+  for (const scenario of ['keychain', 'cli-file']) {
+    if (scenario === 'cli-file') { denied = false; atomicWrite(cliFile, '{'); }
+    const dir = store.profileDir('agy', scenario);
+    atomicWrite(path.join(dir, file), spare);
+    await accounts.refreshAccount(agy, scenario, true);
+    const staged = path.join(dir, file + '.pending');
+    atomicWrite(staged, spare);
+    const status = await accounts.refreshAccount(agy, scenario, true);
+    assert.equal(status.stagedReplacement, true);
+    assert.match(status.extra, /读取|确认.*登录来源/);
+    assert.deepEqual(agy.readCredentials(dir)[file], spare);
+    assert.equal(fs.existsSync(staged), true);
+  }
+  assert.deepEqual(requests, [{ rotates: false, staged: false }, { rotates: false, staged: false }]);
+  fs.rmSync(cliFile);
+});
 
 test('manual refresh reuses a completed query for 30 seconds without extending its age', async t => {
   put('A');
@@ -43,6 +73,8 @@ test('manual refresh reuses a completed query for 30 seconds without extending i
   const changed = accounts.dashboard()[0].profiles.find(profile => profile.name === 'A');
   assert.equal(changed.meta.snapshot.state, 'unverified');
   assert.ok(changed.refreshAt <= Date.now());
+  fs.mkdirSync(path.join(store.STORE_DIR, 'settings.json')); // Unreadable preferences must preserve local status and explicit refresh.
+  assert.equal(accounts.dashboard()[0].profiles.find(p => p.name === 'A').refreshAt, Infinity);
   agent.queryLiveRpc = async () => { queries++; return success(); };
   assert.notEqual((await accounts.refreshAccount(agent, 'A', true)).credentialRevision, first.credentialRevision);
   assert.equal(queries, 3);
@@ -65,7 +97,13 @@ test('failed queries retain quota history and back off; manual recovery clears f
   assert.equal(queries, 1);
   assert.equal((await accounts.refreshAccount(agent, 'A', true)).refreshFailures, 2);
   assert.equal(queries, 2);
+  const settings = require('../dist/settings');
+  await settings.saveSettings({ ...settings.readSettings(), spareRefreshInterval: '30m' });
+  const account = accounts.dashboard()[0].profiles.find(p => p.name === 'A');
+  assert.equal(account.refreshAt, Date.parse(account.meta.snapshot.checkedAt) + 1800000);
   t.mock.timers.tick(300000);
+  assert.equal((await accounts.refreshAccount(agent, 'A')).refreshFailures, 2);
+  t.mock.timers.tick(1500000);
   assert.equal((await accounts.refreshAccount(agent, 'A')).refreshFailures, 3);
   t.mock.timers.tick(30000);
   agent.queryLiveRpc = async () => success();
@@ -79,7 +117,7 @@ test('renaming an account and restarting the backend preserve the cooldown', asy
   await accounts.renameAccount(agent, 'A', 'renamed');
   const script = `
     require('node:os').homedir = () => process.argv[1];
-    require('./tests/vault-fixture.cjs');
+    require('./tests/helpers/test-env.cjs').installMockKeychain();
     Date.now = () => 2000000000001;
     const { codexAgent } = require('./dist/agents/codex');
     Object.defineProperty(codexAgent, 'homeDir', { value: require('node:path').join(process.argv[1], 'live') });
@@ -170,9 +208,19 @@ test('a switch backup and a newer same-email login refresh their own credentials
   assert.deepEqual(reads, ['access-first']);
   assert.deepEqual(rotations, []);
 
-  live = token(email, 'official-renewal', 120);
+  const independent = JSON.parse(token(email, 'independent', 120));
+  independent.expiry = independent.token.expiry;
+  delete independent.token.expiry;
+  live = Buffer.from(JSON.stringify(independent));
+  assert.equal(require('../dist/credential-state').credentialState(agy).updatedAt, Date.parse(independent.expiry));
   await accounts.refreshAccount(agy, 'Personal');
-  assert.deepEqual(reads, ['access-first', 'access-official-renewal']);
+  assert.deepEqual(reads, ['access-first', 'access-independent']);
+  assert.deepEqual(saved('Personal'), current, 'A later expiry cannot join independent logins');
+  const renewed = JSON.parse(token(email, 'second', 120));
+  renewed.token.access_token = 'access-official-renewal';
+  live = Buffer.from(JSON.stringify(renewed));
+  await accounts.refreshAccount(agy, 'Personal');
+  assert.equal(reads.at(-1), 'access-official-renewal');
   assert.deepEqual(saved('Personal'), live);
   assert.deepEqual(saved(backup), previous);
   const official = live;
@@ -221,7 +269,22 @@ test('a switch backup and a newer same-email login refresh their own credentials
   assert.deepEqual(saved('Personal'), official);
 
   busy = true;
-  const incomplete = JSON.parse(token(email, 'official-renewal', 180));
+  t.mock.method(native, 'readSharedQuotaLogin', bytes => bytes.equals(live) ? live : undefined);
+  const shared = t.mock.method(cli, 'querySharedUsage', async () => { live = token(email, 'independent-running', 60); return usage; });
+  t.mock.timers.tick(30000);
+  assert.equal((await accounts.refreshAccount(agy, panel().active, true)).state, 'ok');
+  assert.equal(reads.at(-1), 'access-undated-login');
+  assert.equal(shared.mock.callCount(), 0, 'An undated bearer from the confirmed live source can be tried directly');
+  live = token(email, 'independent-running', -1);
+  const fresh = await accounts.refreshAccount(agy, panel().active, true);
+  assert.equal(fresh.state, 'ok');
+  assert.equal(reads.at(-1), 'access-undated-login', 'the verified shared CLI result does not repeat /usage');
+  assert.equal(shared.mock.callCount(), 1);
+  assert.equal((await accounts.refreshAccount(agy, panel().active, true)).checkedAt, fresh.checkedAt);
+  assert.deepEqual(saved('Personal'), official);
+  assert.deepEqual(store.readProfileMeta('agy', 'Personal').snapshot, stored);
+  assert.deepEqual(rotations, ['refresh-first']);
+  const incomplete = JSON.parse(token(email, 'second', 180));
   delete incomplete.token.access_token;
   const withoutAccess = Buffer.from(JSON.stringify(incomplete));
   live = withoutAccess;
@@ -233,11 +296,18 @@ test('a switch backup and a newer same-email login refresh their own credentials
 
   busy = false;
   t.mock.timers.tick(30000);
-  live = token(email, 'official-renewal', -5);
+  live = token(email, 'second', -5);
   let renewals = 0;
   cli.queryIsolatedUsage = async bytes => { renewals++; return { data: usage, rotated: bytes }; };
   assert.equal((await accounts.refreshAccount(agy, 'Personal', true)).state, 'ok');
   assert.equal(renewals, 1, 'A different bearer date on the same login must not permanently block renewal');
+
+  const outgoing = Buffer.from(JSON.stringify(independent));
+  live = outgoing;
+  await assert.rejects(accounts.useAccount(agy, 'Other'), /明确选择/);
+  await accounts.useAccount(agy, 'Other', { saveUnmanaged: true });
+  assert.deepEqual(saved('Personal'), official);
+  assert.ok(store.listProfiles('agy').some(name => saved(name).equals(outgoing)), 'The independent outgoing login has its own backup');
 
   busy = true;
   live = token('desktop@example.test', 'desktop', 60);
@@ -248,4 +318,5 @@ test('a switch backup and a newer same-email login refresh their own credentials
   assert.equal((await accounts.refreshAccount(agy, backup, true)).state, 'ok');
   assert.equal(reads.at(-1), 'access-first-renewed');
   assert.equal(renewals, 1);
+  assert.equal(shared.mock.callCount(), 1, 'The spare never runs a query against the official login');
 });

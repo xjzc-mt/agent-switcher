@@ -1,15 +1,13 @@
-const { accessToken } = require('./codex-token-fixture.cjs');
-const { test, after } = require('node:test');
+const { mockKeychainCommands, createTestHome, installMockKeychain, readCredentialFile, jwt, accessToken } = require('./helpers/test-env.cjs');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
 const { pathToFileURL } = require('node:url');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-import-ipc-'));
-os.homedir = () => root;
+const root = createTestHome('ags-import-ipc-', { mockKeychain: false });
 const { readNativeToken: realReadNative, writeNativeToken: realWriteNative } = require('../dist/antigravity-native');
-const { readCredentialFile } = require('./vault-fixture.cjs');
+installMockKeychain();
 const channels = new Map();
 const appEvents = new Map(), openedUrls = [], confirmations = [], quitErrors = [];
 let quitCount = 0, confirmationResponse = 0;
@@ -46,7 +44,6 @@ const store = require('../dist/store');
 const { codexAgent } = require('../dist/agents/codex');
 Object.defineProperty(codexAgent,'homeDir',{value:path.join(root,'live')});
 const { atomicWrite } = require('../dist/utils');
-after(() => fs.rmSync(root,{recursive:true,force:true}));
 
 test('unsupported account switching is rejected before inspecting or quitting running clients',async()=>{
   const agent=require('../dist/accounts').resolveAgent('agy');
@@ -61,12 +58,10 @@ test('unsupported account switching is rejected before inspecting or quitting ru
   } finally {agent.switchSupport=previousSupport;clients.runningClients=previousRunning;}
 });
 test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C or marker active state flips during final async session check', { skip: process.platform !== 'darwin' }, async t => {
-  const childProcess = require('node:child_process');
   const native = require('../dist/antigravity-native');
   const clients = require('../dist/clients');
   const accounts = require('../dist/accounts');
   const agyAgent = accounts.resolveAgent('agy');
-  const prevExec = childProcess.execFileSync;
   const prevReadNative = native.readNativeToken;
   const prevWriteNative = native.writeNativeToken;
   const prevRunning = clients.runningClients;
@@ -82,27 +77,8 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
     id_token_email: email,
     token: { access_token: `a-${email}-${gen}`, refresh_token: `r-${email}-${gen}`, expiry: new Date(1795000000000 + gen * 60000).toISOString() },
   }));
-  let kcStored = 'go-keyring-base64:' + makeTok('kc-a@example.test', 1).toString('base64');
-  childProcess.execFileSync = (cmd, args, opts) => {
-    if (cmd === '/usr/bin/osascript') {
-      if (args.some(arg => String(arg).includes('SecItemDelete'))) {
-        const { raw, revision } = JSON.parse(String(opts.input));
-        assert.equal(raw, kcStored);
-        assert.equal(revision, 'fixture-ref-and-date');
-        kcStored = null;
-        return '';
-      }
-      if (args.some(arg => String(arg).includes('AGS_KEYCHAIN_REVISION'))) return 'fixture-ref-and-date';
-      throw Object.assign(new Error('official item'), { status: 77 });
-    }
-    if (args[0] === 'find-generic-password') {
-      if (kcStored === null) throw Object.assign(new Error('missing'), { status: 44 });
-      return kcStored;
-    }
-    if (args[0] === 'delete-generic-password') { kcStored = null; return ''; }
-    kcStored = opts.input.match(/-w "([^"]*)"/)[1];
-    return '';
-  };
+  const keychain = mockKeychainCommands(makeTok('kc-a@example.test', 1));
+  keychain.state.verifyRetiredPayload = true;
   native.readNativeToken = realReadNative;
   native.writeNativeToken = realWriteNative;
   clients.runningClients = async () => [];
@@ -117,7 +93,7 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
     atomicWrite(path.join(store.profileDir('agy', 'AGY-LONG'), agyAgent.authFiles[0]), big);
     for (const running of [[], ['Antigravity']]) {
       clients.runningClients = async () => running;
-      const before = confirmations.length, oldItem = kcStored;
+      const before = confirmations.length, oldItem = keychain.state.stored;
       confirmationResponse = 0;
       assert.deepEqual(await invoke('use-profile', 'agy', 'AGY-LONG'), { canceled: true });
       assert.equal(confirmations.length, before + 1);
@@ -126,7 +102,7 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
       assert.match(question.buttons.join(' '), running.length ? /退出并切换/ : /使用文件并切换/);
       assert.match(question.detail, /文件/);
       assert.match(question.detail, /0600/);
-      assert.equal(kcStored, oldItem);
+      assert.equal(keychain.state.stored, oldItem);
       assert.equal(fs.existsSync(cliPath), false);
       assert.equal(fs.existsSync(desktopPath), false);
     }
@@ -140,7 +116,7 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
     const applied = await invoke('use-profile', 'agy', 'AGY-LONG');
     assert.equal(applied.ok, true, applied.error);
     assert.deepEqual(desktopActions, ['quit', 'open']);
-    assert.equal(kcStored, null);
+    assert.equal(keychain.state.stored, null);
     assert.deepEqual(fs.readFileSync(cliPath), big);
     assert.deepEqual(fs.readFileSync(desktopPath), big);
     clients.runningClients = async () => [];
@@ -161,7 +137,7 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
     assert.equal(r1.ok, false);
     assert.match(r1.error || '', /确认期间|已变化/);
     assert.deepEqual(fs.readFileSync(cliPath), tokC, 'new CLI login C must not be deleted by stale confirmation');
-    assert.equal(kcStored, 'go-keyring-base64:' + makeTok('kc-a@example.test', 1).toString('base64'));
+    assert.equal(keychain.state.stored, 'go-keyring-base64:' + makeTok('kc-a@example.test', 1).toString('base64'));
 
     // User can now re-confirm cleanly on C:
     native.sharedAntigravitySessions = async () => [];
@@ -172,7 +148,7 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
     assert.equal(store.listProfiles('agy').some(p => agyAgent.identity(store.profileDir('agy', p))?.email === 'cli-c@example.test'), true);
 
     // Case 2: Desktop marker flips from expired (>1h) to active (<1h) via mtime touch ONLY during final async check!
-    kcStored = 'go-keyring-base64:' + makeTok('kc-a@example.test', 1).toString('base64');
+    keychain.state.stored = 'go-keyring-base64:' + makeTok('kc-a@example.test', 1).toString('base64');
     fs.mkdirSync(path.dirname(desktopPath), { recursive: true });
     fs.mkdirSync(path.dirname(desktopMarker), { recursive: true });
     const deskTok = makeTok('cli-c@example.test', 1); // already in pool, so needsUnmanagedChoice is false!
@@ -195,7 +171,7 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
     confirmationResponse = 0;
     fs.rmSync(gemini, { recursive: true, force: true });
     fs.rmSync(path.join(store.STORE_DIR, 'agy'), { recursive: true, force: true });
-    childProcess.execFileSync = prevExec;
+    keychain.restore();
     native.readNativeToken = prevReadNative;
     native.writeNativeToken = prevWriteNative;
     clients.runningClients = prevRunning;
@@ -204,23 +180,6 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
     agyAgent.nativeEnabled = prevNativeEnabled;
   }
 });
-test('Codex dashboard is not blocked by an unrelated provider CLI; Claude status queries join',async()=>{
-  const clients = require('../dist/clients');
-  const original = clients.findClaudeBinary;
-  const fake = path.join(root, 'fixture-claude');
-  fs.writeFileSync(fake, `#!/bin/sh\necho '{"loggedIn":false}'\n`, { mode: 0o700 });
-  let calls = 0;
-  clients.findClaudeBinary = () => { calls++; return fake; };
-  try {
-    const dashboard=await invoke('get-status',true,'codex');
-    assert.equal(dashboard[0].id,'codex');assert.equal(calls,0);
-    const first=invoke('get-status',true,'claude'),second=invoke('get-status',true,'claude');
-    assert.equal(calls,1);
-    await Promise.all([first,second]);
-    await invoke('get-status',false,'claude');assert.equal(calls,1);
-  } finally {clients.findClaudeBinary=original;}
-});
-
 test('actual import IPC selects encrypted file before password, supports retry and commits only selection', async () => {
   const profiles = ['source', 'unselected'];
   for (const name of profiles) atomicWrite(path.join(store.profileDir('codex', name), 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'fixture-' + name }));
@@ -238,6 +197,12 @@ test('actual import IPC selects encrypted file before password, supports retry a
   assert.deepEqual(store.listProfiles('codex'),[]);
   assert.equal((await invoke('commit-import', unlocked.id, ['codex/missing'])).ok, false);
   assert.deepEqual(store.listProfiles('codex'),[]);
+  selectedFiles=[];
+  try {
+    for (const args of [['preview-import','credentials','codex'], ['preview-import','backup'], ['preview-credential-update','codex','source']]) {
+      assert.deepEqual(await invoke(...args), {canceled:true});
+    }
+  } finally { selectedFiles=undefined; }
   const result=await invoke('commit-import',unlocked.id,[unlocked.items[0].key]);
   assert.deepEqual(result.imported,['codex/source']);
   assert.deepEqual(result.skipped,[]);
@@ -253,7 +218,7 @@ test('truncated encrypted files report corruption rather than asking for a passw
 test('credential update IPC cancels file previews and binds pasted candidates to a single update commit',async()=>{
   const clients=require('../dist/clients');clients.runningClients=async()=>[];
   const logout=require('../dist/client-logout');logout.runningCodexSessions=async()=>[];
-  const credential=token=>JSON.stringify({auth_mode:'chatgpt',tokens:{access_token:'fake',refresh_token:token,account_id:'update-target',id_token:'h.'+Buffer.from(JSON.stringify({sub:'update-member',email:'update@example.test','https://api.openai.com/auth':{chatgpt_account_id:'update-target',user_id:'update-member'}})).toString('base64url')+'.s'}});
+  const credential=token=>JSON.stringify({auth_mode:'chatgpt',tokens:{access_token:'fake',refresh_token:token,account_id:'update-target',id_token:jwt({sub:'update-member',email:'update@example.test','https://api.openai.com/auth':{chatgpt_account_id:'update-target',user_id:'update-member'}})}});
   const dir=store.profileDir('codex','expired-target');
   atomicWrite(path.join(dir,'auth.json'),credential('old'));
   store.writeProfileMeta('codex','expired-target',{snapshot:{state:'expired',authExpired:true,available:true}});
@@ -277,7 +242,7 @@ test('file and paste IPC share a multi-account preview and commit only selected 
   const file=path.join(root,'accounts.jsonl');
   const credential=(name,i)=>({name,tokens:{access_token:'fake',refresh_token:'batch-'+i,account_id:'batch-'+i}});
   const expired=credential('原名',2);
-  expired.tokens.id_token='h.'+Buffer.from(JSON.stringify({sub:'batch-member',email:'batch@example.test'})).toString('base64url')+'.s';
+  expired.tokens.id_token=jwt({sub:'batch-member',email:'batch@example.test'});
   const saved=path.join(store.profileDir('codex','原名'),'auth.json');
   atomicWrite(saved,JSON.stringify({tokens:{...expired.tokens,refresh_token:'previous'}}));
   store.writeProfileMeta('codex','原名',{snapshot:{state:'expired',authExpired:true,available:true}});
@@ -434,7 +399,7 @@ test('actual quit lifecycle quits promptly during slow network lookup, but drain
   const quitProfile = store.profileDir('codex', 'quit-test-card');
   atomicWrite(path.join(quitProfile, 'auth.json'), JSON.stringify({
     auth_mode: 'chatgpt',
-    tokens: { account_id: 'ws-q', access_token: accessToken('ws-q','uq','uq@example.test',1), refresh_token: 'rt1', id_token: 'h.' + Buffer.from(JSON.stringify({ sub: 'uq', email: 'uq@example.test' })).toString('base64url') + '.s' },
+    tokens: { account_id: 'ws-q', access_token: accessToken('ws-q','uq','uq@example.test',1), refresh_token: 'rt1', id_token: jwt({ sub: 'uq', email: 'uq@example.test' }) },
   }));
   try {
     // Phase 1: Slow ordinary network lookup does NOT block Cmd+Q confirmation/quit!
@@ -455,7 +420,7 @@ test('actual quit lifecycle quits promptly during slow network lookup, but drain
     const rotateProfile = store.profileDir('codex', 'quit-rotate-card');
     atomicWrite(path.join(rotateProfile, 'auth.json'), JSON.stringify({
       auth_mode: 'chatgpt',
-      tokens: { account_id: 'ws-q2', access_token: accessToken('ws-q2','uq2','uq2@example.test',1), refresh_token: 'rt1', id_token: 'h.' + Buffer.from(JSON.stringify({ sub: 'uq2', email: 'uq2@example.test' })).toString('base64url') + '.s' },
+      tokens: { account_id: 'ws-q2', access_token: accessToken('ws-q2','uq2','uq2@example.test',1), refresh_token: 'rt1', id_token: jwt({ sub: 'uq2', email: 'uq2@example.test' }) },
     }));
     const key = draft.items[0].key;
     assert.equal((await invoke('commit-import', draft.id, [key], { [key]: '退出前保留' })).ok, true);
@@ -463,7 +428,7 @@ test('actual quit lifecycle quits promptly during slow network lookup, but drain
     codexAgent.queryLiveRpc = async temp => {
       atomicWrite(path.join(temp, 'auth.json'), JSON.stringify({
         auth_mode: 'chatgpt',
-        tokens: { account_id: 'ws-q2', access_token: accessToken('ws-q2','uq2','uq2@example.test',2), refresh_token: 'rt2-rotated', id_token: 'h.' + Buffer.from(JSON.stringify({ sub: 'uq2', email: 'uq2@example.test' })).toString('base64url') + '.s' },
+        tokens: { account_id: 'ws-q2', access_token: accessToken('ws-q2','uq2','uq2@example.test',2), refresh_token: 'rt2-rotated', id_token: jwt({ sub: 'uq2', email: 'uq2@example.test' }) },
       }));
       return { rates: { rateLimits: { primary: { usedPercent: 10 } } } };
     };

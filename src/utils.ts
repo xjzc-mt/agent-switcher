@@ -1,6 +1,7 @@
+import { readRegularFile, replacePrivateFile } from './private-files';
 import fs from 'fs';
 import path from 'path';
-import { createHash, randomUUID } from 'crypto';
+import { createHash } from 'crypto';
 import * as vault from './credential-vault';
 
 export type CredentialWriter = Pick<typeof vault, 'encodeCredentialFile' | 'verifyCredentialWrite'>;
@@ -9,18 +10,19 @@ export function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 }
 
+export function syncPath(file: string): void {
+  const fd = fs.openSync(file, 'r');
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+
 export function atomicWrite(file: string, data: string | Buffer, writer: CredentialWriter = vault): void {
   ensureDir(path.dirname(file));
-  const temp = `${file}.${randomUUID()}.tmp`;
   const original = Buffer.isBuffer(data) ? data : Buffer.from(data);
-  try {
-    const encoded = writer.encodeCredentialFile(file, original);
-    fs.writeFileSync(temp, encoded, { mode: 0o600, flag: 'wx' });
-    if (encoded !== original) writer.verifyCredentialWrite(file, fs.readFileSync(temp), original);
-    fs.renameSync(temp, file);
-  } finally {
-    fs.rmSync(temp, { force: true });
-  }
+  const encoded = writer.encodeCredentialFile(file, original);
+  const durable = encoded !== original && (process.platform === 'darwin' || process.platform === 'win32') && vault.commitsAntigravityQuota(file);
+  const verify = encoded === original ? undefined : (temp: string) => writer.verifyCredentialWrite(file, fs.readFileSync(temp), original);
+  replacePrivateFile(file, encoded, verify, durable);
+  if (durable && process.platform === 'darwin') syncPath(path.dirname(file));
 }
 
 /** Restore a small credential set together, rolling back on a write failure. */
@@ -38,20 +40,16 @@ export function replaceFiles(dir: string, files: Record<string, Buffer | null>, 
 }
 
 export function readBuffer(file: string): Buffer | null {
-  try {
-    if (!fs.lstatSync(file).isFile()) throw new Error('凭据必须是普通文件');
-    return vault.decodeCredentialFile(file, fs.readFileSync(file));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
-  }
+  const bytes = readRegularFile(file);
+  return bytes && vault.decodeCredentialFile(file, bytes);
 }
 
-export function readJsonFile<T>(file: string): T | null {
-  const data = readBuffer(file);
+export function parseJsonBytes<T>(data: Buffer | null): T | null {
   if (!data) return null;
   try { return JSON.parse(data.toString()) as T; } catch { return null; }
 }
+
+export function readJsonFile<T>(file: string): T | null { return parseJsonBytes<T>(readBuffer(file)); }
 
 export function jwtInfo(token?: string): Record<string, unknown> & { sub?: string; email?: string; name?: string } {
   if (typeof token !== 'string' || !token) return {};
@@ -71,4 +69,13 @@ export function fingerprint(value: string): string {
 
 export function differentEmail(expected?: string, observed?: string): boolean {
   return !!expected && !!observed && expected.trim().toLowerCase() !== observed.trim().toLowerCase();
+}
+
+export function extractRefreshToken(bytes: Buffer | null): string | undefined {
+  if (!bytes) return undefined;
+  try {
+    const parsed = JSON.parse(bytes.toString());
+    const rt = parsed?.tokens?.refresh_token ?? parsed?.token?.refresh_token ?? parsed?.refresh_token;
+    return typeof rt === 'string' && rt ? rt : undefined;
+  } catch { return undefined; }
 }

@@ -1,8 +1,7 @@
 import path from 'path';
-import { readBuffer, replaceFiles } from '../utils';
-import { profileDir, withStoreLock } from '../store';
+import { parseJsonBytes, readBuffer, replaceFiles } from '../utils';
+import { profileDir } from '../store';
 import { credentialState, credentialStateFromFiles, CredentialChangedError } from '../credential-state';
-import { assertCredentialWriteReady } from '../credential-vault';
 import { releaseTemporaryCredentials } from '../temporary-credentials';
 
 export interface SaveResult { ok: boolean; files: string[]; warnings: string[] }
@@ -30,7 +29,6 @@ export interface StatusResult {
   authExpired?: boolean;
   refreshConsumed?: true;
   consumedRefreshFingerprint?: string;
-  authMethod?: string;
   state?: QueryState;
   checkedAt?: string;
   refreshFailures?: number;
@@ -38,13 +36,17 @@ export interface StatusResult {
   creditActivity?: { lastDecreaseAt: string; previousBalance: string; currentBalance: string };
   credentialRevision?: string;
   stagedReplacement?: boolean;
-  authFailure?: 'refresh-revoked' | 'refresh-reused' | 'refresh-expired' | 'refresh-invalid' | 'authentication-rejected' | 'account-unavailable';
+  authFailure?: 'refresh-revoked' | 'refresh-reused' | 'refresh-expired' | 'refresh-invalid' | 'authentication-rejected' | 'account-unavailable' | 'quota-recovery-required';
 }
 export interface Identity { id: string; email?: string }
 export type CredentialFiles = Record<string, Buffer | null>;
 export interface AuxiliaryCredential { identity: Identity; files: Record<string, Buffer | null> }
-export interface QueryOptions { expectedEmail?: string; allowRefresh?: boolean; verifyTarget?: Buffer | null }
-export interface CredentialQuery { status: StatusResult; rotated?: Buffer; temporaryDirectory?: string; verifiedReplacement?: boolean }
+export type CredentialTracker = <T>(work: () => Promise<T>) => Promise<T>;
+export interface QueryOptions {
+  expectedEmail?: string; allowRefresh?: boolean; renewRejectedBearer?: boolean; verifyTarget?: Buffer | null;
+  quotaCopies?: Buffer[]; allowUndatedBearer?: boolean; reportRejectedBearer?: boolean; withSharedRenewal?: CredentialTracker;
+}
+export interface CredentialQuery { status: StatusResult; rotated?: Buffer; temporaryDirectory?: string; verifiedReplacement?: boolean; waitingForClient?: boolean }
 export interface LiveMutationJournal {
   hasMutations(): boolean;
   beginWrite?(appliedRevision?: string): void;
@@ -68,6 +70,17 @@ export interface AccountManagement {
   loginHint?: string;
 }
 
+export interface SharedQuotaLogin {
+  readonly clientOwnsRenewal: boolean;
+  /** A desktop-only observation is usable for quota, never for mutations. */
+  normalizeQuotaHistory(snapshot: StatusResult): StatusResult;
+  desktopLogin(): Buffer | undefined;
+  confirmDesktopLogin(expected: Buffer, copies?: Buffer[]): Buffer;
+  quotaBearer(bytes: Buffer, copies?: Buffer[], allowUndated?: boolean): { expiry?: string } | undefined;
+  ownsQuotaLogin(bytes: Buffer): boolean;
+  recoverProfileCredential(dir: string, identity: string, original: Buffer): { bytes: Buffer; pending: boolean; readOnly: boolean };
+}
+
 export abstract class BaseAgent {
   abstract readonly id: string;
   abstract readonly label: string;
@@ -75,28 +88,14 @@ export abstract class BaseAgent {
   abstract readonly authFiles: string[];
   abstract identityFromAuth(auth: object | null, live?: boolean): Identity | undefined;
   identityFromBytes(bytes: Buffer | null, live = false): Identity | undefined {
-    let auth = null;
-    try { if (bytes) auth = JSON.parse(bytes.toString()); } catch { return undefined; }
-    return this.identityFromAuth(auth, live);
+    return this.identityFromAuth(parseJsonBytes<object>(bytes), live);
   }
   identity(dir = this.homeDir, files?: CredentialFiles): Identity | undefined {
     return this.identityFromBytes((files ?? this.readCredentials(dir))[this.authFiles[0]], dir === this.homeDir);
   }
+  adoptRecoveredQuota?(output: Buffer): void;
+  canRecoverQuotaRotation?(original: Buffer, output: Buffer, registeredEmail?: string): boolean;
   queryCredential?(original: Buffer | null, options?: QueryOptions): Promise<CredentialQuery>;
-  async status(dir = this.homeDir): Promise<StatusResult> {
-    if (!this.queryCredential) return this.credentialStatus(dir);
-    const file = this.authFiles[0], original = this.readCredentials(dir)[file];
-    const { revision } = credentialStateFromFiles(this.id, [[file, original]]);
-    assertCredentialWriteReady(path.join(dir, file));
-    const query = await this.queryCredential(original);
-    try { return await withStoreLock(async () => this.commitQuery(dir, revision, query)); }
-    catch (error) {
-      if (query.temporaryDirectory && error instanceof Error) {
-        error.message += `；未写回的凭据已保留在 ${query.temporaryDirectory}，恢复前请勿清理该目录`;
-      }
-      throw error;
-    }
-  }
   // The caller holds the store lock; adapters own file/Keychain writes.
   commitQuery(dir: string, revision: string | undefined, query: CredentialQuery): StatusResult {
     if (credentialState(this, dir).revision !== revision) throw new CredentialChangedError();
@@ -108,15 +107,28 @@ export abstract class BaseAgent {
     if (query.temporaryDirectory) releaseTemporaryCredentials(query.temporaryDirectory);
     return { ...query.status, credentialRevision: revision };
   }
+  get sharedQuotaLogin(): SharedQuotaLogin | undefined { return undefined; }
+  readonly bindsQuotaEmail: boolean = false;
+  abstract sharedSessionIssue(): Promise<string | undefined>;
+  abstract clientLogoutIssue(): string | undefined;
+  assertSwitchSessions?(): Promise<void>;
+  retryCredentialAccess?(): void;
+  hasInterruptedSwitch?(): boolean;
+  needsFileMigration?(bytes: Buffer | null): boolean;
+  compareSessionCopies?(a: Buffer | null, b: Buffer | null): number | undefined;
+  writeRenewedCredentials?(files: CredentialFiles, expectedRevision?: string): Promise<void>;
+  readClientCopies(): Array<Buffer | null> {
+    const file = this.authFiles[0];
+    return [this.readCredentials()[file], ...this.auxiliaryCredentials(true).map(copy => copy.files[file])];
+  }
   switchSupport(): string | undefined { return undefined; }
-  management(): AccountManagement { return { quota: this.id === 'codex', storage: 'file', canSaveCurrent: true, isolatedLogin: this.id === 'codex' }; }
+  abstract management(): AccountManagement;
   credentialStatus(dir = this.homeDir): StatusResult {
     const identity = this.identity(dir);
     return { available: !!identity, account: identity?.email, state: identity ? 'unverified' : 'signed-out' };
   }
-  displayStatus(): StatusResult { return this.credentialStatus(); }
 
-  readCredentials(dir = this.homeDir): Record<string, Buffer | null> {
+  readCredentials(dir = this.homeDir, _quotaCopies?: Buffer[]): Record<string, Buffer | null> {
     return Object.fromEntries(this.authFiles.map(file => [file, readBuffer(path.join(dir, file))]));
   }
   readSwitchableCredentials(): { files: Record<string, Buffer | null>; corrupted?: boolean } {
@@ -143,16 +155,8 @@ export abstract class BaseAgent {
       markWriteCompleted: () => { completed = true; },
       restore: () => {
         if (!mutated) return;
-        let currentFiles: Record<string, Buffer | null> | undefined;
-        let currentCorrupted = false;
-        try { currentFiles = this.readCredentials(); }
-        catch (error) {
-          const snap = this.readSwitchableCredentials();
-          currentFiles = snap.files;
-          currentCorrupted = snap.corrupted === true;
-          if (!currentCorrupted) throw error;
-        }
-        const currentRevision = currentCorrupted ? undefined : credentialStateFromFiles(this.id, Object.entries(currentFiles!)).revision;
+        const { files, corrupted: currentCorrupted } = this.readSwitchableCredentials();
+        const currentRevision = currentCorrupted ? undefined : credentialStateFromFiles(this.id, Object.entries(files)).revision;
         if (!currentCorrupted && !wasCorrupted && currentRevision === preRevision) return;
         if (completed) {
           if (!currentCorrupted && currentRevision !== appliedRevision) return;
@@ -165,7 +169,7 @@ export abstract class BaseAgent {
       },
     };
   }
-  auxiliaryCredentials(): AuxiliaryCredential[] { return []; }
+  auxiliaryCredentials(_requireAllReadable = false): AuxiliaryCredential[] { return []; }
   writeCredentials(dir: string, files: Record<string, Buffer | null>): void { replaceFiles(dir, files); }
 
   credentials(dir: string, files = this.readCredentials(dir)): CredentialFiles {
@@ -185,12 +189,19 @@ export abstract class BaseAgent {
     if (unsupported) throw new Error(unsupported);
     const target = profileDir(this.id, name);
     const files = this.credentials(target);
-    if (options.expectedSwitchFingerprint && this.switchFingerprint() && this.switchFingerprint() !== options.expectedSwitchFingerprint) {
+    const fingerprint = options.expectedSwitchFingerprint && this.switchFingerprint();
+    if (fingerprint && fingerprint !== options.expectedSwitchFingerprint) {
       throw new Error('确认期间当前凭据已变化，未执行切换，请重新核对');
     }
+    return this.commitSwitch(files, options, () => this.writeCredentials(this.homeDir, files));
+  }
+
+  protected commitSwitch(files: CredentialFiles, options: UseOptions, write: () => void | string): UseResult {
     options.journal?.beginWrite?.(credentialStateFromFiles(this.id, Object.entries(files)).revision);
-    this.writeCredentials(this.homeDir, files);
+    const detail = write();
     options.journal?.markWriteCompleted?.();
-    return { ok: true, files: Object.keys(files).filter(f => files[f]), warnings: ['已更新本地凭据；已打开的终端会话需要重新启动。'] };
+    const warnings = ['已更新本地凭据；已打开的终端会话需要重新启动。'];
+    if (detail) warnings.push(detail);
+    return { ok: true, files: Object.keys(files).filter(file => files[file]), warnings };
   }
 }

@@ -1,8 +1,9 @@
+import type { AgentId } from './agents/metadata';
 import { validateName } from './store';
 import { parseCredentialJson } from './credential-json';
 
 type ObjectValue = Record<string, unknown>;
-export interface CredentialEntry { data?: Buffer; name?: string; error?: string }
+export interface CredentialEntry { agent?: AgentId; data?: Buffer; name?: string; error?: string }
 const record = (value: unknown): value is ObjectValue => !!value && typeof value === 'object' && !Array.isArray(value);
 const own = (value: ObjectValue, key: string) => Object.hasOwn(value, key);
 const keyName = (key: string) => key.replace(/[_ .-]/g, '').toLowerCase();
@@ -80,50 +81,43 @@ function codexTokenMetadata(value: ObjectValue): ObjectValue {
 }
 
 /** Project one self-contained credential onto fields understood by our clients. */
-function normalize(value: ObjectValue, selectedAgent?: string): ObjectValue | undefined {
+function normalize(value: ObjectValue, selectedAgent?: string): { agent: AgentId; auth: ObjectValue } | undefined {
+  const hints = ['platform', 'provider', 'agent', 'type'].flatMap(key => typeof value[key] === 'string' ? [value[key].trim().toLowerCase()] : []);
+  // A retired provider's wrapper must not be walked as a generic access/refresh token pair.
+  if (own(value, 'claudeAiOauth') || hints.some(hint => /^(?:claude(?:[ _-]?code)?|anthropic)$/.test(hint))) {
+    throw new Error('该平台的账号凭据暂不支持导入');
+  }
   // Container names alone are not proof of credentials (e.g. an export's "tokens" statistics).
-  const native = ['tokens', 'claudeAiOauth'].filter(key => own(value, key) && tokenContainer(value[key]));
-  if (value.OPENAI_API_KEY != null && (typeof value.OPENAI_API_KEY !== 'string' || value.OPENAI_API_KEY.trim())) native.push('OPENAI_API_KEY');
-  if (native.length > 1) throw new Error('同一项包含多种登录凭据，请拆分后导入');
+  const codexTokens = own(value, 'tokens') && tokenContainer(value.tokens);
+  const apiKey = value.OPENAI_API_KEY != null && (typeof value.OPENAI_API_KEY !== 'string' || Boolean(value.OPENAI_API_KEY.trim()));
+  if (codexTokens && apiKey) throw new Error('同一项包含多种登录凭据，请拆分后导入');
   const flat = [...accessKeys, ...refreshKeys].some(key => own(value, key));
   const token = own(value, 'token') && tokenContainer(value.token);
-  if (!native.length && !flat && !token) return;
-  const detected = native[0] === 'claudeAiOauth' ? 'claude' : native.length ? 'codex' : token ? 'agy' : selectedAgent;
-  if (!detected || selectedAgent && detected !== selectedAgent) throw new Error('无法识别该平台的客户端凭据');
-  const platforms: Record<string, string> = { codex: 'codex', openai: 'codex', chatgpt: 'codex', claude: 'claude', anthropic: 'claude', agy: 'agy', antigravity: 'agy' };
-  const hints = ['platform', 'provider', 'agent', 'type'].flatMap(key => typeof value[key] === 'string' && own(platforms, value[key].toLowerCase()) ? [platforms[value[key].toLowerCase()]] : []);
-  if (hints.some(hint => hint !== detected)) throw new Error('凭据的平台标识与所选平台不一致');
+  if (!codexTokens && !apiKey && !flat && !token) return;
+  const detected = codexTokens || apiKey ? 'codex' : token ? 'agy' : selectedAgent;
+  if ((detected !== 'codex' && detected !== 'agy') || (selectedAgent && detected !== selectedAgent)) throw new Error('无法识别该平台的客户端凭据');
+  const platforms: Record<string, string> = { codex: 'codex', openai: 'codex', chatgpt: 'codex', agy: 'agy', antigravity: 'agy' };
+  if (hints.some(hint => own(platforms, hint) && platforms[hint] !== detected)) throw new Error('凭据的平台标识与所选平台不一致');
   if (detected === 'codex') {
-    if (native[0] === 'OPENAI_API_KEY') return { OPENAI_API_KEY: stringField(value, ['OPENAI_API_KEY'], true), auth_mode: codexMode(value, 'apikey') };
-    const tokenSource = native[0] === 'tokens' ? nestedObject(value.tokens) : value;
+    if (apiKey) return { agent: detected, auth: { OPENAI_API_KEY: stringField(value, ['OPENAI_API_KEY'], true), auth_mode: codexMode(value, 'apikey') } };
+    const tokenSource = codexTokens ? nestedObject(value.tokens) : value;
     const tokens = { ...oauthFields(tokenSource, true), ...codexTokenMetadata(tokenSource) };
     const lastRefresh = optionalText(value, ['last_refresh', 'lastRefresh']);
     const timestamp = lastRefresh && Number.isFinite(Date.parse(lastRefresh))
       ? /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i.test(lastRefresh) ? lastRefresh : new Date(lastRefresh).toISOString()
       : undefined;
-    return { tokens, auth_mode: codexMode(value, 'chatgpt'), last_refresh: timestamp };
-  }
-  if (detected === 'claude') {
-    const source = native[0] === 'claudeAiOauth' ? nestedObject(value.claudeAiOauth) : value;
-    const accessToken = stringField(source, accessKeys), refreshToken = stringField(source, refreshKeys);
-    if (!accessToken && !refreshToken) throw new Error('凭据不完整，缺少登录所需的 Token');
-    return { claudeAiOauth: {
-      accessToken, refreshToken,
-      expiresAt: typeof source.expiresAt === 'number' && Number.isFinite(source.expiresAt) ? source.expiresAt : undefined,
-      scopes: Array.isArray(source.scopes) ? source.scopes.filter(scope => typeof scope === 'string') : undefined,
-      subscriptionType: optionalText(source, ['subscriptionType']), rateLimitTier: optionalText(source, ['rateLimitTier']),
-    }, email: optionalText(value, ['email']) || (record(value.account) ? optionalText(value.account, ['email']) : undefined) };
+    return { agent: detected, auth: { tokens, auth_mode: codexMode(value, 'chatgpt'), last_refresh: timestamp } };
   }
   const source = token ? nestedObject(value.token) : value;
   const fields = oauthFields(source);
   if (!fields.access_token && !fields.refresh_token) throw new Error('凭据不完整，缺少登录所需的 Token');
   const idTokenEmail = stringField(value, ['id_token_email', 'idTokenEmail']) || (token ? optionalText(value, ['email']) : undefined);
   // Antigravity has a native outer id_token / id_token_email; it belongs to this same credential record.
-  return { ...(token ? { token: { ...fields, expiry: optionalText(source, ['expiry']) } } : fields),
+  return { agent: detected, auth: { ...(token ? { token: { ...fields, expiry: optionalText(source, ['expiry']) } } : fields),
     ...(token ? { id_token: stringField(value, idKeys) } : {}),
     ...(idTokenEmail ? { id_token_email: idTokenEmail } : {}),
     expiry: optionalText(value, ['expiry']), auth_method: optionalText(value, ['auth_method']),
-  };
+  } };
 }
 
 /** Discover account records without joining fields from different nodes or traversing caches. */
@@ -160,12 +154,12 @@ export function parseCredentialDocument(data: Buffer, agent?: string): { entries
       return;
     }
     name = nameOf(value) || name;
-    let credentials: ObjectValue | undefined;
+    let credentials: ReturnType<typeof normalize>;
     try { credentials = normalize(value, agent); }
     catch (error) { add({ name, error: (error as Error).message }); return; }
     if (credentials) {
-      const bytes = Buffer.from(JSON.stringify(credentials));
-      add(bytes.length > 1024 * 1024 ? { name, error: '单个账号凭据超过 1 MB' } : { name, data: bytes });
+      const bytes = Buffer.from(JSON.stringify(credentials.auth));
+      add(bytes.length > 1024 * 1024 ? { name, error: '单个账号凭据超过 1 MB' } : { name, data: bytes, agent: credentials.agent });
       return; // Never descend into tokens or accidentally interpret one account twice.
     }
     const before = entries.length;

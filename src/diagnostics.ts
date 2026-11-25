@@ -1,3 +1,5 @@
+import { replacePrivateFile } from './private-files';
+import { agentIds } from './agents/metadata';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -5,11 +7,13 @@ import path from 'node:path';
 
 const ops = ['refresh','switch','save','login','update','import','export','remove'] as const;
 const triggers = ['manual','automatic','tray','cli','unknown'] as const;
-const agents = ['codex','agy','claude','none'] as const;
+const agents = [...agentIds,'none'] as const;
+export const codexRpcSteps = ['rpc-initialize','rpc-account-read','rpc-rate-limits','rpc-refresh'] as const;
 const steps = ['cached','cooldown','live-session','read-only','access-valid','access-expired','access-missing',
-  'query-start','query-end','credential-write','confirm','client-restart','status-read','storage-unavailable',
-  'process-unknown','rotation','pending-commit','refresh-revoked','refresh-reused','refresh-expired',
-  'refresh-invalid','authentication-rejected','account-unavailable'] as const;
+  'query-start','query-end','query-limited','query-unavailable','query-network','query-access-rejected','query-login-prompt','credential-write','confirm','client-restart','status-read','storage-unavailable',
+  'process-unknown','shared-renewal','shared-login-unchanged','rotation','recovery-found','recovery-complete','pending-commit','refresh-revoked','refresh-reused','refresh-expired',
+  'recovery-writer','recovery-owner-unknown','recovery-missing','recovery-conflict','recovery-stored',
+  'refresh-invalid','authentication-rejected','account-unavailable','quota-recovery-required',...codexRpcSteps] as const;
 const results = ['ok','failed','waiting','timeout','expired','canceled','cached','unsupported','interrupted'] as const;
 type Op = typeof ops[number];
 type Trigger = typeof triggers[number];
@@ -18,8 +22,18 @@ type Result = typeof results[number];
 type RecordEntry = {
   id: string; op: Op; agent: typeof agents[number]; trigger: Trigger; account?: string; version: string;
   started: number; lastAttempt?: number; ended?: number; result?: Result; lastSuccess?: number; count: number;
-  steps: { step: Step; at: number }[];
+  steps: ({ step: Step; at: number } & RpcDetails)[];
 };
+type RpcDetails = { rpcCode?: number; httpStatus?: number; reason?: 'workspace-routing' | 'token-refresh-failed' };
+function safeRpcDetails(step: Step, details?: RpcDetails): RpcDetails {
+  if (!details || !codexRpcSteps.some(s => s === step)) return {};
+  const { rpcCode, httpStatus, reason } = details;
+  return {
+    rpcCode: typeof rpcCode === 'number' && [-32700,-32600,-32601,-32602,-32603].includes(rpcCode) ? rpcCode : undefined,
+    httpStatus: typeof httpStatus === 'number' && Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus < 600 ? httpStatus : undefined,
+    reason: reason === 'workspace-routing' || reason === 'token-refresh-failed' ? reason : undefined,
+  };
+}
 const scope = new AsyncLocalStorage<{ record:RecordEntry; outcome?:Result }>();
 const entries = new Map<string,RecordEntry>();
 const week = 7 * 24 * 60 * 60 * 1000;
@@ -47,11 +61,8 @@ export function sourceDiagnosticVersion(appVersion: string): string {
 
 function save(r: RecordEntry) {
   if (!directory || entries.get(r.id) !== r) return;
-  const temp = path.join(directory, r.id + '.tmp');
-  try {
-    fs.writeFileSync(temp, JSON.stringify(r), { flag:'wx', mode:0o600 });
-    fs.renameSync(temp, path.join(directory, r.id + '.json'));
-  } catch { try { fs.unlinkSync(temp); } catch { /* Recording must not affect the account operation. */ } }
+  try { replacePrivateFile(path.join(directory, r.id + '.json'), JSON.stringify(r)); }
+  catch { /* Recording must not affect the account operation. */ }
 }
 
 function drop(id: string) {
@@ -78,7 +89,7 @@ function restore(id: string, item: any): RecordEntry | undefined {
   if (!item || item.id !== id || !ops.includes(item.op) || !agents.includes(item.agent) ||
       !triggers.includes(item.trigger) || !validTime(item.started) || !Array.isArray(item.steps)) return;
   const trace = item.steps.slice(0,24).filter((s:any) => s && steps.includes(s.step) && validTime(s.at))
-    .map((s:any) => ({ step:s.step as Step, at:s.at as number }));
+    .map((s:any) => ({ step:s.step as Step, at:s.at as number, ...safeRpcDetails(s.step, s) }));
   const complete = validTime(item.ended) && results.includes(item.result);
   return { id, op:item.op, agent:item.agent, trigger:item.trigger,
     account:typeof item.account === 'string' && /^[\da-f]{32}$/.test(item.account) ? item.account : undefined,
@@ -112,11 +123,13 @@ export function initializeDiagnostics(folder: string, appVersion: string): void 
   } catch { directory = undefined; }
 }
 
-export function stepDiagnostic(step: Step): void {
+export function stepDiagnostic(step: Step, details?: RpcDetails): void {
   const r = scope.getStore()?.record;
-  if (!r || r.result || !steps.includes(step) || r.steps.at(-1)?.step === step) return;
+  if (!r || r.result || !steps.includes(step)) return;
+  const safe = safeRpcDetails(step, details), previous = r.steps.at(-1);
+  if (previous?.step === step && previous.rpcCode === safe.rpcCode && previous.httpStatus === safe.httpStatus && previous.reason === safe.reason) return;
   if (r.steps.length >= 24) r.steps.splice(1,1);
-  r.steps.push({ step, at:Date.now() });
+  r.steps.push({ step, at:Date.now(), ...safe });
   save(r);
 }
 
@@ -137,7 +150,8 @@ function finish(r: RecordEntry, result: Result) {
     const previous = [...entries.values()].reverse().find(p => p !== r && p.op === r.op && p.agent === r.agent && p.account === r.account);
     if (previous?.result === 'waiting' && previous.ended !== undefined && previous.ended <= r.started &&
         previous.trigger === r.trigger && previous.lastSuccess === r.lastSuccess &&
-        previous.steps.map(s => s.step).join() === r.steps.map(s => s.step).join()) {
+        previous.steps.length === r.steps.length && previous.steps.every((s,i) => s.step === r.steps[i].step &&
+          s.rpcCode === r.steps[i].rpcCode && s.httpStatus === r.steps[i].httpStatus && s.reason === r.steps[i].reason)) {
       previous.count++; previous.lastAttempt = r.started; previous.ended = r.ended;
       save(previous); drop(r.id); return;
     }
@@ -181,7 +195,7 @@ export function exportDiagnostics() {
         durationMs:r.ended === undefined || r.result === 'interrupted' ? undefined : Math.max(0,r.ended-(r.lastAttempt??r.started)),
         lastAttemptAt:r.lastAttempt && new Date(r.lastAttempt).toISOString(),
         result:r.result ?? 'running', attempts:r.count, lastQuotaAt:r.lastSuccess && new Date(r.lastSuccess).toISOString(),
-        steps:r.steps.map(s => ({step:s.step, afterMs:Math.max(0,s.at-r.started)})) };
+        steps:r.steps.map(({at,...s}) => ({...s, afterMs:Math.max(0,at-r.started)})) };
     }),
   };
 }

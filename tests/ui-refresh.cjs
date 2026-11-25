@@ -1,18 +1,62 @@
-require('./ui-support.cjs');
-const {app,BrowserWindow}=require('electron');
-const assert=require('node:assert/strict');
-const path=require('node:path');
+const suite = require('./ui-support.cjs');
+const assert = require('node:assert/strict');
 const {antigravityRenewalHint}=require('../dist/agents/antigravity');
-const pause=ms=>new Promise(r=>setTimeout(r,ms));
-app.whenReady().then(async()=>{
-  const w=new BrowserWindow({width:1120,height:740,show:false,webPreferences:{preload:path.join(__dirname,'fixture-preload.cjs'),contextIsolation:true}});
-  const run=s=>w.webContents.executeJavaScript(s);
-  const calls=()=>run(`window.testApi.calls().filter(c=>c.method==='refresh')`);
-  const idle=async()=>{for(let i=0;i<100;i++){if(await run(`refreshQueue.jobs.size===0&&!refreshing`))return;await pause(20);}throw new Error('refresh did not finish');};
-  const context=selector=>run(`document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2}))`);
-  const close=()=>run(`{const d=document.querySelector('dialog[open]');d.querySelector('[data-close-dialog]').click();d.dismissAccountDialog();}`);
-  try{
-    await w.loadFile(path.join(process.env.AGS_UI_RENDERER_ROOT||path.join(__dirname,'../renderer'),'index.html'));await pause(150);await idle();
+
+module.exports = suite(
+  { width: 1120, height: 740, additionalArguments: ['--test-manual-refresh'] },
+  async ({ run, load, pause, until }) => {
+    const calls=()=>run(`window.testApi.calls().filter(c=>c.method==='refresh')`);
+    const idle=async()=>{for(let i=0;i<100;i++){if(await run(`refreshQueue.jobs.size===0&&!refreshing`))return;await pause(20);}throw new Error('refresh did not finish');};
+    const context=selector=>run(`document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2}))`);
+    const close=()=>run(`{const d=document.querySelector('dialog[open]');d.querySelector('[data-close-dialog]').click();d.dismissAccountDialog();}`);
+
+    const setIntervals=async(live,spare)=>{
+      await run(`selectTab('settings')`);
+      if (await run(`settings.liveRefreshInterval!=='${live}'`)) {
+        await run(`document.querySelector('[name="liveRefreshInterval"][value="${live}"]').click()`);
+        await until(`settings.liveRefreshInterval==='${live}'&&!document.querySelector('.setting-options input').disabled`);
+      }
+      if (await run(`settings.spareRefreshInterval!=='${spare}'`)) {
+        await run(`document.querySelector('[name="spareRefreshInterval"][value="${spare}"]').click()`);
+        await until(`settings.spareRefreshInterval==='${spare}'&&!document.querySelector('.setting-options input').disabled`);
+      }
+      await run(`selectTab('codex')`);
+    };
+    await load();await idle();
+    assert.equal((await calls()).length,0,'Manual startup must not query overdue accounts');
+    await run(`Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));window.dispatchEvent(new Event('focus'));refreshAll(false)`);
+    await pause(1100);
+    assert.equal((await calls()).length,0,'Visible manual mode must not start overdue timers or reset checks');
+    await run(`handleTrayCommand({action:'refresh'})`);await idle();
+    assert.deepEqual((await calls()).map(c=>[c.name,c.force]),[['个人主力',true]]);
+    await run(`handleSwitchProfile('codex','工作账号')`);await idle();
+    assert.deepEqual((await calls()).slice(1).map(c=>[c.name,c.force]),[['工作账号',true]]);
+    await run(`handleSwitchProfile('codex','个人主力')`);await idle();
+    const beforeManualAll=(await calls()).length;
+    await run(`document.querySelector('#btnRefresh').click()`);await idle();
+    assert.equal((await calls()).length-beforeManualAll,4,'Manual mode keeps the explicit full refresh available');
+    await setIntervals('5m','30m');
+    const beforeQueued=(await calls()).length;
+    await run(`window.refreshTestApi.blockAll();window.importBatch=Promise.all(agentsData[0].profiles.map(p=>requestRefresh('codex',p.name,true,1)));void 0`);
+    await until(`refreshQueue.running===3&&refreshQueue.jobs.size===4`);
+    await setIntervals('1m','manual');
+    await run(`window.refreshTestApi.releaseAll();window.importBatch`);await idle();
+    assert.equal((await calls()).length-beforeQueued,3,'Switching spare to manual drops queued spare jobs while keeping live interval independent');
+    await setIntervals('5m','30m');
+    await run(`window.refreshTestApi.expireAll();loadStatus()`);
+    for (const [name, period] of [['个人主力',300000], ['工作账号',1800000]]) {
+      const delay = await run(`(async()=>{
+        window.refreshTestApi.failNext();
+        try {await refreshSelected('codex',${JSON.stringify(name)},true);} catch {}
+        const target=refreshTargets(agentsData[0]).find(p=>p.profile===${JSON.stringify(name)});
+        return target.deadline-Date.now();
+      })()`);
+      assert.ok(Math.abs(delay-period)<1000,'IPC failure must respect the account’s selected refresh period');
+    }
+    await run(`refreshAll(true)`);await idle();
+    const reads=await run(`window.refreshTestApi.statusReads()`);
+    await run(`window.dispatchEvent(new Event('focus'));window.dispatchEvent(new Event('focus'))`);
+    assert.equal(await run(`window.refreshTestApi.statusReads()`),reads,'Focus on a visible window leaves the scheduler alone');
     await run(`Object.defineProperty(document,'hidden',{configurable:true,value:false});accountLayout='cards';renderWorkbench()`);
     const visualSnapshot=()=>run(`(()=>({
       accounts:[...document.querySelectorAll('[data-account-context]')].map(card=>({
@@ -22,6 +66,7 @@ app.whenReady().then(async()=>{
         creditClass:card.querySelector('.credit-badge,.credit-corner')?.className||null
       }))
     }))()`);
+    await setIntervals('1m','5m');
     const beforeResume=await visualSnapshot();
     const beforeResumeCalls=(await calls()).length;
     await run(`Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));window.refreshTestApi.ageSnapshots()`);
@@ -169,7 +214,7 @@ app.whenReady().then(async()=>{
     assert.ok(await run(`!!document.querySelector('.active-session-card [data-action="openCredentialUpdate"]')`),
       'A saved candidate can be replaced through official login while the live quota is healthy');
     await run(`document.querySelector('.active-session-card [data-action="openCredentialUpdate"]').click()`);
-    assert.equal(await run(`$('saveModalOverlay').open && credentialUpdate?.profile`),'个人主力');
+    assert.equal(await run(`$('saveModalOverlay').open && activeDialog.updateTarget?.profile`),'个人主力');
     await run(`closeSaveModal()`);
 
     for(const manual of [false,true]){
@@ -185,12 +230,11 @@ app.whenReady().then(async()=>{
       await run(`refreshSelected('codex','个人主力',true)`);
       assert.deepEqual((await calls()).slice(beforeOutage+1),[{...activeCalls,force:true}],
         'A manual request remains available while local status is unavailable');
-      await run(`window.refreshTestApi.stageCurrent(600000,0);window.refreshTestApi.failStatusReads(false);window.dispatchEvent(new Event('focus'))`);
+      await run(`window.refreshTestApi.stageCurrent(600000,0);window.refreshTestApi.failStatusReads(false);document.dispatchEvent(new Event('visibilitychange'))`);
       for(let i=0;i<100&&(await calls()).length===beforeOutage+2;i++)await pause(20);
       await idle();
       assert.deepEqual((await calls()).slice(beforeOutage+2),[activeCalls],
         'A fresh dashboard after recovery must immediately schedule a newly due candidate');
     }
-    console.log(JSON.stringify({passed:true,retainsSnapshotOnResume:true,backgroundRevalidation:true,contextDetails:true,unsavedCurrent:true,singleAccount:true,queuePriority:true,deduplication:true,partialFailure:true,detailsUpdate:true,hiddenPause:true}));app.exit(0);
-  }catch(e){console.error(e);app.exit(1);}
-});
+  },
+);

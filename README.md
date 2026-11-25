@@ -8,7 +8,7 @@
     放进同一个桌面窗口：谁还有余量一眼看清，点一下顺手切换，既不打断心流，也不误覆盖原有主号。
   </p>
   <p>
-    <a href="docs/release-1.0.1.md"><img src="https://img.shields.io/badge/release-1.0.1-4F46E5?style=flat-square" alt="1.0.1 release" /></a>
+    <a href="docs/release-0.1.0.md"><img src="https://img.shields.io/badge/release-0.1.0-4F46E5?style=flat-square" alt="0.1.0 release" /></a>
     <img src="https://img.shields.io/badge/desktop-macOS_%C2%B7_Windows_x64-172033?style=flat-square" alt="macOS Apple Silicon, macOS Intel, Windows x64" />
     <img src="https://img.shields.io/badge/agents-Codex_%C2%B7_Antigravity-6366F1?style=flat-square" alt="Codex and Antigravity" />
     <img src="https://img.shields.io/badge/privacy-%E9%9B%B6%E8%87%AA%E5%BB%BA%E5%90%8E%E7%AB%AF_%C2%B7_AES--256--GCM-0D9488?style=flat-square" alt="零自建后端 · AES-256-GCM" />
@@ -19,7 +19,7 @@
     <a href="#界面速览">界面速览</a> ·
     <a href="#安全与支持范围">安全与支持范围</a> ·
     <a href="#快速安装">快速安装</a> ·
-    <a href="docs/release-1.0.1.md">1.0.1 版本说明</a> ·
+    <a href="docs/release-0.1.0.md">0.1.0 版本说明</a> ·
     <a href="#门后的彩蛋">✦ 门后彩蛋</a>
   </p>
 </div>
@@ -36,7 +36,7 @@
 
 当前账号置顶，备用账号按套餐归组、按可用余量排好序，支持**卡片**与**单行**两种视图。Codex 分列 `5h / 7d` 与 Credits；Antigravity 以 `Gemini` 为主并独立展示 `Claude / GPT` 等模型组，缺失值如实显示 `—`，不混算总比例。
 
-在 macOS 上，点右上角菜单栏的 AGS 图标可查看当前额度。悬停「切换账号」后，直接点选备用账号。使用多块屏幕时，切换平台或展开名单都会留在打开菜单的那块屏幕上。
+在 macOS 上，点右上角菜单栏的 AGS 图标即可直接查看当前额度与备用账号双列胶囊列表，点击即可切换。切换平台时，菜单留在打开它的那块屏幕上。
 
 | Codex 单行视图 · 密集对齐比对 | Antigravity · 模型组主次分层 |
 | --- | --- |
@@ -71,37 +71,47 @@
 | --- | :---: | --- |
 | **Codex** (`codex`) | ✅ 已支持 | 独立登录、`auth.json` 切换、`5h / 7d` 额度与 Credits（需桌面端内置或独立安装的 Codex CLI；Keychain-only 未适配，API Key 无订阅额度） |
 | **Antigravity** (`agy`) | ✅ 已支持 | Antigravity 2.x 个人 Google 账号独立登录、Keychain 或官方文件切换与模型组额度（需官方 `agy` CLI；企业认证暂未验证） |
-| **Claude Code** (`claude`) | 🚧 规划中 | 保留底层兼容代码，首版 GUI 入口暂置灰，待补齐激活与额度能力后开放 |
 
-Windows x64 安装包已在 Windows 上验证安装、启动和卸载。Codex 真实账号的登录、切换与额度查询仍待实机验收。Antigravity 原生切换与额度查询仅适用于 macOS。
+**0.1.0 跨平台状态**：Windows x64 已验证安装、启动和卸载，支持使用独立安装或 Microsoft Store 版 Codex 首次运行准备的组件登录与查额度，切换时可确认关闭并重开 Codex 桌面；Antigravity 2.x 个人账号需安装官方 `agy` CLI。Mac 双真号往返及 Windows 真实账号往返与跨期续期仍待实机验收。
 
 ---
 
 ## 快速安装
 
-选择适合自己电脑的 1.0.1 安装包。Mac 版需要 macOS 13 或更高版本，可在苹果菜单的「关于本机」查看芯片型号。
+推荐使用一行命令自动识别架构、核对发布签名清单并完成安装（若曾安装早期 `1.0.x` 测试包，直接运行即可无损覆盖至 `0.1.0` 并保留全部账号）：
 
-[macOS · Apple Silicon（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-arm64.dmg) · [macOS · Intel（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-x64.dmg) · [Windows · x64（EXE）](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-Setup-1.0.1-x64.exe)
+```bash
+# macOS（需 macOS 13+，自动识别 Apple Silicon / Intel 并安装至 /Applications）
+curl -fsSL https://xjzc-mt.github.io/agent-switcher/install.sh | bash
+```
+
+```powershell
+# Windows x64（PowerShell）
+irm https://xjzc-mt.github.io/agent-switcher/install.ps1 | iex
+```
+
+也可直接下载 `0.1.0` 安装包：
+[macOS · Apple Silicon（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-0.1.0-arm64.dmg) · [macOS · Intel（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-0.1.0-x64.dmg) · [Windows · x64（EXE）](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-Setup-0.1.0-x64.exe)
 
 - **macOS** 打开 DMG，将 AGS 拖入「应用程序」。切换前先结束官方客户端中的任务，确认后 AGS 会退出并重开原先运行的桌面客户端。使用 Antigravity 时，请先关闭共用登录的 `agy` 或 IDE 会话。
-- **Windows** 运行 EXE 安装。切换 Codex 前，请先退出正在运行的 Codex 桌面并结束共用登录的 CLI 或 IDE 会话，切换后按需重开。
+- **Windows** 运行 EXE 安装。切换前请先结束共用登录的 CLI 或 IDE 会话；若 Codex 桌面正在运行，确认后 AGS 会关闭并在切换完成后按原方式重开。
 
 ```bash
 shasum -a 256 AgentSwitcher-*.dmg   # macOS。将结果与同版 SHA256SUMS 对照。
-# Windows PowerShell: Get-FileHash .\AgentSwitcher-Setup-1.0.1-x64.exe
+# Windows PowerShell: Get-FileHash .\AgentSwitcher-Setup-0.1.0-x64.exe
 ```
 
 > [!IMPORTANT]
-> macOS 安装包采用 **ad-hoc 签名**（尚未接入 Apple 公证）。首次打开若提示无法验证开发者，核对来源后前往 **「系统设置 → 隐私与安全性」滑至底部点击「仍要打开」** 即可。
+> macOS 安装包采用 **ad-hoc 签名**（尚未接入 Apple 公证）。使用上方 `install.sh` 命令安装会自动核对签名清单；若手动下载拖入 DMG 后首次打开提示无法验证开发者，核对 `SHA256SUMS` 后前往 **「系统设置 → 隐私与安全性」滑至底部点击「仍要打开」** 即可。
 
 遇到问题时，在「设置 → 应用与更新 → 导出故障报告」保存近期操作的脱敏记录，可自行决定是否私下转交维护者。也可查看[已知问题记录](issues/README.md)或到 [GitHub Issues](https://github.com/xjzc-mt/agent-switcher/issues) 反馈。**切勿上传真实凭据 JSON、Token 或备份密码**。
 
 <details>
 <summary><strong>偏好设置与应用内更新</strong></summary>
 
-可在设置中切换重置时间格式（倒计时 / 日期时间）、调整无痕登录行为或复制 Codex 历史数据排查指令。
+可在设置中切换重置时间格式（倒计时 / 日期时间）、分别设置当前与备用账号自动刷新间隔、调整无痕登录行为或复制 Codex 历史数据排查指令。
 
-macOS 版可在应用内下载匹配芯片的新版 DMG。AGS 使用内置 Ed25519 公钥验证发布清单，并核对安装包的 SHA-256。Windows 版请从发布页下载新版 x64 安装程序。[应用内下载更新](docs/app-updates.md) · [GitHub Releases](https://github.com/xjzc-mt/agent-switcher/releases)
+macOS 与 Windows x64 版均可在应用内下载匹配架构的新版安装包。AGS 使用内置 Ed25519 公钥验证发布清单并核对 SHA-256，校验通过后点击「立即安装并重启」即可安全退出、替换并重开新版。[应用内下载更新](docs/app-updates.md) · [GitHub Releases](https://github.com/xjzc-mt/agent-switcher/releases)
 
 ![设置：紧凑的偏好、清理辅助与应用更新](docs/images/08-settings.png)
 
@@ -141,7 +151,7 @@ npm run dist             # 本地构建 DMG
 
 <p>
   <img src="assets/gate-mark.png" width="24" align="absmiddle" alt="AGS 门标" />
-  <strong>顶部那扇「AGI 之门」下，人与众 Agent 并肩、人与人彼此托举——AgentSwitcher v1.0 只是序章。</strong>
+  <strong>顶部那扇「AGI 之门」下，人与众 Agent 并肩、人与人彼此托举——AgentSwitcher 只是序章。</strong>
 </p>
 
 一款围绕 **私密信任圈 · 额度零浪费 · 彼此互助** 打造的**划时代个人微中转产品**已进入发布倒计时，即将揭晓。

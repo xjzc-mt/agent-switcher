@@ -3,7 +3,7 @@
 开发目录、已安装应用和压缩后的 DMG 是不同对象，不能把整个工作区体积当作下载大小。
 
 - `node_modules/` 是开发与构建依赖，其中包含开发用 Electron。
-- `dist/` 是 TypeScript 编译结果。
+- `dist/` 保存 TypeScript 编译结果和 Windows 构建产出的辅助程序。
 - `release/` 是安装包和打包中间产物。
 - `test-results/` 是测试截图等生成文件。
 
@@ -11,7 +11,7 @@
 
 ## 当前打包配置
 
-`package.json` 的 `build.files` 纳入项目 MIT 许可 `LICENSE`、`dist/**/*.js`、`renderer/**/*` 和运行时 `assets/**/*`，排除备选图标目录 `assets/icon-candidates/**/*`。electron-builder 同时收集必要运行依赖。`build.mac.icon` 另从 `packaging/app-icon.png` 生成应用图标，该文件也是开发版 Dock 图标来源。默认生成 DMG，不自动上传。语言资源保留英文与简繁体中文及相应变体。应用标识固定为 `com.agent-switcher.app`。
+`package.json` 的 `build.files` 纳入项目 MIT 许可 `LICENSE`、`dist/**/*.js`、`renderer/**/*` 和运行时 `assets/**/*`，排除备选图标目录 `assets/icon-candidates/**/*`。两端均排除 `assets/windows/` 下的 C# 源码。Windows 包单独带上 `dist/windows-helpers/` 的预编译程序和 SHA-256 清单，托盘使用彩色门标；macOS 托盘使用模板图。electron-builder 同时收集必要运行依赖。`build.mac.icon` 另从 `packaging/app-icon.png` 生成应用图标，该文件也是开发版 Dock 图标来源。默认生成 DMG，不自动上传。语言资源保留英文与简繁体中文及相应变体。应用标识固定为 `com.agent-switcher.app`。
 
 ```bash
 npm run dist

@@ -702,11 +702,6 @@ button {
   background: var(--teal-soft);
 }
 
-.status-planned {
-  color: var(--amber);
-  background: var(--amber-soft);
-}
-
 /* Install */
 .install-head {
   display: flex;

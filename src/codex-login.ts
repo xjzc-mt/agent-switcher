@@ -77,6 +77,6 @@ function startServer(binary: string, directory: string, target?: CredentialUpdat
 
 export const codexLogin = createLoginManager(codexAgent, (directory, target) => {
   const binary = codexAgent.findCodexBinary();
-  if (!binary) throw new Error('未找到 Codex CLI，请先安装 Codex');
+  if (!binary) throw new Error(codexAgent.missingRuntimeMessage('未找到 Codex CLI，请先安装 Codex'));
   return startServer(binary, directory, target);
 });

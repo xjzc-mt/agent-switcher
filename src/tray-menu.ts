@@ -1,4 +1,5 @@
 import { BrowserWindow, ipcMain, screen, type Tray } from 'electron';
+import type { MenuAction, MenuView } from './application-menu';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -8,7 +9,8 @@ export interface TrayAccount {
   name: string;
   label: string;
   plan?: string;
-  windows: { label: string; remaining?: number }[];
+  weeklyPro: boolean;
+  windows: { label: string; remaining?: number; resetsAt?: number }[];
   cached?: boolean;
   expired: boolean;
 }
@@ -27,12 +29,16 @@ export interface TraySnapshot {
   switching?: boolean;
   selectedAgent?: TrayAgent;
   windowClosed?: boolean;
+  countdown?: boolean;
+  menu?: MenuView;
 }
 export interface TrayCommand {
   action: 'open' | 'add' | 'switch' | 'update' | 'save' | 'refresh' | 'quit';
   agent?: TrayAgent;
   name?: string;
 }
+
+export type WindowCommand = TrayCommand | { action: 'menu'; operation: MenuAction };
 
 function allowed(command: TrayCommand, state?: TraySnapshot): boolean {
   if (!command || typeof command !== 'object') return false;

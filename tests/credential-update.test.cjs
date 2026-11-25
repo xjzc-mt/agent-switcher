@@ -1,18 +1,16 @@
-const {test,beforeEach,after}=require('node:test');
+const { mockIdleClients, createTestHome, readCredentialFile, jwt } = require('./helpers/test-env.cjs');
+const {test,beforeEach}=require('node:test');
 const assert=require('node:assert/strict');
-const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'ags-credential-update-'));
-os.homedir=()=>root;
-const { readCredentialFile } = require('./vault-fixture.cjs');
-const clients=require('../dist/clients');clients.runningClients=async()=>[];
-const logout=require('../dist/client-logout');logout.runningCodexSessions=async()=>[];
+const fs=require('node:fs'),path=require('node:path');
+const root = createTestHome('ags-credential-update-');
+const clients = mockIdleClients();
 const store=require('../dist/store');
 const backup=require('../dist/backup');
 const accounts=require('../dist/accounts');
 const {codexAgent:agent}=require('../dist/agents/codex');
 const utils=require('../dist/utils');
 Object.defineProperty(agent,'homeDir',{value:path.join(root,'live')});
-const jwt=(payload)=>`h.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.s`;
+
 const auth=(workspace,token='old',member='person',email='same@example.test')=>Buffer.from(JSON.stringify({
   auth_mode:'chatgpt',
   tokens:{
@@ -50,7 +48,6 @@ beforeEach(()=>{
   for(const dir of [store.STORE_DIR,agent.homeDir])fs.rmSync(dir,{recursive:true,force:true});
   agent.queryLiveRpc=mockServerVerify('A');
 });
-after(()=>fs.rmSync(root,{recursive:true,force:true}));
 
 test('mere account/read email echo, same-email wrong workspace, forged id_token, and insufficient identity preserve original credentials and guide to re-login',async()=>{
   // 1. Mere account/read email echo WITHOUT server-refreshed token claims MUST NOT authorize replacement!
@@ -119,6 +116,29 @@ test('an unresolved authentication error permits replacement only while the erro
     store.writeProfileMeta('codex','target',{snapshot});
     await assert.rejects(preview('target','B'),/未标记/);
   }
+});
+
+test('a plan-only server response survives rejection and failed replacement for the same saved login',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const name='plan-only', workspace='original-workspace';
+  const card=()=>accounts.dashboard()[0].profiles.find(p=>p.name===name).meta.snapshot;
+  const login=JSON.parse(auth(workspace));
+  login.tokens.access_token=login.tokens.id_token;
+  utils.atomicWrite(file(name),JSON.stringify(login));
+  agent.queryLiveRpc=async()=>({account:{email:'same@example.test',planType:'pro'}});
+  const initial=await accounts.refreshAccount(agent,name,true);
+  assert.equal(initial.plan,'pro');assert.equal(initial.quota,undefined);
+  t.mock.timers.tick(30000);
+  const {CodexQueryError}=require('../dist/agents/codex');
+  agent.queryLiveRpc=async()=>{throw new CodexQueryError('fixture rejection','authentication-rejected');};
+  assert.equal((await accounts.refreshAccount(agent,name,true)).authFailure,'authentication-rejected');
+  assert.equal(card().plan,'pro');
+  await install(await preview(name,workspace));
+  t.mock.method(agent,'queryCredential',async()=>({status:{state:'error',available:true,plan:'enterprise'}}));
+  assert.equal((await accounts.refreshAccount(agent,name,true)).state,'expired');
+  assert.equal(card().plan,'pro');assert.equal(card().quota,undefined);
+  utils.atomicWrite(file(name),auth('other-workspace'));
+  assert.equal(card().plan,undefined,'A different workspace under the same email cannot inherit the previous plan');
 });
 
 test('commit rechecks deleted, replaced and recovered targets after preview',async()=>{
@@ -358,4 +378,46 @@ test('a workspace selector alone cannot establish the workspace of the refreshed
   const result = await agent.queryCredential(auth(workspace, 'candidate'), { verifyTarget: target });
   if (result.temporaryDirectory) t.after(() => require('../dist/temporary-credentials').releaseTemporaryCredentials(result.temporaryDirectory));
   assert.equal(result.verifiedReplacement, false);
+});
+
+test('an official verification commits its successor and releases its home when only the live write fails', async t => {
+  expired('active','STAGED');
+  const before = auth('STAGED'), after = auth('STAGED','verified');
+  utils.atomicWrite(path.join(agent.homeDir,'auth.json'),before);
+  await install(await preview('active','STAGED','candidate'));
+  const verify = mockServerVerify('STAGED','person','verified');
+  let temporary;
+  agent.queryLiveRpc = dir => { temporary=dir; return verify(dir); };
+  const write = agent.writeCredentials.bind(agent);
+  t.mock.method(agent,'writeCredentials',(dir,files)=>{
+    if (dir === agent.homeDir) throw new Error('simulated live write failure');
+    write(dir,files);
+  });
+  const status = await accounts.refreshAccount(agent,'active',true);
+  assert.equal(status.state,'ok');
+  assert.match(status.extra,/账号池凭据已更新.*切换/);
+  assert.equal(accounts.dashboard()[0].active,undefined);
+  assert.deepEqual(readCredentialFile(file('active')),after);
+  assert.deepEqual(readCredentialFile(path.join(agent.homeDir,'auth.json')),before);
+  assert.equal(fs.existsSync(stagedFile('active')),false);
+  assert.equal(fs.existsSync(temporary),false);
+});
+
+test('a queued verification cannot consume another identity’s staged login under a reused name', async t => {
+  expired('queued','A');
+  expired('next','B');
+  await install(await preview('next','B','candidate-B'));
+  const verify = t.mock.method(agent, 'queryLiveRpc', mockServerVerify('B'));
+  const originalDir = store.profileDir('codex','queued');
+  let refresh;
+  await store.withStoreLock(async () => {
+    refresh = accounts.refreshAccount(agent,'queued',true);
+    await store.withStoreLock(async () => {
+      fs.rmSync(originalDir, {recursive:true});
+      fs.renameSync(store.profileDir('codex','next'), originalDir);
+    });
+  }, agent.identity(originalDir).id);
+  await assert.rejects(refresh, require('../dist/credential-state').CredentialChangedError);
+  assert.equal(verify.mock.callCount(),0);
+  assert.deepEqual(readCredentialFile(stagedFile('queued')),auth('B','candidate-B'));
 });

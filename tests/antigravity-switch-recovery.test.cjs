@@ -1,10 +1,9 @@
-const { test, after } = require('node:test');
+const { createTestHome, installMockKeychain } = require('./helpers/test-env.cjs');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-switch-recovery-'));
-os.homedir = () => root;
-require('./vault-fixture.cjs');
+const root = createTestHome('ags-switch-recovery-');
 const recovery = require('../dist/antigravity-switch-recovery');
 const { readBuffer } = require('../dist/utils');
 const { ANTIGRAVITY_SWITCH_FILE } = require('../dist/credential-vault');
@@ -22,7 +21,6 @@ function begin(keychain) {
   files.forEach(file => write(file, old));
   recovery.beginSwitchRecovery(keychain, target, files.map(capture));
 }
-after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 test('a restarted process restores the files from its sealed journal when the original Keychain item still exists', () => {
   write(files[0], old);
@@ -30,7 +28,7 @@ test('a restarted process restores the files from its sealed journal when the or
   const script = `
     const fs=require('node:fs'), os=require('node:os');
     os.homedir=()=>process.argv[1];
-    require('./tests/vault-fixture.cjs');
+    require('./tests/helpers/test-env.cjs').installMockKeychain();
     const files=process.argv.slice(2), next=Buffer.from('next-private-token');
     require('./dist/antigravity-switch-recovery').beginSwitchRecovery('mock-keychain',next,
       files.map(path=>({path,bytes:fs.existsSync(path)?fs.readFileSync(path):null,mode:0o600})));

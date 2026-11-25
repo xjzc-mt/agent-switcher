@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
+import { agentIds as AGENT_IDS } from './agents/metadata';
+import { Argument, Command } from 'commander';
 import { once } from 'events';
 import path from 'path';
 import { spawn } from 'child_process';
-import { ALL_AGENTS } from './accounts';
+import { ALL_AGENTS, resolveAgent } from './accounts';
 import { runSave } from './commands/save';
 import { runUse } from './commands/use';
 import { runList } from './commands/list';
@@ -11,16 +12,6 @@ import { runStatus } from './commands/status';
 import { runRemove } from './commands/remove';
 import { maintainCredentialStorage } from './storage-maintenance';
 
-const AGENT_IDS  = ALL_AGENTS.map((a) => a.id);
-
-function resolveAgent(id: string) {
-  const agent = ALL_AGENTS.find((a) => a.id === id);
-  if (!agent) {
-    console.error(`Unknown agent: "${id}". Available: ${AGENT_IDS.join(', ')}`);
-    process.exit(1);
-  }
-  return agent;
-}
 
 const program = new Command();
 program.hook('preAction', async (_root, command) => {
@@ -34,7 +25,9 @@ program
 
 // ── save ──────────────────────────────────────────────────────────────────────
 program
-  .command('save <agent> <profile>')
+  .command('save')
+  .addArgument(new Argument('<agent>').choices(AGENT_IDS))
+  .argument('<profile>')
   .description('Save current auth of <agent> as named <profile>')
   .addHelpText('after', `\n  Agents:  ${AGENT_IDS.join(', ')}\n  Example: ags save codex work\n           ags save agy  personal`)
   .action(async (agentId: string, profileName: string) => {
@@ -43,11 +36,13 @@ program
 
 // ── use ───────────────────────────────────────────────────────────────────────
 program
-  .command('use <agent> <profile>')
+  .command('use')
+  .addArgument(new Argument('<agent>').choices(AGENT_IDS))
+  .argument('<profile>')
   .description('Switch <agent> to a saved <profile>')
   .option('--save-current', 'Save an unmanaged current account before switching')
   .option('--discard-current', 'Switch without saving an unmanaged current account')
-  .option('--allow-file-storage', 'Allow Antigravity to use its two private OAuth files and retire its previous Keychain login for a long credential')
+  .option('--allow-file-storage', 'Allow Antigravity to use its two private OAuth files and retire its previous system credential for a long login')
   .addHelpText('after', `\n  Example: ags use codex work\n           ags use agy  personal`)
   .action(async (agentId: string, profileName: string, options) => {
     if (options.saveCurrent && options.discardCurrent) throw new Error('只能选择一种当前账号处理方式');
@@ -57,7 +52,8 @@ program
 
 // ── list ──────────────────────────────────────────────────────────────────────
 program
-  .command('list [agent]')
+  .command('list')
+  .addArgument(new Argument('[agent]').choices(AGENT_IDS))
   .alias('ls')
   .description('List saved profiles (optionally filter by agent)')
   .action(async (agentId?: string) => {
@@ -75,7 +71,9 @@ program
 
 // ── rm ────────────────────────────────────────────────────────────────────────
 program
-  .command('rm <agent> <profile>')
+  .command('rm')
+  .addArgument(new Argument('<agent>').choices(AGENT_IDS))
+  .argument('<profile>')
   .alias('remove')
   .description('Delete a saved profile')
   .option('--yes', 'Confirm removing the displayed account and matching backups')

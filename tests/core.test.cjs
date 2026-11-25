@@ -1,16 +1,12 @@
-const { accessToken } = require('./codex-token-fixture.cjs');
-const { test, after, beforeEach } = require('node:test');
+const { mockIdleClients, createTestHome, readCredentialFile, jwt, accessToken } = require('./helpers/test-env.cjs');
+const locks = require('../dist/file-lock');
+const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-tests-'));
-os.homedir = () => root;
-const { readCredentialFile } = require('./vault-fixture.cjs');
-const clients = require('../dist/clients');
-clients.runningClients = async () => [];
-const logout = require('../dist/client-logout');
-logout.runningCodexSessions = async () => [];
+const root = createTestHome('ags-tests-');
+mockIdleClients();
 const store = require('../dist/store');
 const { codexAgent: agent } = require('../dist/agents/codex');
 Object.defineProperty(agent, 'homeDir', { value: path.join(root, 'live'), configurable: true });
@@ -21,7 +17,7 @@ async function importBackup(data, password) {
   const parsed = await backup.parseBackup(data, password);
   return backup.installBackup(parsed, parsed.items.map(item => item.key));
 }
-const auth = (id, token = 'refresh-' + id) => JSON.stringify({ tokens: { account_id: id, access_token: accessToken(id,id,id+'@example.test'), refresh_token: token, id_token: `header.${Buffer.from(JSON.stringify({ sub: id, email: `${id}@example.test` })).toString('base64url')}.signature` } });
+const auth = (id, token = 'refresh-' + id) => JSON.stringify({ tokens: { account_id: id, access_token: accessToken(id,id,id+'@example.test'), refresh_token: token, id_token: jwt({ sub: id, email: `${id}@example.test` }) } });
 const putLive = (id, token) => atomicWrite(path.join(agent.homeDir, 'auth.json'), auth(id, token));
 const putProfile = (name, id) => atomicWrite(path.join(store.profileDir('codex', name), 'auth.json'), auth(id));
 const readProfile = name => readCredentialFile(path.join(store.profileDir('codex', name), 'auth.json'), 'utf8');
@@ -29,7 +25,6 @@ beforeEach(() => {
   for (const dir of [store.STORE_DIR, agent.homeDir]) fs.rmSync(dir, { recursive: true, force: true });
   agent.queryLiveRpc = async home => ({ account: { email: agent.identity(home).email, planType: 'plus' }, rates: { rateLimits: { primary: { usedPercent: 35, windowDurationMins: 300, resetsAt: 2000000000 } } } });
 });
-after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 test('a linked store is rejected before locking or changing permissions on its destination', {skip: process.platform === 'win32'}, async () => {
   const external = fs.mkdtempSync(path.join(root, 'unmanaged-'));
@@ -75,11 +70,13 @@ test('import names agree on Unicode equivalents and a long profile can change ca
   assert.equal(readProfile(long.toUpperCase()), auth('third'));
 });
 
-test('current quota plan wins over older login claims and missing plans fall back', async () => {
-  putLive('A');
+test('current quota plan wins over older login claims and missing plans fall back', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  putProfile('plan-fallback', 'A');
   for(const [reported,expected] of [['prolite','prolite'],['promax','promax'],['plus','plus'],['unknown','pro'],[undefined,'pro']]) {
     agent.queryLiveRpc=async()=>({account:{email:'A@example.test',planType:'pro'},rates:{rateLimits:{planType:reported,primary:{usedPercent:30}}}});
-    assert.equal((await agent.status()).plan,expected);
+    assert.equal((await accounts.refreshAccount(agent, 'plan-fallback', true)).plan,expected);
+    t.mock.timers.tick(31000);
   }
 });
 
@@ -248,8 +245,14 @@ test('legacy ZIP import validates all paths and credentials before committing', 
   }
   await assert.rejects(importBackup(zip([['codex/A/auth.json', auth('A')], ['codex/B/auth.json', '{}']])));
   assert.deepEqual(store.listProfiles('codex'), []);
-  await importBackup(zip([['codex/A/auth.json', auth('A')], ['codex/A/config.toml', 'model="old"']]));
+  const retired = [['claude/old/.credentials.json', 'legacy bytes'], ['claude/old/_meta.json', '{}']];
+  await assert.rejects(backup.parseBackup(zip(retired)), /没有受支持的平台账号/);
+  const mixed = await backup.parseBackup(zip([['codex/A/auth.json', auth('A')], ['codex/A/config.toml', 'model="old"'], ...retired]));
+  assert.equal(mixed.skippedProfiles, 1);
+  assert.deepEqual([...mixed.groups.keys()], ['codex/A']);
+  await backup.installBackup(mixed, ['codex/A']);
   assert.ok(store.profileExists('codex', 'A')); assert.equal(fs.existsSync(path.join(store.profileDir('codex', 'A'), 'config.toml')), false);
+  assert.equal(fs.existsSync(path.join(store.STORE_DIR, 'claude')), false);
 });
 test('RPC waits for initialization and reads before requesting quota', async () => {
   const { CodexAgent } = require('../dist/agents/codex');
@@ -279,41 +282,49 @@ test('live quota cache is invalidated after external login changes identity', as
 });
 
 
-test('preferences migrate legacy files and preserve the private-login option on display-only writes', async () => {
+test('preferences migrate legacy files and preserve independent options on partial writes', async () => {
   const settings = require('../dist/settings');
-  assert.deepEqual(settings.readSettings(), {showResetTimes:true,openPrivateLogin:true});
+  assert.deepEqual(settings.readSettings(), {showResetTimes:true,openPrivateLogin:true,liveRefreshInterval:'1m',spareRefreshInterval:'5m'});
   fs.mkdirSync(store.STORE_DIR,{recursive:true});
-  fs.writeFileSync(path.join(store.STORE_DIR,'settings.json'), JSON.stringify({showResetTimes:false,priorities:['reset','week','5h']}));
-  assert.deepEqual(settings.readSettings(), {showResetTimes:false,openPrivateLogin:true});
-  await settings.saveSettings({showResetTimes:false,openPrivateLogin:false});
+  fs.writeFileSync(path.join(store.STORE_DIR,'settings.json'), JSON.stringify({showResetTimes:false,priorities:['reset','week','5h'],autoRefreshInterval:'15m'}));
+  assert.deepEqual(settings.readSettings(), {showResetTimes:false,openPrivateLogin:true,liveRefreshInterval:'3m',spareRefreshInterval:'15m'});
+  await settings.saveSettings({showResetTimes:false,openPrivateLogin:false,liveRefreshInterval:'1m',spareRefreshInterval:'manual'});
   await settings.saveSettings({showResetTimes:true});
-  const value = {showResetTimes:true,openPrivateLogin:false};
+  const value = {showResetTimes:true,openPrivateLogin:false,liveRefreshInterval:'1m',spareRefreshInterval:'manual'};
   assert.deepEqual(settings.readSettings(),value);
   await assert.rejects(settings.saveSettings({showResetTimes:'false'}), /无效/);
   await assert.rejects(settings.saveSettings({showResetTimes:true,openPrivateLogin:'false'}), /无效/);
   assert.deepEqual(settings.readSettings(), value);
 });
 
-test('refresh deadlines honor active/pool intervals and query once after each reset', () => {
+test('refresh deadlines honor independent intervals and query once after each reset', () => {
   const { quotaRefreshAt } = require('../dist/quota-refresh');
   const checked = 2000000000000;
   const status = {state:'ok',checkedAt:new Date(checked).toISOString()};
-  assert.equal(quotaRefreshAt(status,true,checked),checked+60000);
-  assert.equal(quotaRefreshAt(status,false,checked),checked+300000);
+  const policy = require('../renderer/account-policy');
+  for (const [interval, minutes, staleMinutes] of [['1m',1,5], ['3m',3,5], ['5m',5,5], ['15m',15,16], ['30m',30,31], ['manual',Infinity,30]]) {
+    assert.equal(quotaRefreshAt(status,interval,checked), checked + minutes * 60000);
+    assert.equal(quotaRefreshAt({...status,state:'error'},interval,checked), checked + Math.max(2,minutes) * 60000);
+    const sample = { ...status, fetchedAt: status.checkedAt };
+    for (const delta of [0,1]) assert.equal(policy.stale(sample,checked+staleMinutes*60000+delta,'codex',interval),delta===1);
+  }
   const reset = checked+20000;
   status.quota = {primaryWindow:{usedPercent:100,resetsAt:reset/1000}};
-  assert.equal(quotaRefreshAt(status,false,checked),reset+10000);
+  assert.equal(quotaRefreshAt(status,'5m',checked),reset+10000);
+  assert.equal(quotaRefreshAt(status,'30m',checked),reset+10000);
+  assert.equal(quotaRefreshAt(status,'manual',checked),Infinity);
+  assert.equal(quotaRefreshAt(undefined,'manual',checked),Infinity);
   status.checkedAt = new Date(reset+5000).toISOString();
-  assert.equal(quotaRefreshAt(status,false,checked),reset+35000);
+  assert.equal(quotaRefreshAt(status,'5m',checked),reset+35000);
   status.checkedAt = new Date(reset+10000).toISOString();
-  assert.equal(quotaRefreshAt(status,false,checked),reset+310000);
+  assert.equal(quotaRefreshAt(status,'5m',checked),reset+310000);
   status.state='error'; status.refreshFailures=1;
-  assert.equal(quotaRefreshAt(status,true),reset+130000);
+  assert.equal(quotaRefreshAt(status,'1m'),reset+130000);
   status.refreshFailures=2;
-  assert.equal(quotaRefreshAt(status,true),reset+310000);
+  assert.equal(quotaRefreshAt(status,'1m'),reset+310000);
   status.refreshFailures=3;
-  assert.equal(quotaRefreshAt(status,true),reset+910000);
-  status.state='expired'; assert.equal(quotaRefreshAt(status,true),Infinity);
+  assert.equal(quotaRefreshAt(status,'1m'),reset+910000);
+  status.state='expired'; assert.equal(quotaRefreshAt(status,'1m'),Infinity);
 });
 
 test('reset refresh bypasses ordinary cache but never invents restored quota', async () => {
@@ -466,10 +477,10 @@ test('store lock serializes writers, protects a successor from a paused reaper a
   assert.ok(JSON.stringify(order) === '[1,2,3,4]' || JSON.stringify(order) === '[3,4,1,2]');
   assert.equal(fs.existsSync(lockDir), false);
 
-  const successor = vault.tryAcquireAtomicLock(lockDir, String(process.pid));
+  const successor = locks.tryAcquireAtomicLock(lockDir, String(process.pid));
   assert.ok(successor);
-  assert.equal(vault.releaseAtomicLock(lockDir, 'stale-owner'), false);
-  assert.equal(vault.releaseAtomicLock(lockDir, successor), true);
+  assert.equal(locks.releaseAtomicLock(lockDir, 'stale-owner'), false);
+  assert.equal(locks.releaseAtomicLock(lockDir, successor), true);
 
   if (process.platform !== 'win32') {
     fs.mkdirSync(lockDir, { mode: 0o700 });
@@ -485,20 +496,20 @@ test('store lock serializes writers, protects a successor from a paused reaper a
         }
         return unlink(file);
       };
-      require('./dist/credential-vault').evictDeadLock(lock);
+      require('./dist/file-lock').evictDeadLock(lock);
     `, lockDir], { stdio: ['pipe', 'pipe', 'pipe'] });
     const { once } = require('node:events');
     const closed = once(reaper, 'close');
     try {
       const ready = await Promise.race([once(reaper.stdout, 'data'), closed]);
       assert.equal(String(ready[0]).trim(), 'ready');
-      assert.equal(vault.evictDeadLock(lockDir), true);
-      const newOwner = vault.tryAcquireAtomicLock(lockDir, String(process.pid));
+      assert.equal(locks.evictDeadLock(lockDir), true);
+      const newOwner = locks.tryAcquireAtomicLock(lockDir, String(process.pid));
       assert.ok(newOwner);
       reaper.stdin.end('g');
       assert.deepEqual(await closed, [0, null]);
       assert.deepEqual(fs.readdirSync(lockDir), [newOwner]);
-      assert.equal(vault.releaseAtomicLock(lockDir, newOwner), true);
+      assert.equal(locks.releaseAtomicLock(lockDir, newOwner), true);
     } finally {
       if (reaper.exitCode === null && reaper.signalCode === null) reaper.kill('SIGKILL');
     }
@@ -585,7 +596,7 @@ test('P2 #12 & C4: corrupted pool profile does not block CLI, sync step-2 failur
   const crashRes = spawnSync(process.execPath, ['-e', `
     const fs = require('fs'), path = require('path'), os = require('os');
     os.homedir = () => process.env.AGS_TEST_HOME;
-    require('./tests/vault-fixture.cjs');
+    require('./tests/helpers/test-env.cjs').installMockKeychain();
     const accounts = require('./dist/accounts');
     const { codexAgent } = require('./dist/agents/codex');
     const orig = fs.renameSync;
@@ -627,7 +638,7 @@ test('P2 #12 & C4: corrupted pool profile does not block CLI, sync step-2 failur
   // Exercise actual CLI entry (`src/index.ts` preAction -> maintainCredentialStorage + list + rm) in a child process!
   const cliOut = execFileSync(process.execPath, [
     '-e',
-    'const os=require("os");os.homedir=()=>process.env.AGS_TEST_HOME;require("./tests/vault-fixture.cjs");require("./dist/clients").runningClients=async()=>[];require("./dist/index.js");',
+    'const os=require("os");os.homedir=()=>process.env.AGS_TEST_HOME;require("./tests/helpers/test-env.cjs").installMockKeychain();require("./dist/clients").runningClients=async()=>[];require("./dist/index.js");',
     'node', 'list', 'codex',
   ], { cwd: path.join(__dirname, '..'), env: { ...process.env, AGS_TEST_HOME: root }, encoding: 'utf8' });
   assert.match(cliOut, /healthy-b/);
@@ -637,7 +648,7 @@ test('P2 #12 & C4: corrupted pool profile does not block CLI, sync step-2 failur
   // Removing the corrupted profile works cleanly via actual CLI `ags rm codex broken-card --yes`!
   const rmOut = execFileSync(process.execPath, [
     '-e',
-    'const os=require("os");os.homedir=()=>process.env.AGS_TEST_HOME;require("./tests/vault-fixture.cjs");require("./dist/index.js");',
+    'const os=require("os");os.homedir=()=>process.env.AGS_TEST_HOME;require("./tests/helpers/test-env.cjs").installMockKeychain();require("./dist/index.js");',
     'node', 'rm', 'codex', 'broken-card', '--yes',
   ], { cwd: path.join(__dirname, '..'), env: { ...process.env, AGS_TEST_HOME: root }, encoding: 'utf8' });
   assert.match(rmOut, /已移除 1 条备份/);

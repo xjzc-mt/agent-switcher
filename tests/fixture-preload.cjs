@@ -7,8 +7,10 @@ const names = ['个人主力', '工作账号', '团队账号', '备用账号'];
 const profiles = names.map((name,i)=>({name,isActive:i===0,meta:{email:`account-${i+1}@example.test`,savedAt:now,snapshot:snapshot(`account-${i+1}@example.test`,[18,67,90,45][i],[35,52,60,21][i])}}));
 profiles[0].meta.snapshot.quota.credits={balance:'12.5'};
 profiles[1].meta.snapshot.quota.credits={balance:'4.2'};
-const data = [{id:'codex',label:'Codex',active:names[0],status:profiles[0].meta.snapshot,profiles}, {id:'claude',label:'Claude Code',status:{available:false,state:'unsupported',extra:'macOS Keychain 登录和额度查询暂不支持'},profiles:[],switchUnsupported:'Keychain 暂不支持'}, {id:'agy',label:'Antigravity',status:{available:false,state:'unsupported',extra:'仅管理文件凭据；切换后请重启 Antigravity'},profiles:[]}];
-let settings = { showResetTimes: true, openPrivateLogin:true };
+const data = [{id:'codex',label:'Codex',active:names[0],status:profiles[0].meta.snapshot,profiles}, {id:'agy',label:'Antigravity',status:{available:false,state:'unsupported',extra:'仅管理文件凭据；切换后请重启 Antigravity'},profiles:[]}];
+const manualStartup = process.argv.includes('--test-manual-refresh');
+let settings = { showResetTimes: true, openPrivateLogin:true, liveRefreshInterval:manualStartup ? 'manual' : '1m', spareRefreshInterval:manualStartup ? 'manual' : '5m' };
+if (manualStartup) profiles.forEach(p => { p.meta.snapshot.checkedAt = new Date(0).toISOString(); });
 let failNextSettings = false;
 contextBridge.exposeInMainWorld('settingsTestApi', { failNext: () => { failNextSettings = true; } });
 const calls = [];
@@ -55,19 +57,16 @@ contextBridge.exposeInMainWorld('providerTestApi', {
   native:(activeSnapshotAt=now)=>{
     const make=(email,plan)=>({available:true,account:email,plan,state:'ok',checkedAt:now,fetchedAt:now,quota:{buckets:
       ['Gemini','Claude / GPT','Gemini 4 Argon'].map((label,i)=>({id:label,label,windows:(i===2?[10080]:[300,10080]).map(windowMins=>({windowMins,usedPercent:i===1?51:0,resetsAt:Math.floor(Date.now()/1000)+7200}))}))}});
-    data[2].management={quota:true,storage:'keychain',canSaveCurrent:true,isolatedLogin:true};
-    delete data[2].switchUnsupported;
-    data[2].profiles=['Google A','Google B'].map((name,i)=>({name,isActive:!i,meta:{email:`google-${i}@example.test`,snapshot:make(`google-${i}@example.test`,i?'Google AI Pro':'Google AI Ultra')}}));
-    data[2].active='Google A';data[2].status=data[2].profiles[0].meta.snapshot;
-    Object.assign(data[2].status, { fetchedAt: activeSnapshotAt, checkedAt: activeSnapshotAt });
+    data[1].management={quota:true,storage:'keychain',canSaveCurrent:true,isolatedLogin:true};
+    delete data[1].switchUnsupported;
+    data[1].profiles=['Google A','Google B'].map((name,i)=>({name,isActive:!i,meta:{email:`google-${i}@example.test`,snapshot:make(`google-${i}@example.test`,i?'Google AI Pro':'Google AI Ultra')}}));
+    data[1].active='Google A';data[1].status=data[1].profiles[0].meta.snapshot;
+    Object.assign(data[1].status, { fetchedAt: activeSnapshotAt, checkedAt: activeSnapshotAt });
   },
   setup:()=>{
-    data[1].management={quota:false,storage:'keychain',canSaveCurrent:false,notice:'登录由 Claude Code 管理，已保存的文件凭据可导入、导出；暂不支持 Keychain 账号切换。',loginLabel:'在 Claude Code 登录',loginHint:'运行官方 auth login，会改变当前配置目录的登录账号。'};
-    data[1].status={available:true,state:'ok',account:'current@example.test',plan:'pro'};
-    data[1].profiles=['个人','开发','团队备份'].map((name,i)=>({name,meta:{email:`claude-${i+1}@example.test`,snapshot:{available:true,state:'unverified',plan:i===1?'max':i===0?'pro':undefined}}}));
-    data[2].management={quota:false,storage:'unified',canSaveCurrent:false,notice:'Antigravity 2.x 已统一 App、CLI 与 IDE 登录。旧版凭据仅作备份，请在官方客户端切换账号。',loginLabel:'打开 Antigravity',loginHint:'在官方客户端中查看或更改登录账号。'};
-    data[2].switchUnsupported='共用认证暂不支持文件切换';
-    data[2].profiles=[{name:'旧版账号备份',meta:{email:'google@example.test',snapshot:{available:true,state:'unverified'}}}];
+    data[1].management={quota:false,storage:'unified',canSaveCurrent:false,notice:'Antigravity 2.x 已统一 App、CLI 与 IDE 登录。旧版凭据仅作备份，请在官方客户端切换账号。',loginLabel:'打开 Antigravity',loginHint:'在官方客户端中查看或更改登录账号。'};
+    data[1].switchUnsupported='共用认证暂不支持文件切换';
+    data[1].profiles=[{name:'旧版账号备份',meta:{email:'google@example.test',snapshot:{available:true,state:'unverified'}}}];
   },
 });
 contextBridge.exposeInMainWorld('accountTestApi',{
@@ -118,8 +117,10 @@ contextBridge.exposeInMainWorld('api', {
  getStatus:async()=>{
    statusReads++;
    if(failStatusReads)throw new Error('模拟账号列表读取失败');
-   return data.map(a=>({...a,refreshAt:a.id==='codex'||a.management?.quota?Date.parse(a.status.checkedAt||now)+60000:Infinity,
-     profiles:a.profiles.map(p=>({...p,refreshAt:p.meta.snapshot?.available===false?Infinity:Date.parse(p.meta.snapshot?.checkedAt||now)+(p.isActive?60000:300000)}))}));
+   const mins = { '1m':1, '3m':3, '5m':5, '15m':15, '30m':30, manual:Infinity };
+   const live = mins[settings.liveRefreshInterval], spare = mins[settings.spareRefreshInterval];
+   return data.map(a=>({...a,refreshPeriods:{live:live*60000,spare:spare*60000},refreshAt:a.id==='codex'||a.management?.quota?Date.parse(a.status.checkedAt||now)+live*60000:Infinity,
+     profiles:a.profiles.map(p=>({...p,refreshAt:p.meta.snapshot?.available===false?Infinity:Date.parse(p.meta.snapshot?.checkedAt||now)+(p.isActive?live:spare)*60000}))}));
  },
  getSettings:async()=>settings,
  saveSettings:async(value)=>{
@@ -132,9 +133,8 @@ contextBridge.exposeInMainWorld('api', {
  checkAppUpdates: async () => recordAppUpdate('check', { status: 'unavailable', message: '暂未取得可用版本', lastCheckedAt: Date.now() }),
  downloadAppUpdate: async () => recordAppUpdate('download', { status: 'downloading', progress: 0, message: '' }),
  cancelAppUpdate: async () => recordAppUpdate('cancel', { status: 'available', progress: undefined }),
- openAppUpdate: async () => recordAppUpdate('open'),
+ installAppUpdate: async () => recordAppUpdate('install'),
  setAutoUpdateCheck: async enabled => recordAppUpdate('auto', { autoCheck: enabled }),
- quitForAppUpdate: async () => recordAppUpdate('quit'),
  openProjectPage: async () => recordAppUpdate('project'),
  previewImport:async(kind,agent)=>{
    calls.push({method:'preview-import',kind,agent});
@@ -148,7 +148,7 @@ contextBridge.exposeInMainWorld('api', {
    }
    return importMode==='encrypted'?{id:'encrypted',needsPassword:true,fileName:'test-backup.ags'}:{id:'preview',items:importItems};
  },
- unlockImport:async(id,password)=>{calls.push({method:'unlock-import',id}); return password==='test-password'?{id:'preview',items:importItems}:{ok:false,error:'密码不正确'};},
+ unlockImport:async(id,password)=>{calls.push({method:'unlock-import',id}); return password==='test-password'?{id:'preview',items:importItems,skippedProfiles:1}:{ok:false,error:'密码不正确'};},
  previewCredentials:async(text,id)=>{calls.push({method:'preview-credentials',id}); try{ const value=JSON.parse(text); if(!value.tokens?.refresh_token) throw new Error();credentialBatch=[{key:`${id}/pasted`,agent:id,profile:'pasted',email:'pasted@example.test',state:'ready'}];return {id:'credentials-'+(++credentialPreviewId),kind:'credentials',items:credentialBatch}; }catch{return {ok:false,error:'请提供完整的客户端凭据 JSON'};}},
  commitImport:async(id,keys,names)=>{
    calls.push({method:'import',id,keys,names});
@@ -206,7 +206,7 @@ contextBridge.exposeInMainWorld('api', {
    if(blockNextSave){blockNextSave=false;await new Promise(resolve=>{releaseSave=resolve;});releaseSave=undefined;}
    const existing=data.find(a=>a.id===id)?.profiles.find(p=>p.meta.email===browserLogin?.email&&p.meta.snapshot?.state==='expired');
    if(existing)existing.meta.snapshot={...existing.meta.snapshot,state:'unverified',authExpired:false};
-   if(id==='agy'&&browserLogin?.ready&&!existing)data[2].profiles.push({name,meta:{email:browserLogin.email,snapshot:{available:true,account:browserLogin.email,state:'unverified'}}});
+   if(id==='agy'&&browserLogin?.ready&&!existing)data[1].profiles.push({name,meta:{email:browserLogin.email,snapshot:{available:true,account:browserLogin.email,state:'unverified'}}});
    browserLogin=undefined;return {ok:true,...(existing?{updated:true,profile:existing.name}:{})};
  },
  updateFromLogin:async(id,name,attempt)=>{

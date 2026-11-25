@@ -1,10 +1,10 @@
+import { importPool } from './import-pool';
 import path from 'path';
 import { Worker } from 'worker_threads';
 import { randomUUID } from 'crypto';
-import { isSameIdentity, resolveAgent, availableCredentialUpdateTarget, CredentialUpdateTarget } from './accounts';
-import { ParsedBackup, parsedCredentialEntry, installBackup, ImportResult } from './backup';
-import { listProfiles, profileDir, profileNameError, profileNameKey } from './store';
-import type { Identity } from './agents/base';
+import { resolveAgent, availableCredentialUpdateTarget, CredentialUpdateTarget } from './accounts';
+import { ParsedBackup, emptyCredentialBackup, appendCredentialEntry, installBackup, ImportResult } from './backup';
+import { profileNameError, profileNameKey } from './store';
 import { parseCredentialDocument } from './credential-document';
 
 const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
@@ -34,41 +34,28 @@ function defaultName(fileName: string | undefined, email: string | undefined, ag
 
 /** Only identity metadata is exposed to the renderer. Credential bytes stay in the main process. */
 function classify(batch: CredentialBatch): void {
-  const known = new Map<string, Array<{ key: string; profile: string; source: 'pool' | 'batch'; identity: Identity }>>();
-  const usedNames = new Map<string, Set<string>>();
+  const pool = importPool();
+  const parsedItems = new Map(batch.parsed.items.map(item => [item.key, item]));
   for (const item of batch.items) {
     if (item.state === 'error' || !item.agent) continue;
     const agent = resolveAgent(item.agent);
-    if (!known.has(agent.id)) {
-      const profiles = listProfiles(agent.id);
-      usedNames.set(agent.id, new Set(profiles.map(profileNameKey)));
-      known.set(agent.id, profiles.flatMap(profile => {
-        try {
-          const identity = agent.identity(profileDir(agent.id, profile));
-          return identity ? [{ key: `${agent.id}/${profile}`, profile, source: 'pool' as const, identity }] : [];
-        } catch { return []; }
-      }));
-    }
-    const identity = batch.parsed.identities!.get(item.key)!;
-    const accounts = known.get(agent.id)!;
-    const duplicate = accounts.find(saved => isSameIdentity(saved.identity, identity));
+    const { names: used, byIdentity } = pool(agent);
+    const identity = batch.parsed.identities.get(item.key)!;
+    const duplicate = byIdentity.get(identity.id);
     const update = duplicate?.source === 'pool' ? availableCredentialUpdateTarget(agent, duplicate.profile) : undefined;
     item.state = update ? 'update' : duplicate ? 'duplicate' : 'ready';
     item.duplicate = duplicate && !update ? { key: duplicate.key, profile: duplicate.profile, source: duplicate.source } : undefined;
     if (update) {
       item.profile = update.profile;
       batch.updates.set(item.key, update);
-      // One replacement per identity in a batch; later copies stay duplicates.
-      accounts.unshift({ key: item.key, profile: item.profile, source: 'batch', identity });
     } else if (!duplicate) {
-      const used = usedNames.get(agent.id)!;
       const original = item.profile;
       let suffix = 2;
       while (used.has(profileNameKey(item.profile))) item.profile = `${original.slice(0, 80)} (${suffix++})`;
       used.add(profileNameKey(item.profile));
-      accounts.push({ key: item.key, profile: item.profile, source: 'batch', identity });
-      batch.parsed.items.find(parsed => parsed.key === item.key)!.profile = item.profile;
+      parsedItems.get(item.key)!.profile = item.profile;
     }
+    if (update || !duplicate) byIdentity.set(identity.id, { key: item.key, profile: item.profile, source: 'batch' });
   }
 }
 
@@ -103,20 +90,15 @@ export async function parseCredentialBatch(data: Buffer, agent?: string, fileNam
   const document = await parseForPreview(data, agent);
   const batch: CredentialBatch = {
     items: [], updates: new Map(),
-    parsed: { groups: new Map(), items: [], identities: new Map() },
+    parsed: emptyCredentialBackup(),
   };
   for (const [index, entry] of document.entries.entries()) {
     const sourceIndex = document.collection ? index + 1 : undefined;
     try {
-      const parsed = parsedCredentialEntry(entry, agent);
-      const item = parsed.items[0];
-      const key = `${item.agent}/${randomUUID()}`;
+      const item = appendCredentialEntry(batch.parsed, entry, { key: randomUUID() });
       // A bundle filename is not an account name. Prefer per-account metadata or identity.
-      const profile = entry.name || defaultName(document.collection ? undefined : fileName, item.email, item.agent);
-      batch.parsed.groups.set(key, parsed.groups.get(item.key)!);
-      batch.parsed.identities!.set(key, parsed.identities!.get(item.key)!);
-      batch.parsed.items.push({ ...item, key, profile });
-      batch.items.push({ key, agent: item.agent, email: item.email, profile, fileName, sourceIndex, state: 'ready' });
+      item.profile = entry.name || defaultName(document.collection ? undefined : fileName, item.email, item.agent);
+      batch.items.push({ ...item, fileName, sourceIndex, state: 'ready' });
     } catch (error) {
       batch.items.push({ key: randomUUID(), profile: '', fileName, sourceIndex, state: 'error', error: (error as Error).message });
     }

@@ -30,6 +30,42 @@ function cli(name, body) {
   return file;
 }
 
+test('Windows desktop discovery selects a complete relocated CLI and honors its explicit override', t => {
+  const local = path.join(root, 'LocalAppData'), cache = path.join(local, 'OpenAI', 'Codex', 'bin');
+  const previous = Object.fromEntries(['LOCALAPPDATA', 'CODEX_CLI_PATH', 'CODEX_INSTALL_DIR', 'PATH', 'APPDATA'].map(key => [key, process.env[key]]));
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  for (const key of Object.keys(previous)) delete process.env[key];
+  process.env.LOCALAPPDATA = local;
+  const runtimes = ['f'.repeat(16), '8aaf1547b825b104', 'staging'];
+  for (const [index, name] of runtimes.entries()) {
+    const directory = path.join(cache, name);
+    fs.mkdirSync(directory, { recursive: true });
+    const binary = path.join(directory, 'codex.exe');
+    fs.writeFileSync(binary, '');
+    fs.utimesSync(binary, index + 1, index + 1);
+  }
+  const older = path.join(cache, runtimes[0], 'codex.exe'), newest = path.join(cache, runtimes[1], 'codex.exe');
+  assert.equal(findWindowsCodexBinary(), newest);
+  const packageRoot = path.join(local, 'Packages', 'OpenAI.Codex_2p2nqsd0c76g0');
+  const packageCache = path.join(packageRoot, 'LocalCache', 'Local', 'OpenAI', 'Codex', 'bin');
+  const { missingWindowsCodexRuntime } = require('../dist/windows-codex');
+  fs.mkdirSync(packageCache, { recursive: true });
+  assert.match(missingWindowsCodexRuntime(), /打开 Codex/);
+  for (const [index, directory] of [cache, path.join(packageCache, runtimes[0]), packageCache].entries()) {
+    fs.mkdirSync(directory, { recursive: true });
+    const candidate = path.join(directory, 'codex.exe');
+    fs.writeFileSync(candidate, 'fixture');
+    fs.utimesSync(candidate, index + 10, index + 10);
+    assert.equal(findWindowsCodexBinary(), candidate);
+  }
+  process.env.CODEX_CLI_PATH = '"' + older + '"';
+  assert.equal(findWindowsCodexBinary(), older);
+});
+
 test('Windows CLI discovery starts an isolated transport from an npm path with spaces', { timeout: 10000 }, async t => {
   const prefix = path.join(root, 'npm prefix');
   const pkg = path.join(prefix, 'node_modules', '@openai', 'codex');
@@ -87,7 +123,25 @@ test('Windows CLI discovery starts an isolated transport from an npm path with s
   }
 });
 
+test('Windows x64 AGS under ARM emulation can discover the native ARM npm runtime', t => {
+  const original = process.env.PROCESSOR_ARCHITEW6432;
+  t.after(() => {
+    if (original === undefined) delete process.env.PROCESSOR_ARCHITEW6432;
+    else process.env.PROCESSOR_ARCHITEW6432 = original;
+  });
+  process.env.PROCESSOR_ARCHITEW6432 = 'ARM64';
+  const bin = path.join(root, 'arm npm');
+  const cli = path.join(bin, 'node_modules', '@openai', 'codex');
+  const binary = path.join(cli, 'node_modules', '@openai', 'codex-win32-arm64', 'vendor', 'aarch64-pc-windows-msvc', 'bin', 'codex.exe');
+  fs.mkdirSync(path.join(cli, 'bin'), { recursive: true });
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  for (const f of [path.join(bin, 'codex.cmd'), path.join(cli, 'bin', 'codex.js'), binary]) fs.writeFileSync(f, '');
+  assert.equal(findWindowsCodexBinary([bin], 'x64'), binary);
+});
+
 test('shutdown reaps a child and its process-group descendants when ignoring EOF and SIGTERM, and when leader exits early on EOF', { timeout: 15000 }, async t => {
+  t.mock.method(os, 'homedir', () => root);
+  t.mock.method(os, 'tmpdir', () => root);
   // Case 1: Entire group ignores EOF and SIGTERM -> escalated SIGKILL cleans group and temporary credentials directory.
   const temp1 = createTemporaryCredentials('quota');
   const stubborn = cli('stubborn', `

@@ -10,6 +10,44 @@ function open(t) {
   return dir;
 }
 
+test('Codex failures preserve the RPC stage and disclosed status across restart, without retaining raw responses', async t => {
+  const dir = open(t), secret = 'private-response-marker';
+  const { CodexAgent } = require('../dist/agents/codex'), agent = new CodexAgent();
+  t.mock.method(agent, 'findCodexBinary', () => 'fixture');
+  let failure;
+  t.mock.method(require('../dist/codex-process'), 'startCodexProcess', (_bin, _home, handlers) => ({
+    send(request) {
+      if (request.id === undefined) return;
+      assert.notEqual(request.params?.refreshToken, true);
+      const response = request.id === failure.id ? { error: { code: -32603, message: failure.message, data: { token: secret, statusCode: failure.status } } }
+        : { result: { account: { type: 'chatgpt' } } };
+      queueMicrotask(() => handlers.onMessage({ id: request.id, ...response }));
+    },
+    stop() { queueMicrotask(handlers.onClose); },
+  }));
+  for (failure of [
+    { id:1, message:'workspace routing discovery failed', guidance:/刷新重试/ },
+    { id:2, message:'failed to fetch codex rate limits: GET https://example.test/' + secret + ' failed: 429 Too Many Requests; body=token_revoked ' + secret, guidance:/请求过于频繁/ },
+    { id:2, status:403, message:'unauthorized: ' + secret, guidance:/确认订阅状态/ },
+    { id:2, message:'getaddrinfo ENOTFOUND ' + secret, guidance:/网络或代理/ },
+  ]) {
+    await assert.rejects(runDiagnostic('refresh','codex','manual',secret,() => agent.queryLiveRpc(dir, false)), error => {
+      assert.match(error.message, failure.guidance);
+      assert.equal(error.authFailure, undefined);
+      assert.ok(!error.message.includes(secret));
+      return true;
+    });
+  }
+  for (const file of fs.readdirSync(dir)) assert.ok(!fs.readFileSync(path.join(dir,file),'utf8').includes(secret));
+  initializeDiagnostics(dir,'1.0.0+source');
+  const ops = exportDiagnostics().operations;
+  assert.ok(!JSON.stringify(ops).includes(secret));
+  const errors = ops.flatMap(op => op.steps).filter(step => step.rpcCode === -32603);
+  assert.deepEqual(errors.map(s => [s.step,s.httpStatus,s.reason]).sort(),
+    [['rpc-account-read',undefined,'workspace-routing'],['rpc-rate-limits',undefined,undefined],
+      ['rpc-rate-limits',403,undefined],['rpc-rate-limits',429,undefined]]);
+});
+
 test('concurrent traces export only approved fields, merging a repeated wait without swallowing the actual exception', async t => {
   const dir = open(t), secret = 'private@example.test';
   const wait = () => runDiagnostic('refresh','agy','automatic',secret, async () => {

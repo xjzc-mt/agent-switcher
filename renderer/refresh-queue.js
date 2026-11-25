@@ -4,25 +4,27 @@
   else root.AccountRefreshQueue = factory();
 })(typeof globalThis !== 'undefined' ? globalThis : this, () => {
   return class AccountRefreshQueue {
-    constructor({ run, onChange = () => {}, canAutoRefresh = () => true, concurrency = 3 }) {
+    constructor({ run, onChange = () => {}, canAutoRefresh = () => true, serialGroup = () => undefined, concurrency = 3 }) {
       if (!Number.isInteger(concurrency) || concurrency < 1) throw new RangeError('concurrency must be a positive integer');
       this.run = run;
       this.onChange = onChange;
       this.canAutoRefresh = canAutoRefresh;
       this.concurrency = concurrency;
+      this.serialGroup = serialGroup;
       this.jobs = new Map();
       this.running = 0;
     }
     get(key) { return this.jobs.get(key); }
-    request(key, payload, { force = false, priority = 0 } = {}) {
+    request(key, payload, { force = false, priority = 0, automatic = !force } = {}) {
       let job = this.jobs.get(key);
       if (job) {
+        if (job.automatic && !automatic) { job.automatic = false; job.payload = payload; }
         job.force ||= force;
         job.priority = Math.max(job.priority, priority);
         this.onChange();
         return job.promise;
       }
-      job = { key, payload, force, priority, state: 'queued' };
+      job = { key, payload, force, priority, automatic, state: 'queued' };
       job.promise = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; });
       this.jobs.set(key, job);
       this.onChange();
@@ -31,7 +33,9 @@
     }
     drain() {
       while (this.running < this.concurrency) {
-        const job = [...this.jobs.values()].filter(job => job.state === 'queued').sort((a, b) => b.priority - a.priority)[0];
+        const jobs = [...this.jobs.values()];
+        const busy = new Set(jobs.filter(job => job.state === 'running').map(job => this.serialGroup(job.payload)).filter(Boolean));
+        const job = jobs.filter(job => job.state === 'queued' && !busy.has(this.serialGroup(job.payload))).sort((a, b) => b.priority - a.priority)[0];
         if (!job) return;
         job.state = 'running';
         this.running++;
@@ -41,7 +45,7 @@
     async execute(job) {
       let result, error;
       try {
-        if (!job.force && !this.canAutoRefresh()) result = { skipped: true };
+        if (job.automatic && !this.canAutoRefresh(job.payload)) result = { skipped: true };
         else {
           this.onChange();
           result = await this.run(job.payload, job.force);

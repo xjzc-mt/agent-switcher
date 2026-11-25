@@ -1,6 +1,5 @@
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
-import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { windowsCodexFileIssue } from './codex-file-auth';
@@ -8,37 +7,7 @@ import { drainTemporaryProcessGroup, stopTemporaryProcess, withTemporaryProcess 
 
 export const isolatedCodexPids = new Set<number>();
 
-/** npm's Windows shim wraps the same native CLI. Start it directly so the
- * isolated process owns its pipes and PID even when the path contains spaces. */
-export function findWindowsCodexBinary(directories = [
-  ...(process.env.PATH || '').split(';'),
-  ...(process.env.CODEX_INSTALL_DIR ? [process.env.CODEX_INSTALL_DIR] : []),
-  ...(process.env.LOCALAPPDATA ? [path.join(process.env.LOCALAPPDATA, 'Programs', 'OpenAI', 'Codex', 'bin')] : []),
-  ...(process.env.APPDATA ? [path.join(process.env.APPDATA, 'npm')] : []),
-], arch = process.arch): string | undefined {
-  function isFile(file: string) {
-    try { return fs.statSync(file, { throwIfNoEntry: false })?.isFile(); }
-    catch { return false; }
-  }
-  for (const entry of directories) {
-    const dir = entry.trim().replace(/^"(.*)"$/, '$1');
-    if (!path.isAbsolute(dir)) continue;
-    const exe = path.join(dir, 'codex.exe');
-    if (isFile(exe)) return exe;
-    if (!isFile(path.join(dir, 'codex.cmd')) || (arch !== 'x64' && arch !== 'arm64')) continue;
-    const modules = path.basename(dir).toLowerCase() === '.bin' ? path.dirname(dir) : path.join(dir, 'node_modules');
-    const cli = path.join(modules, '@openai', 'codex');
-    if (!isFile(path.join(cli, 'bin', 'codex.js'))) continue;
-    const platformPackage = path.join('@openai', 'codex-win32-' + arch);
-    const triple = (arch === 'x64' ? 'x86_64' : 'aarch64') + '-pc-windows-msvc';
-    for (const pkg of [path.join(cli, 'node_modules', platformPackage), path.join(modules, platformPackage), cli]) {
-      for (const subdir of ['bin', 'codex']) {
-        const binary = path.join(pkg, 'vendor', triple, subdir, 'codex.exe');
-        if (isFile(binary)) return binary;
-      }
-    }
-  }
-}
+export { findWindowsCodexBinary } from './windows-codex';
 
 const isolatedVariables = new Set([
   'CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'CODEX_SQLITE_HOME',

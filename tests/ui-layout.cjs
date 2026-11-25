@@ -1,16 +1,12 @@
-const outputPath = require('./ui-support.cjs');
-const {app,BrowserWindow}=require('electron');
-const assert=require('node:assert/strict');
-const fs=require('node:fs');
-const path=require('node:path');
-const pause=ms=>new Promise(r=>setTimeout(r,ms));
-app.whenReady().then(async()=>{
-  const w=new BrowserWindow({width:1120,height:740,show:false,webPreferences:{preload:path.join(__dirname,'fixture-preload.cjs'),contextIsolation:true}});
-  const errors=[];w.webContents.on('console-message',e=>{if(e.level==='error')errors.push(e.message)});
-  const run=s=>w.webContents.executeJavaScript(s);
-  const close=()=>run(`{const d=document.querySelector('dialog[open]');d.querySelector('[data-close-dialog]').click();d.dismissAccountDialog();}`);
-  try{
-    await w.loadFile(path.join(process.env.AGS_UI_RENDERER_ROOT||path.join(__dirname,'../renderer'),'index.html'));await pause(300);
+const suite = require('./ui-support.cjs');
+const assert = require('node:assert/strict');
+
+module.exports = suite(
+  { width: 1120, height: 740 },
+  async ({ window: w, run, load, pause, capture }) => {
+    const close=()=>run(`{const d=document.querySelector('dialog[open]');d.querySelector('[data-close-dialog]').click();d.dismissAccountDialog();}`);
+
+    await load();
     await run(`localStorage.clear();accountLayout='cards';applySidebar();
       { const a=agentsData[0],base=structuredClone(a.profiles[0]),now=Date.now();
         a.profiles=Array.from({length:10},(_,i)=>{const p=structuredClone(base);p.name=['当前工作','个人主力','日常开发','文档写作','长任务','重构','备用','测试','很长的账号昵称需要省略显示','缓存账号'][i];p.isActive=i===0;p.meta.email='long-account-'+i+'@example.test';p.meta.label=p.name;
@@ -62,13 +58,13 @@ app.whenReady().then(async()=>{
         assert.equal(geometry.centered,true,JSON.stringify(geometry));assert.equal(geometry.headingFull,true,JSON.stringify(geometry));
       }
       rows.push(geometry);
-      if((width===748&&!collapsed)||(width===636&&collapsed))fs.writeFileSync(outputPath(`accounts-${layout}-minimum-${collapsed?'collapsed':'expanded'}.png`),(await w.webContents.capturePage()).toPNG());
+      if((width===748&&!collapsed)||(width===636&&collapsed))await capture(`accounts-${layout}-minimum-${collapsed?'collapsed':'expanded'}.png`);
       if(layout==='cards'&&width===880&&collapsed){
         assert.equal(await run(`(()=>{const cards=[...document.querySelectorAll('[data-family="pro"] .account-card')];return cards.slice(0,${geometry.columns}).every(card=>card.getBoundingClientRect().y===cards[0].getBoundingClientRect().y)&&cards[${geometry.columns}].getBoundingClientRect().y>cards[0].getBoundingClientRect().y;})()`),true);
-        fs.writeFileSync(outputPath('accounts-responsive-collapsed.png'),(await w.webContents.capturePage()).toPNG());
+        await capture('accounts-responsive-collapsed.png');
       }
-      if(layout==='cards'&&width===1440&&!collapsed)fs.writeFileSync(outputPath('accounts-cards-wide.png'),(await w.webContents.capturePage()).toPNG());
-      if(layout==='rows'&&width===1440&&!collapsed)fs.writeFileSync(outputPath('accounts-rows-wide.png'),(await w.webContents.capturePage()).toPNG());
+      if(layout==='cards'&&width===1440&&!collapsed)await capture('accounts-cards-wide.png');
+      if(layout==='rows'&&width===1440&&!collapsed)await capture('accounts-rows-wide.png');
     }
     await run(`accountLayout='cards';writeLayout('sidebarCollapsed','false');applySidebar();renderWorkbench()`);w.setSize(1120,740);await pause(50);
     await run(`{const p=agentsData[0].profiles[8];p.meta.snapshot.plan='prolite';p.meta.snapshot.quota.secondaryWindow={usedPercent:0,resetsAt:Math.floor(Date.now()/1000)+2590000};p.meta.snapshot.quota.resetCredits={availableCount:120,credits:null};p.meta.snapshot.quota.credits={balance:'0.001'};renderWorkbench();}`);
@@ -109,11 +105,11 @@ app.whenReady().then(async()=>{
       assert.deepEqual(await quotaNumberOverlaps(),[],`Minimum with mixed dates, credits, tickets and query warning at ${width}px`);
       const warning=await run(`(()=>{const c=document.querySelector('[data-profile="重构"].account-card'),w=c.querySelector('.account-query-warning'),r=c.querySelector('.card-resources').getBoundingClientRect();return {height:c.offsetHeight,ticket:c.querySelector('.reset-ticket').textContent,warningOverlap:w.getBoundingClientRect().right-r.left};})()`);
       assert.equal(warning.height,44);assert.match(warning.ticket,/99\+/);assert.ok(warning.warningOverlap<=0.01,JSON.stringify(warning));
-      fs.writeFileSync(outputPath('accounts-rows-stress-expanded-'+width+'.png'),(await w.webContents.capturePage()).toPNG());
+      await capture('accounts-rows-stress-expanded-'+width+'.png');
       await run(`document.querySelector('.account-group-toggle[data-family="pro"]').click()`);
       await pause(50);
       stressHeads.push({width,...await run(`(()=>{const h=document.querySelector('[data-family="pro"] .account-group-head'),left=h.querySelector('.row-action-head').getBoundingClientRect().left,name=h.querySelector('.account-group-name'),count=h.querySelector('.group-count').getBoundingClientRect(),alert=h.querySelector('.account-group-alert').getBoundingClientRect();return {nameVisible:name.clientWidth>=name.scrollWidth,countAlertGap:alert.left-count.right,items:[...h.querySelectorAll('h4 svg,.group-count,.account-group-alert')].map(el=>({name:el.className.baseVal??el.className,right:el.getBoundingClientRect().right-left})),outer:document.documentElement.scrollWidth>innerWidth};})()`)});
-      fs.writeFileSync(outputPath('accounts-rows-stress-collapsed-'+width+'.png'),(await w.webContents.capturePage()).toPNG());
+      await capture('accounts-rows-stress-collapsed-'+width+'.png');
       await run(`document.querySelector('.account-group-toggle[data-family="pro"]').click()`);
     }
     assert.ok(stressHeads.every(h=>!h.outer&&h.nameVisible&&h.countAlertGap>=0&&h.items.every(item=>item.right<=0.01)),JSON.stringify(stressHeads));
@@ -122,7 +118,7 @@ app.whenReady().then(async()=>{
     await run(`{window.savedLayoutProfiles=structuredClone(agentsData[0].profiles);const a=agentsData[0];a.profiles.forEach((p,i)=>{p.meta.label=i?'备用'+i:'当前';p.meta.snapshot.quota.credits={balance:'0'};});settings.showResetTimes=true;renderWorkbench();}`);
     w.setSize(1120,900);await pause(40);
     const short=await listGeometry();assert.equal(short.creditHeads,0);assert.equal(short.creditBadges,0);assert.ok(short.name>=79,JSON.stringify(short));assert.equal(short.centered,true);assert.ok(short.gutter>0);
-    fs.writeFileSync(outputPath('accounts-rows-short-no-credits.png'),(await w.webContents.capturePage()).toPNG());
+    await capture('accounts-rows-short-no-credits.png');
     await run(`agentsData[0].profiles[0].meta.label='当前账号的超长名称不应影响备用列表宽度';renderWorkbench()`);
     const activeLongest=await listGeometry();assert.ok(Math.abs(activeLongest.width-short.width)<1,'The active account name must not widen the backup list');
     await run(`{const a=agentsData[0];a.profiles[0].isActive=false;a.profiles[1].isActive=true;a.status=a.profiles[1].meta.snapshot;renderWorkbench();}`);
@@ -145,12 +141,12 @@ app.whenReady().then(async()=>{
     const narrow=await listGeometry();assert.ok(Math.abs(narrow.width-narrow.pool)<1);assert.ok(narrow.name<wide.name);assert.equal(narrow.centered,true);assert.equal(narrow.resourceWidth,wide.resourceWidth);assert.equal(narrow.actionWidth,wide.actionWidth);
     const longName=await run(`(()=>{const n=document.querySelector('[data-profile="长任务"] .account-main-name');return {truncated:n.scrollWidth>n.clientWidth,overflow:getComputedStyle(n).textOverflow,tip:n.dataset.tooltip};})()`);
     assert.equal(longName.truncated,true);assert.equal(longName.overflow,'ellipsis');assert.match(longName.tip,/这个备用账号名称用于调整列表宽度/);
-    fs.writeFileSync(outputPath('accounts-rows-long-name-minimum.png'),(await w.webContents.capturePage()).toPNG());
+    await capture('accounts-rows-long-name-minimum.png');
     w.setSize(748,1020);
     await run(`{const a=agentsData[0],base=a.profiles[1];a.profiles=[a.profiles[0],...['enterprise','business','team','edu','go','free','unknown'].map((plan,i)=>{const p=structuredClone(base);p.name='套餐'+i;p.meta.label=p.name;p.meta.snapshot.plan=plan;delete p.meta.snapshot.quota.resetCredits;if(plan==='go'||plan==='free')delete p.meta.snapshot.quota.primaryWindow;if(plan==='free')p.meta.snapshot.quota.secondaryWindow.windowMins=43200;if(plan==='unknown')delete p.meta.snapshot.quota;return p;})];$('badge-count-codex').textContent=a.profiles.length;syncSidebarLabels();settings.showResetTimes=false;renderWorkbench();}`);
     const readPlanHeads=()=>run(`[...document.querySelectorAll('.account-group-head')].map(h=>{const title=h.querySelector('.account-group-toggle'),columns=h.querySelector(h.closest('.is-collapsed')?'.row-action-head':'.row-column-head');return {label:title.textContent,overlap:Math.max(...[...h.querySelectorAll('h4 button')].map(b=>b.getBoundingClientRect().right))-columns.getBoundingClientRect().left,overflow:h.scrollWidth>h.clientWidth+1};})`);
     const planHeads=await readPlanHeads();
-    fs.writeFileSync(outputPath('accounts-rows-all-plans-minimum.png'),(await w.webContents.capturePage()).toPNG());
+    await capture('accounts-rows-all-plans-minimum.png');
     assert.equal(planHeads.length,7);assert.ok(planHeads.every(h=>h.overlap<=1&&!h.overflow),JSON.stringify(planHeads));
     await run(`document.querySelector('[data-family="enterprise"] .account-group-name').dispatchEvent(new PointerEvent('pointerover',{bubbles:true,pointerType:'mouse'}))`);await pause(600);
     assert.equal(await run(`document.querySelector('[role=tooltip]')?.textContent`),'Enterprise');
@@ -160,7 +156,7 @@ app.whenReady().then(async()=>{
     assert.equal(await run(`creditInfo({state:'ok',fetchedAt:new Date().toISOString(),quota:{credits:{balance:'0'}}}).available`),false);
     assert.equal(await run(`creditInfo({state:'ok',fetchedAt:new Date().toISOString(),quota:{credits:{balance:null,hasCredits:true}}}).balance`),'—');
     assert.equal(await run(`creditInfo({state:'ok',fetchedAt:new Date().toISOString(),quota:{credits:{balance:'-2.35'}}}).negative`),true);
-    await run(`setAccountLayout(null,null,{dataset:{layout:'rows'}})`);await w.webContents.reload();await pause(300);assert.equal(await run(`accountLayout`),'rows');
-    await run(`localStorage.clear()`);assert.deepEqual(errors,[]);console.log(JSON.stringify({passed:true,layoutCases:rows.length,rows,creditsHover:'fixed corner',resetCards:'actual count; unknown details preserved',errors}));app.exit(0);
-  }catch(e){console.error(e);fs.writeFileSync(outputPath('agent-switcher-layout-error.png'),(await w.webContents.capturePage()).toPNG());app.exit(1);}
-});
+    await run(`setAccountLayout('rows')`);await w.webContents.reload();await pause(300);assert.equal(await run(`accountLayout`),'rows');
+    await run(`localStorage.clear()`);
+  },
+);

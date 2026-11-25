@@ -1,5 +1,6 @@
 import { BaseAgent, type QuotaWindow } from '../agents/base';
 import { activeProfile, refreshAccount } from '../accounts';
+import { readRefreshIntervals } from '../settings';
 
 export async function runStatus(agents: BaseAgent[]): Promise<void> {
   const chalk = (await import('chalk')).default;
@@ -12,6 +13,7 @@ export async function runStatus(agents: BaseAgent[]): Promise<void> {
   );
   console.log(chalk.dim(' ' + '─'.repeat(100)));
 
+  const manual = readRefreshIntervals().live === 'manual';
   for (const agent of agents) {
     let profile = chalk.dim('(none)');
     let accountStr = chalk.dim('—');
@@ -19,7 +21,7 @@ export async function runStatus(agents: BaseAgent[]): Promise<void> {
 
     try {
       profile = activeProfile(agent) ?? profile;
-      const result = await refreshAccount(agent);
+      const result = await refreshAccount(agent, undefined, manual);
       if (result.available) {
         const planBadge = result.plan ? chalk.magenta(` [${result.plan.toUpperCase()}]`) : '';
         accountStr = (result.account ?? chalk.dim('—')) + planBadge;

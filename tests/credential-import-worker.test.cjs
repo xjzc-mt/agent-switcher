@@ -50,7 +50,7 @@ test('slow macOS key creation and checks leave the main event loop responsive', 
         assert.equal(fs.existsSync(key), false, 'a cached key forbids re-creation after loss');
       })().catch(error => { console.error(error); process.exitCode = 1; });
     `);
-    const env = { ...process.env, HOME: home, CODEX_HOME: path.join(home, '.codex'), CLAUDE_CONFIG_DIR: path.join(home, '.claude') };
+    const env = { ...process.env, HOME: home, CODEX_HOME: path.join(home, '.codex') };
     delete env.NODE_OPTIONS;
     const permission = process.allowedNodeEnvironmentFlags.has('--permission') ? '--permission' : '--experimental-permission';
     const args = [permission, '--allow-worker', '--no-warnings', '--allow-fs-read=' + process.cwd(),

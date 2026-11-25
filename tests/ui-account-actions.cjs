@@ -1,16 +1,10 @@
-const outputPath = require('./ui-support.cjs');
-const {app,BrowserWindow}=require('electron');
-const assert=require('node:assert/strict');
-const fs=require('node:fs'),path=require('node:path');
-const pause=ms=>new Promise(r=>setTimeout(r,ms));
-app.whenReady().then(async()=>{
-  const w=new BrowserWindow({width:880,height:740,show:false,webPreferences:{preload:path.join(__dirname,'fixture-preload.cjs'),contextIsolation:true}});
-  const run=s=>w.webContents.executeJavaScript(s);
-  const click=selector=>run(`document.querySelector(${JSON.stringify(selector)}).click()`);
-  const until=async expression=>{for(let i=0;i<80;i++){if(await run(expression))return;await pause(20);}throw new Error('Timed out: '+expression);};
-  const capture=async name=>{await pause(180);fs.writeFileSync(outputPath(`${name}.png`),(await w.webContents.capturePage()).toPNG());};
-  try {
-    await w.loadFile(path.join(__dirname,'../renderer/index.html'));await pause(200);
+const suite = require('./ui-support.cjs');
+const assert = require('node:assert/strict');
+
+module.exports = suite(
+  { width: 880, height: 740 },
+  async ({ run, load, until, click, capture }) => {
+    await load();
     await run(`localStorage.clear();applySidebar();window.accountTestApi.proTiers();loadStatus()`);
     for(const layout of ['cards','rows']) {
       await run(`accountLayout='${layout}';renderWorkbench()`);
@@ -55,6 +49,5 @@ app.whenReady().then(async()=>{
     assert.equal(await run(`!!document.querySelector('[data-action="handleDeleteProfile"],[data-action="handleExportProfile"],[data-edit-account-name]')`),false);
     await run(`document.querySelector('dialog[data-account-details]').dismissAccountDialog()`);
     await run(`localStorage.clear()`);
-    console.log(JSON.stringify({passed:true,proTiers:3,layouts:2,deleteConfirmInline:true,deleteFailureRetained:true,noDoubleDelete:true,currentLoginPreserved:true,singleExport:true,refreshBesideTimestamp:true}));app.exit(0);
-  } catch(error){console.error(error);fs.writeFileSync(outputPath('ags-account-actions-failure.png'),(await w.webContents.capturePage()).toPNG());app.exit(1);}
-});
+  },
+);

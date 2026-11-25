@@ -1,24 +1,20 @@
-const { accessToken } = require('./codex-token-fixture.cjs');
-const {test,beforeEach,after}=require('node:test');
+const { mockIdleClients, createTestHome, readCredentialFile, jwt, accessToken } = require('./helpers/test-env.cjs');
+const {test,beforeEach}=require('node:test');
 const assert=require('node:assert/strict');
-const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'ags-auth-lifecycle-'));
-os.homedir=()=>root;
-const { readCredentialFile } = require('./vault-fixture.cjs');
-const clients=require('../dist/clients');clients.runningClients=async()=>[];
-const logout=require('../dist/client-logout');logout.runningCodexSessions=async()=>[];
+const fs=require('node:fs'),path=require('node:path');
+const root = createTestHome('ags-auth-lifecycle-');
+const clients = mockIdleClients();
 const store=require('../dist/store'),accounts=require('../dist/accounts');
 const {codexAgent:agent,CodexAgent,CodexQueryError,codexAuthFailure}=require('../dist/agents/codex');
 const {credentialState,CredentialChangedError}=require('../dist/credential-state');
 const {atomicWrite}=require('../dist/utils');
 Object.defineProperty(agent,'homeDir',{value:path.join(root,'live')});
-const auth=(user,version=1,dated=true)=>JSON.stringify({auth_mode:'chatgpt',...(dated?{last_refresh:`2026-11-0${version}T00:00:00Z`}:{}),tokens:{account_id:'workspace-'+user,access_token:accessToken('workspace-'+user,user,user+'@example.test',version),refresh_token:'refresh-'+user+'-'+version,id_token:'h.'+Buffer.from(JSON.stringify({sub:user,email:user+'@example.test'})).toString('base64url')+'.s'}});
+const auth=(user,version=1,dated=true)=>JSON.stringify({auth_mode:'chatgpt',...(dated?{last_refresh:`2026-11-0${version}T00:00:00Z`}:{}),tokens:{account_id:'workspace-'+user,access_token:accessToken('workspace-'+user,user,user+'@example.test',version),refresh_token:'refresh-'+user+'-'+version,id_token:jwt({sub:user,email:user+'@example.test'})}});
 const dir=name=>store.profileDir('codex',name),file=d=>path.join(d,'auth.json');
 const put=(d,user,v,dated)=>atomicWrite(file(d),auth(user,v,dated));
 const version=d=>JSON.parse(readCredentialFile(file(d))).tokens.refresh_token;
 const success=()=>({account:{type:'chatgpt',planType:'plus'},rates:{rateLimits:{primary:{usedPercent:30,windowDurationMins:300}}}});
 beforeEach(()=>{fs.rmSync(store.STORE_DIR,{recursive:true,force:true});fs.rmSync(agent.homeDir,{recursive:true,force:true});agent.queryLiveRpc=async()=>success();});
-after(()=>fs.rmSync(root,{recursive:true,force:true}));
 
 test('an email conflict backs off on both the dashboard and backend until registration is corrected', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
@@ -58,8 +54,10 @@ test('a damaged candidate stops automatic checks for that profile until the file
   put(dir('damaged-candidate'), 'staged-file');
   const candidate = file(dir('damaged-candidate')) + '.pending';
   fs.mkdirSync(candidate);
+  store.writeProfileMeta('codex', 'damaged-candidate', { snapshot: { state:'ok', available:true, plan:'plus' } });
   const card = () => accounts.dashboard()[0].profiles.find(p => p.name === 'damaged-candidate');
   assert.equal(card().refreshAt, Infinity);
+  assert.equal(card().meta.snapshot.plan, 'plus');
   let queries = 0;
   agent.queryLiveRpc = async () => { queries++; return success(); };
   await assert.rejects(async () => accounts.refreshAccount(agent, 'damaged-candidate', true), /普通文件/);
@@ -78,7 +76,7 @@ test('a newer current generation committed by another process supplies the dashb
   put(agent.homeDir, name, 2);
   const script = `
     require('node:os').homedir = () => process.argv[1];
-    require('./tests/vault-fixture.cjs');
+    require('./tests/helpers/test-env.cjs').installMockKeychain();
     const {codexAgent} = require('./dist/agents/codex');
     Object.defineProperty(codexAgent, 'homeDir', {value: require('node:path').join(process.argv[1], 'live')});
     codexAgent.queryLiveRpc = async () => ({rates:{rateLimits:{primary:{usedPercent:7}}}});
@@ -215,34 +213,71 @@ test('a workspace ID without a member identity does not merge different people',
  assert.notEqual(agent.identity(dir('P')).id,agent.identity(dir('Q')).id);
 });
 
-test('only explicit refresh rejection means expired; a bare 401 keeps a retryable error',async()=>{
+test('only explicit refresh rejection means expired; a bare 401 keeps a retryable error',async t=>{
+  for(const [error, reason] of [
+    [{message:'Your refresh token has been revoked. Please log in again.'}, 'refresh-revoked'],
+    [{message:'Your refresh token has expired.'}, 'refresh-expired'],
+    [{data:{error:'invalid_grant'}}, 'refresh-invalid'],
+    [{message:'Failed to refresh token: connection timed out'}, undefined],
+    [{message:'Request 4012 failed'}, undefined],
+  ]) assert.equal(codexAuthFailure(error), reason, JSON.stringify(error));
+ t.mock.timers.enable({apis:['Date'],now:Date.now()});
  put(dir('R'),'R');
- agent.queryLiveRpc=async()=>{throw new CodexQueryError('认证请求未通过',codexAuthFailure({status:401}));};
- const retry=await agent.status(dir('R'));assert.equal(retry.state,'error');assert.equal(retry.authExpired,false);
- agent.queryLiveRpc=async()=>{throw new CodexQueryError('凭据失效',codexAuthFailure({data:{error:'refresh_token_reused'}}));};
- const status=await agent.status(dir('R'));assert.equal(status.state,'expired');assert.equal(status.authFailure,'refresh-reused');
+ agent.queryLiveRpc=async()=>{throw new CodexQueryError('认证请求未通过',codexAuthFailure({data:{statusCode:401}}));};
+ const retry=await accounts.refreshAccount(agent,'R',true);assert.equal(retry.state,'error');assert.equal(retry.authExpired,false);
+ agent.queryLiveRpc=async()=>{throw new CodexQueryError('凭据失效',codexAuthFailure({message:'Unauthorized',data:{error:{code:'refresh_token_reused'}}}));};
+ t.mock.timers.tick(31000);
+ const status=await accounts.refreshAccount(agent,'R',true);assert.equal(status.state,'expired');assert.equal(status.authFailure,'refresh-reused');
 });
 
 test('RPC null account is retryable; graceful exit preserves tokens written after its response',async()=>{
- const rpcAgent=new CodexAgent();const source=path.join(root,'rpc-source');put(source,'S');
+ const rpcAgent=new CodexAgent();
+ const refresh=profile=>{put(dir(profile),'S');return accounts.refreshAccount(rpcAgent,profile,true);};
  const bin=path.join(root,'fixture-codex');rpcAgent.findCodexBinary=()=>bin;
  function writeCli(body){fs.writeFileSync(bin,`#!${process.execPath}\nconst fs=require('fs'),path=require('path'),rl=require('readline').createInterface({input:process.stdin});rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize' && m.params.clientInfo.version!==${JSON.stringify(require('../package.json').version)})process.exit(1);${body}});`,{mode:0o700});}
  writeCli(`if(m.id===0)console.log(JSON.stringify({id:0,result:{}}));if(m.id===1||m.id===3)console.log(JSON.stringify({id:m.id,result:{account:null}}));`);
- const absent=await rpcAgent.status(source);assert.equal(absent.state,'error');assert.equal(absent.authFailure,'account-unavailable');
+ const absent=await refresh('not-signed-in');assert.equal(absent.state,'error');assert.equal(absent.authFailure,'account-unavailable');
  writeCli(`if(m.id===0)console.log(JSON.stringify({id:0,result:{}}));if(m.id===1)process.stderr.write('ERROR Failed to refresh token: refresh_token_invalidated [private fixture]\\n');if(m.id===1||m.id===3)setTimeout(()=>console.log(JSON.stringify({id:m.id,result:{account:null}})),25);`);
- const rejected=await rpcAgent.status(source);assert.equal(rejected.state,'expired');assert.equal(rejected.authFailure,'refresh-revoked');assert.ok(!JSON.stringify(rejected).includes('private fixture'));
+ const rejected=await refresh('revoked');assert.equal(rejected.state,'expired');assert.equal(rejected.authFailure,'refresh-revoked');assert.ok(!JSON.stringify(rejected).includes('private fixture'));
  const rotated=auth('S',2);
  writeCli(`if(m.id===0)console.log(JSON.stringify({id:0,result:{}}));if(m.id===1)console.log(JSON.stringify({id:1,result:{account:{type:'chatgpt'}}}));if(m.id===2){console.log(JSON.stringify({id:2,result:{rateLimits:{primary:{usedPercent:20}}}}));process.stdin.on('end',()=>setTimeout(()=>{fs.writeFileSync(path.join(process.env.CODEX_HOME,'auth.json'),${JSON.stringify(rotated)});},120));}`);
- const status=await rpcAgent.status(source);assert.equal(status.state,'ok');assert.equal(version(source),'refresh-S-2');
+ const status=await refresh('rotated');assert.equal(status.state,'ok');assert.equal(version(dir('rotated')),'refresh-S-2');
 });
 
-test('RPC refreshes once after a missing login or access-token rejection and preserves the new token',async()=>{
- for(const trigger of ['missing','rejected']){
-  const rpcAgent=new CodexAgent(),source=path.join(root,'rpc-recovery-'+trigger);put(source,'recover-'+trigger);
-  const bin=path.join(root,'fixture-recovery-'+trigger);rpcAgent.findCodexBinary=()=>bin;
-  const newAuth=auth('recover-'+trigger,2);
-  fs.writeFileSync(bin,`#!${process.execPath}\nconst fs=require('fs'),path=require('path');let refreshes=0;require('readline').createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);if(m.id===0)console.log(JSON.stringify({id:0,result:{}}));if(m.id===1)console.log(JSON.stringify(${trigger==='missing'?"{id:1,result:{account:null}}":"{id:1,error:{status:401,message:'unauthenticated'}}"}));if(m.id===3){if(++refreshes>1||m.params.refreshToken!==true)process.exit(2);fs.writeFileSync(path.join(process.env.CODEX_HOME,'auth.json'),${JSON.stringify(newAuth)});console.log(JSON.stringify({id:3,result:{account:{type:'chatgpt'}}}));}if(m.id===2)console.log(JSON.stringify({id:2,result:{rateLimits:{primary:{usedPercent:10}}}}));});`,{mode:0o700});
-  assert.equal((await rpcAgent.status(source)).state,'ok');assert.equal(version(source),'refresh-recover-'+trigger+'-2');
+test('a rejected fresh bearer upgrades once in a new RPC home; an expiring bearer can renew immediately', async t => {
+ for (const [trigger, seconds] of [['missing',3600], ['rejected',3600], ['official-refresh-error',3600], ['expiring',45]]) {
+  const rpcAgent = new CodexAgent(), user = 'recover-'+trigger, source = dir(user);
+  const tokens = JSON.parse(auth(user)).tokens;
+  tokens.access_token = accessToken(tokens.account_id, user, user+'@example.test', 1, Math.floor(Date.now()/1000)+seconds);
+  atomicWrite(file(source), JSON.stringify({tokens}));
+  const calls = [];
+  let renewals = 0;
+  rpcAgent.findCodexBinary = () => 'fixture';
+  const transport = t.mock.method(require('../dist/codex-process'), 'startCodexProcess', (_bin, home, handlers) => {
+    const owner = JSON.parse(fs.readFileSync(path.join(home,'.ags-temporary-owner.json')));
+    const grant = JSON.parse(fs.readFileSync(file(home))).tokens.refresh_token;
+    calls.push([grant,!!owner.pendingCommit,!!owner.inputDigest]);
+    return { send({id,params}) {
+      if (id === undefined) return;
+      let response = { result:{} };
+      if (id === 1) response = trigger === 'missing' ? { result:{account:null} } : { error:trigger === 'official-refresh-error'
+        ? { code:-32603, message:'Your access token could not be refreshed. Please log out and sign in again.' } : { data:{code:'token_revoked'} } };
+      if (id === 3) {
+        renewals++;
+        assert.equal(grant,tokens.refresh_token); assert.equal(params.refreshToken,true);
+        fs.writeFileSync(file(home),auth(user,2)); response = { result:{account:{type:'chatgpt'}} };
+      }
+      if (id === 2) response = { result:{rateLimits:{primary:{usedPercent:10}}} };
+      queueMicrotask(() => handlers.onMessage({ id,...response }));
+    }, stop() { queueMicrotask(handlers.onClose); } };
+  });
+  const status = await accounts.refreshAccount(rpcAgent,user,true);
+  transport.mock.restore();
+  assert.equal(renewals,1,trigger);
+  assert.equal(status.state,'ok'); assert.equal(status.quota.primaryWindow.usedPercent,10);
+  assert.equal(version(source),'refresh-'+user+'-2');
+  const rotation = [tokens.refresh_token,true,true];
+  assert.deepEqual(calls, seconds>60 ? [['ags-refresh-disabled',false,false],rotation] : [rotation]);
  }
 });
 
@@ -259,7 +294,7 @@ test('OAuth client provenance and login ownership participate in credential revi
 
 test('malformed JWT payloads cannot provide account identity', () => {
   const { jwtInfo } = require('../dist/utils');
-  const jwt = value => 'h.' + Buffer.from(JSON.stringify(value)).toString('base64url') + '.s';
+
   assert.deepEqual(jwtInfo(jwt(null)), {});
   assert.deepEqual(jwtInfo(jwt({ email: {}, sub: 'member', exp: 123 })), { sub: 'member', exp: 123 });
 });
@@ -337,7 +372,7 @@ test('active Codex account upgrading from email to sub syncs pool card & same-ve
       last_refresh: '2026-11-02T00:00:00Z',
       tokens: {
         account_id: 'ws-main', access_token: accessToken('ws-main','sub-upgraded-1','upgrade@example.test'), refresh_token: 'rt-upgraded',
-        id_token: 'h.' + Buffer.from(JSON.stringify({ sub: 'sub-upgraded-1', email: 'upgrade@example.test' })).toString('base64url') + '.s',
+        id_token: jwt({ sub: 'sub-upgraded-1', email: 'upgrade@example.test' }),
       },
     }));
     return success();

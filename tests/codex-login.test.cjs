@@ -1,13 +1,11 @@
-const { test, afterEach, after } = require('node:test');
+const { createTestHome, readCredentialFile, jwt } = require('./helpers/test-env.cjs');
+const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
 const { pathToFileURL } = require('node:url');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-browser-test-'));
-os.homedir = () => root;
-const { readCredentialFile } = require('./vault-fixture.cjs');
+const root = createTestHome('ags-browser-test-');
 const opened = [], copied = [], handlers = new Map();
 const privateOpened = [];
 let failOpen = false, privateSupported = true;
@@ -131,7 +129,6 @@ afterEach(async () => {
   assert.deepEqual(dirs(), []);
   assert.equal(readCredentialFile(path.join(live, 'auth.json'), 'utf8'), original);
 });
-after(() => fs.rmSync(root, {recursive: true, force: true}));
 
 test('login reports spawn failure and early exit, then permits retry', async t => {
   const missing = t.mock.method(codexAgent, 'findCodexBinary', () => undefined);
@@ -342,7 +339,7 @@ test('relogin matching checks workspace and member identity, not just the email'
   fs.writeFileSync(behavior, 'normal');
   const email = 'same-email@example.test';
   const dir = expiredProfile('workspace-target', email);
-  const idToken = member => `h.${Buffer.from(JSON.stringify({sub: member, email})).toString('base64url')}.s`;
+  const idToken = member => jwt({sub: member, email});
   const auth = JSON.parse(credentials(email));
   Object.assign(auth.tokens, {account_id: 'workspace-one', id_token: idToken('member-one')});
   fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify(auth));

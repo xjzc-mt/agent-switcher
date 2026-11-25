@@ -29,8 +29,8 @@ test('quit waits for writes and sees a draft produced by an in-flight import', a
   const { guard, calls } = setup({ hasDrafts: () => draft, onWaiting: value => waiting.push(value) });
   const importing = guard.run(async () => { await importRead.promise; draft = true; });
   const refreshing = guard.run(() => renewal.promise);
-  const first = guard.request();
-  assert.equal(guard.request(), first);
+  const first = guard.finishQuit();
+  assert.equal(guard.finishQuit(), first);
   importRead.resolve();
   await importing;
   assert.deepEqual(calls, []);
@@ -40,7 +40,7 @@ test('quit waits for writes and sees a draft produced by an in-flight import', a
   assert.deepEqual(calls, ['confirm', 'cleanup', 'quit']);
   assert.deepEqual(waiting, [true, false]);
   assert.equal(guard.canQuit(), true);
-  await guard.request();
+  await guard.finishQuit();
   assert.deepEqual(calls, ['confirm', 'cleanup', 'quit']);
 });
 
@@ -50,11 +50,11 @@ test('active download alone requires confirmation, and cleanup failure allows re
     isDownloading: () => true,
     cleanup: async () => { if (++attempt === 1) throw new Error('cleanup failed'); },
   });
-  await guard.request();
+  await guard.finishQuit();
   assert.deepEqual(calls, ['confirm', 'cleanup failed']);
   assert.equal(guard.isClosing(), false);
   assert.equal(guard.canQuit(), false);
-  await guard.request();
+  await guard.finishQuit();
   assert.deepEqual(calls, ['confirm', 'cleanup failed', 'confirm', 'quit']);
   assert.equal(guard.canQuit(), true);
 });
@@ -64,7 +64,7 @@ test('failed writes settle without hanging quit and no empty confirmation is sho
   const { guard, calls } = setup();
   const writing = guard.run(() => write.promise);
   const rejected = assert.rejects(writing, /write failed/);
-  const request = guard.request();
+  const request = guard.finishQuit();
   write.reject(new Error('write failed'));
   await rejected;
   await request;
@@ -87,7 +87,7 @@ test('the final exit decision drains or refuses a commit queued at cleanup compl
     },
     quit() { calls.push('quit'); assert.ok(!accepted || saved); },
   });
-  const quitting = guard.request();
+  const quitting = guard.finishQuit();
   await new Promise(resolve => setImmediate(resolve));
   write.resolve();
   await quitting;
@@ -108,9 +108,10 @@ test('quit drains new rotation commits registered during confirmation and cleanu
     quit: () => events.push('quit'),
   });
   const tick = () => new Promise(resolve => setImmediate(resolve));
-  const request = guard.request();
+  const request = guard.finishQuit();
   await tick();
   assert.deepEqual(events, ['confirm']);
+  await assert.rejects(guard.run(() => assert.fail('new renewal started during quit')), /正在准备退出/);
   guard.trackCritical(() => duringConfirm.promise);
   confirm.resolve(true);
   await tick();
@@ -126,4 +127,43 @@ test('quit drains new rotation commits registered during confirmation and cleanu
   await request;
   assert.deepEqual(events, ['confirm', 'cleanup', 'quit']);
   await assert.rejects(guard.trackCritical(() => 'too-late'), /已退出/);
+});
+
+test('staged install is discarded on cancelled quit and launched once after the last credential write', async () => {
+  const events = [], staging = deferred(), write = deferred(), launching = deferred();
+  let allow = false;
+  const guard = createQuitGuard({
+    hasDrafts: () => true, isDownloading: () => false,
+    confirm: async () => { events.push('confirm'); return allow; },
+    cleanup: async () => { events.push('cleanup'); },
+    quit: () => { if (guard.canQuit()) events.push('quit'); else void guard.finishQuit(); },
+    onError: error => { throw error; },
+  });
+  const handoff = {
+    launch: async () => { events.push('launch'); await launching.promise; },
+    dispose: async () => { events.push('dispose'); },
+  };
+  const attempt = guard.installUpdate(() => staging.promise);
+  const concurrentQuit = guard.finishQuit();
+  await assert.rejects(guard.installUpdate(async () => handoff), /正在准备/);
+  assert.deepEqual(events, []);
+  staging.resolve(handoff);
+  await Promise.all([attempt, concurrentQuit]);
+  assert.deepEqual(events.splice(0), ['confirm', 'dispose']);
+  assert.equal(guard.isClosing(), false);
+
+  allow = true;
+  guard.trackCritical(() => write.promise);
+  const accepted = guard.installUpdate(async () => handoff);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, []);
+  write.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['confirm', 'cleanup', 'launch']);
+  assert.equal(guard.canQuit(), false);
+  const repeatedQuit = guard.finishQuit();
+  await assert.rejects(guard.trackCritical(() => {}), /已退出/);
+  launching.resolve();
+  await Promise.all([accepted, repeatedQuit]);
+  assert.deepEqual(events, ['confirm', 'cleanup', 'launch', 'quit']);
 });

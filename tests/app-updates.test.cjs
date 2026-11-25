@@ -87,15 +87,26 @@ async function completed(f) {
   return f.network.item.file.replace(/\.partial$/, '');
 }
 
-test('stable versions compare numerically and invalid/prerelease metadata never reports latest', async () => {
+test('stable versions compare numerically, ignore retired 1.0.x tags, and invalid/prerelease metadata never reports latest', async () => {
   assert(newerVersion('1.10.0', '1.9.0'));
+  assert(newerVersion('0.1.1', '0.1.0'));
   assert(!newerVersion('1.0.0', '1.1.20'));
+  assert(!newerVersion('1.0.0', '0.1.0'));
+  assert(!newerVersion('1.0.1', '0.1.0'));
   assert(!newerVersion('01.2.0', '1.0.0'));
-  const f = fixture();
-  for (const data of [{ ...release(), prerelease: true }, release('bad'), { ...release(), html_url: 'https://other.test/release' }]) {
+  const f = fixture({ currentVersion: '0.1.0' });
+  for (const data of [release('1.0.0'), release('1.0.1'), { ...release(), prerelease: true }, release('bad'), { ...release(), html_url: 'https://other.test/release' }]) {
     f.network.responses.push(response(data));
     assert.equal((await f.updates.check()).status, 'unavailable');
   }
+  fs.writeFileSync(path.join(f.root, 'app-updates.json'), JSON.stringify({ autoCheck: true, record: {
+    info: { version: '1.0.1', name: assetName('1.0.1'), size: payload.length, url: `${repo}/releases/tag/v1.0.1`,
+      notes: '', publishedAt: '2026-11-20T00:00:00Z', downloadable: true },
+    assetUrl: `${repo}/releases/download/v1.0.1/${assetName('1.0.1')}`, manifest: signedManifest('1.0.1') } }));
+  const restored = new AppUpdates({ ...f.options, currentVersion: '0.1.0' }, key.publicKey);
+  assert.equal(restored.getState().status, 'idle');
+  assert.equal(restored.getState().release, undefined);
+  restored.stop();
 });
 test('private or empty GitHub repo is unavailable, with daily automatic throttling and manual retry', async () => {
   const f = fixture(); f.network.responses.push(new Response('', { status: 404 }));
@@ -150,9 +161,15 @@ test('signed manifests bind the publisher, version, name, size and hash', async 
   f.network.responses.push(response(conflicting));
   assert.equal((await f.updates.check()).release.downloadable, true);
 });
-test('unsupported systems, ambiguous assets, and off-repository URLs cannot start downloads', async () => {
-  const f = await prepared({ arch: 'x64' });
-  assert.equal(f.updates.getState().release.downloadable, false);
+test('unsupported systems, missing or ambiguous assets, and off-repository URLs cannot start downloads', async () => {
+  const version = '1.2.0', data = release(version, true, [assetName(version), `AgentSwitcher-Setup-${version}-x64.exe`]);
+  for (const options of [{ platform: 'win32', arch: 'arm64' }, { platform: 'linux', arch: 'x64' }, { platform: 'darwin', arch: 'x64' }]) {
+    const f = fixture(options);
+    f.network.responses.push(response(data));
+    assert.equal((await f.updates.check()).release.downloadable, false);
+    assert.equal(f.network.requests.length, 1);
+    await assert.rejects(f.updates.download());
+  }
   const g = fixture(), ambiguous = release(), foreign = release();
   ambiguous.assets.push({ ...ambiguous.assets[0] }); foreign.assets[0].browser_download_url = 'https://example.test/file.dmg';
   for (const data of [ambiguous, foreign]) {
@@ -176,9 +193,19 @@ test('download ignores legacy ignored versions, verifies bytes, preserves files,
   assert.deepEqual(fs.readFileSync(file), payload);
   const restored = new AppUpdates(f.options, key.publicKey);
   assert.equal(restored.getState().status, 'downloaded');
-  await restored.openDownloaded(); assert.equal(opened.at(-1), file);
+  const handoff = await restored.prepareInstall();
+  assert.equal(opened.length, 0);
+  fs.writeFileSync(file, 'changed after staging');
+  await handoff.launch();
+  const staged = opened.at(-1);
+  assert.notEqual(staged, file);
+  assert.equal(path.basename(staged), path.basename(file));
+  assert.deepEqual(fs.readFileSync(staged), payload);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(path.dirname(staged)).mode & 0o777, 0o700);
+  await handoff.dispose();
+  assert.equal(fs.existsSync(staged), false);
   fs.unlinkSync(file);
-  await assert.rejects(restored.openDownloaded(), /不存在/);
+  await assert.rejects(restored.prepareInstall(), /不存在/);
   assert.equal(restored.getState().status, 'available');
   restored.stop();
 });
@@ -220,7 +247,7 @@ test('download rejects inconsistent response sizes and stops an unknown-length t
 test('changed completed files cannot be opened; cache cannot authorize an unrelated path', async () => {
   const f = await prepared(), file = await completed(f);
   fs.writeFileSync(file, Buffer.alloc(payload.length));
-  await assert.rejects(f.updates.openDownloaded(), /已改变/);
+  await assert.rejects(f.updates.prepareInstall(), /已改变/);
   assert.equal(f.updates.getState().status, 'available');
   const cached = JSON.parse(fs.readFileSync(path.join(f.root, 'app-updates.json')));
   cached.downloadedPath = path.join(f.root, release().assets[0].name);
@@ -228,7 +255,7 @@ test('changed completed files cannot be opened; cache cannot authorize an unrela
   fs.writeFileSync(path.join(f.root, 'app-updates.json'), JSON.stringify(cached));
   const restored = new AppUpdates(f.options, key.publicKey);
   assert.equal(restored.getState().status, 'available');
-  await assert.rejects(restored.openDownloaded(), /不存在/);
+  await assert.rejects(restored.prepareInstall(), /不存在/);
   assert.equal(opened.length, 0); restored.stop();
 });
 test('old or modified download caches cannot authorize opening a file', async () => {
@@ -241,12 +268,12 @@ test('old or modified download caches cannot authorize opening a file', async ()
     const restored = new AppUpdates(f.options, key.publicKey);
     assert.equal(restored.getState().release.downloadable, false);
     await assert.rejects(restored.download());
-    await assert.rejects(restored.openDownloaded());
+    await assert.rejects(restored.prepareInstall());
     restored.stop();
   }
   assert.equal(opened.length, 0);
 });
-test('mixed-platform release signs each installer and each Mac downloads its own architecture', async () => {
+test('Windows x64 and both Mac architectures stage only their signed installer for the platform handoff', async t => {
   const f = fixture(), version = '1.3.1';
   const names = [`AgentSwitcher-Setup-${version}-x64.exe`, `AgentSwitcher-${version}-x64.dmg`, assetName(version)];
   for (const dir of ['dist', 'assets', 'scripts', 'release']) fs.mkdirSync(path.join(f.root, dir));
@@ -272,13 +299,45 @@ test('mixed-platform release signs each installer and each Mac downloads its own
     client.network.manifestResponse = new Response(signed[i]);
     const state = await client.updates.check();
     assert.equal(state.release.name, names[i]);
-    assert.equal(state.release.downloadable, client !== win);
-    if (client === win) { await assert.rejects(client.updates.download()); continue; }
+    assert.equal(state.release.downloadable, true);
     assert(client.network.requests.at(-1).url.endsWith(names[i] + '.signed.json'));
     const downloaded = await completed(client);
     assert.equal(path.basename(downloaded), names[i]);
-    await client.updates.openDownloaded();
-    assert.equal(opened.at(-1), downloaded);
+    const handoff = await client.updates.prepareInstall();
+    if (i === 0) {
+      const spawn = t.mock.method(require('node:child_process'), 'spawn', (command, args, options) => {
+        assert.match(command, /WindowsPowerShell.*powershell\.exe$/i);
+        assert.ok(options.detached); assert.equal(options.stdio, 'ignore');
+        const script = args.at(-1);
+        assert.match(script, /\[Diagnostics\.Process\]::Start\(\$env:AGS_UPDATE_FILE, '\/S --updated --force-run'\)[\s\S]+?\$installer\.WaitForExit\(\)[\s\S]+?\$installer\.ExitCode -ne 0/);
+        assert.match(script, /Remove-Item -LiteralPath \$stage -Recurse -Force -ErrorAction SilentlyContinue/);
+        assert.equal(options.env.AGS_UPDATE_PARENT, String(process.pid));
+        assert.notEqual(options.env.AGS_UPDATE_FILE, downloaded);
+        assert.deepEqual(fs.readFileSync(options.env.AGS_UPDATE_FILE), payload);
+        if (process.platform === 'win32') {
+          const { fixtureHelper } = require('./helpers/windows-helper.cjs');
+          const exe = fixtureHelper(f.root, 'Installer', 'class Installer { static int Main() { return int.Parse(System.Environment.GetEnvironmentVariable("FIXTURE_EXIT")); } }');
+          for (const exit of [0, 7]) {
+            const dir = fs.mkdtempSync(path.join(f.root, 'stage ')), image = path.join(dir, 'fixture installer.exe');
+            fs.copyFileSync(exe, image);
+            // Hold a stage file through the first removal, then release it on the retry.
+            const lock = "$lock = [IO.File]::Open((Join-Path (Split-Path $env:AGS_UPDATE_FILE) busy), 'Create', 'Write', 'None')\nfunction Start-Sleep { $lock.Dispose() }\n";
+            const result = spawnSync(command, [...args.slice(0, -1), lock + script], {
+              timeout: 10000, encoding: 'utf8', env: { ...options.env, AGS_UPDATE_FILE: image,
+                AGS_UPDATE_PARENT: '2147483647', AGS_ORIGINAL_APP: path.join(f.root, 'missing.exe'), FIXTURE_EXIT: String(exit) },
+            });
+            // Reopening the deliberately missing original app makes the failure branch observable.
+            assert.equal(result.status, exit === 0 ? 0 : 1, result.stderr);
+            assert.equal(fs.existsSync(dir), false);
+          }
+        }
+        const child = new EventEmitter(); child.unref = () => {};
+        queueMicrotask(() => child.emit('spawn')); return child;
+      });
+      await handoff.launch();
+      assert.equal(spawn.mock.callCount(), 1); spawn.mock.restore();
+    }
+    await handoff.dispose();
     const restored = new AppUpdates(client.options, key.publicKey);
     assert.equal(restored.getState().status, 'downloaded');
     restored.stop();
@@ -293,13 +352,13 @@ test('mixed-platform release signs each installer and each Mac downloads its own
   assert.deepEqual(files.map(file => fs.readFileSync(file + '.signed.json', 'utf8')), signed);
 });
 test('a file moved during revalidation clears the stale download and allows retry', async () => {
-  const f = await prepared(), file = await completed(f), createReadStream = fs.createReadStream;
-  fs.createReadStream = function(target, ...args) {
+  const f = await prepared(), file = await completed(f), open = fs.promises.open;
+  fs.promises.open = function(target, ...args) {
     if (target === file) fs.renameSync(target, `${target}.moved`);
-    return createReadStream.call(this, target, ...args);
+    return open.call(this, target, ...args);
   };
-  try { await assert.rejects(f.updates.openDownloaded(), /无法读取/); }
-  finally { fs.createReadStream = createReadStream; }
+  try { await assert.rejects(f.updates.prepareInstall(), /无法读取/); }
+  finally { fs.promises.open = open; }
   assert.equal(opened.length, 0);
   assert.equal((await f.updates.download()).status, 'downloading');
 });
@@ -308,8 +367,10 @@ test('a completed package remains usable when saving its cache fails', async () 
   fs.unlinkSync(cache); fs.mkdirSync(cache);
   const file = await completed(f);
   assert.match(f.updates.getState().message, /记录未能保存/);
-  await f.updates.openDownloaded();
-  assert.equal(opened.at(-1), file);
+  const handoff = await f.updates.prepareInstall();
+  assert.equal(opened.length, 0);
+  await handoff.dispose();
+  assert.ok(fs.existsSync(file));
 });
 
 test('a download that stalls after starting times out cleanly and releases active state', async t => {
@@ -342,4 +403,80 @@ test('a download that stalls after starting times out cleanly and releases activ
   f.network.item.complete();
   t.mock.timers.reset();
   await until(f.updates, 'downloaded');
+});
+
+test('macOS quit handoff swaps bundles atomically and restores the old bundle if reopening fails', { skip: process.platform !== 'darwin' }, async t => {
+  const native = require('node:child_process'), { installMode, prepareHandoff } = require('../dist/update-handoff');
+  const root = fs.realpathSync(fixture().root);
+  const target = path.join(root, "测试 Agent's", 'AgentSwitcher.app'), relativeExe = 'Contents/MacOS/AgentSwitcher';
+  const makeApp = (app, version) => {
+    fs.mkdirSync(path.dirname(path.join(app, relativeExe)), { recursive: true });
+    fs.writeFileSync(path.join(app, relativeExe), version, { mode: 0o755 });
+  };
+  makeApp(target, 'old');
+  const env = { platform: 'darwin', isPackaged: true, execPath: path.join(target, relativeExe) };
+  assert.equal(installMode(env), 'restart');
+  assert.equal(installMode({ ...env, isPackaged: false }), 'open');
+  assert.equal(installMode({ ...env, execPath: '/Volumes/AGS/AgentSwitcher.app/' + relativeExe }), 'open');
+  const source = path.join(root, 'release'), dmg = path.join(root, 'test.dmg');
+  makeApp(path.join(source, 'AgentSwitcher.app'), 'new');
+  native.execFileSync('/usr/bin/hdiutil', ['create', '-quiet', '-fs', 'HFS+', '-srcfolder', source, dmg]);
+  // Run the shipping shell, read-only image mount, ditto, stat and renamex_np
+  // against the fixture. Substitute only Finder to avoid launching an application.
+  let failOpen = false;
+  t.mock.method(native, 'spawn', (cmd, args, options) => {
+    assert.equal(cmd, '/bin/sh'); assert.ok(options.detached); assert.equal(options.stdio, 'ignore');
+    const local = args.slice();
+    local[1] = local[1].replaceAll('/usr/bin/open', failOpen ? '/usr/bin/false' : '/usr/bin/true');
+    // A busy private mount must still be released after ordinary detach retries.
+    if (failOpen) local[1] = local[1].replaceAll('/usr/bin/hdiutil detach "$1"', '/usr/bin/false');
+    // Use a PID that is known to have exited, so the test process can observe the handoff.
+    local[3] = String(native.spawnSync('/usr/bin/true').pid);
+    const run = native.spawnSync(cmd, local, { encoding: 'utf8' });
+    assert.equal(run.status, failOpen ? 1 : 0, run.stderr);
+    const child = new EventEmitter(); child.unref = () => {};
+    queueMicrotask(() => child.emit('spawn')); return child;
+  });
+  for (const action of ['cancel', 'rollback', 'install']) {
+    const stage = fs.mkdtempSync(path.join(root, 'stage-')), image = path.join(stage, 'fixture.dmg');
+    fs.copyFileSync(dmg, image);
+    const prepared = await prepareHandoff(image, env);
+    assert.equal(fs.readFileSync(env.execPath, 'utf8'), 'old');
+    failOpen = action === 'rollback';
+    if (action === 'cancel') await prepared.dispose();
+    else await prepared.launch();
+    assert.equal(fs.readFileSync(env.execPath, 'utf8'), action === 'install' ? 'new' : 'old');
+    assert.equal(fs.existsSync(stage), false);
+  }
+  assert.deepEqual(fs.readdirSync(path.dirname(target)), ['AgentSwitcher.app']);
+});
+
+test('a signed DMG with no application stays unavailable until the release asset changes', { skip: process.platform !== 'darwin' }, async t => {
+  const root = fs.realpathSync(fixture().root), exe = path.join(root, 'AgentSwitcher.app/Contents/MacOS/AgentSwitcher');
+  fs.mkdirSync(path.dirname(exe), { recursive: true }); fs.writeFileSync(exe, 'fixture');
+  const f = fixture({ isPackaged: true, execPath: exe }), contents = path.join(root, 'release'), image = path.join(root, 'bad.dmg');
+  fs.mkdirSync(contents); fs.writeFileSync(path.join(contents, 'README'), 'no application bundle');
+  require('node:child_process').execFileSync('/usr/bin/hdiutil', ['create', '-quiet', '-fs', 'HFS+', '-srcfolder', contents, image]);
+  const bytes = fs.readFileSync(image), sha = createHash('sha256').update(bytes).digest('hex');
+  const check = async (size, sha256) => {
+    const data = release(); Object.assign(data.assets[0], { size, digest: 'sha256:' + sha256 });
+    f.network.responses.push(response(data)); f.network.manifestResponse = response(signedManifest('1.2.0', { size, sha256 }));
+    return f.updates.check();
+  };
+  await check(bytes.length, sha);
+  await f.updates.download(); f.network.item.complete(bytes); await until(f.updates, 'downloaded');
+  const mkdir = fs.mkdirSync, denied = t.mock.method(fs, 'mkdirSync', (dir, ...rest) => {
+    if (path.basename(dir) === 'volume') throw new Error('local mount point unavailable');
+    return mkdir(dir, ...rest);
+  });
+  await assert.rejects(f.updates.prepareInstall(), /local mount point unavailable/);
+  denied.mock.restore();
+  assert.equal(f.updates.getState().status, 'downloaded');
+  await assert.rejects(f.updates.prepareInstall(), /缺少完整的 AgentSwitcher.app/);
+  assert.equal(f.updates.getState().status, 'available');
+  assert.equal(f.updates.getState().release.downloadable, false);
+  const restored = new AppUpdates(f.options, key.publicKey);
+  assert.equal(restored.getState().release.downloadable, false); restored.stop();
+  assert.equal((await check(bytes.length, sha)).release.downloadable, false);
+  assert.equal((await check(payload.length, digest)).release.downloadable, true);
 });

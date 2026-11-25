@@ -1,16 +1,15 @@
-const { accessToken } = require('./codex-token-fixture.cjs');
-const { test, beforeEach, after } = require('node:test');
+const { createTestHome, installMockKeychain, jwt, accessToken } = require('./helpers/test-env.cjs');
+const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-removal-test-'));
-os.homedir = () => root;
+const root = createTestHome('ags-removal-test-', { mockKeychain: false });
 os.tmpdir = () => path.join(root, 'tmp');
 fs.mkdirSync(os.tmpdir());
 process.env.CODEX_HOME = path.join(root, 'live');
-require('./vault-fixture.cjs');
+installMockKeychain();
 const clients = require('../dist/clients');
 clients.runningClients = async () => [];
 const logout = require('../dist/client-logout');
@@ -38,7 +37,7 @@ const auth = (workspace, generation = 1, user = 'member') => JSON.stringify({
   auth_mode: 'chatgpt', last_refresh: `2026-11-${String(generation).padStart(2, '0')}T00:00:00Z`,
   tokens: { account_id: workspace, access_token: accessToken(workspace, user, 'shared@example.test', generation),
     refresh_token: `refresh-${workspace}-${generation}`,
-    id_token: 'header.' + Buffer.from(JSON.stringify({ sub: user, email: 'shared@example.test' })).toString('base64url') + '.signature' },
+    id_token: jwt({ sub: user, email: 'shared@example.test' }) },
 });
 const put = (directory, workspace, generation, user) => atomicWrite(file(directory), auth(workspace, generation, user));
 const version = directory => JSON.parse(readBuffer(file(directory))).tokens.refresh_token;
@@ -51,7 +50,6 @@ beforeEach(() => {
   unsupported = undefined; onReady = undefined; clearCalls = [];
   agent.queryLiveRpc = async () => { throw new Error('Unexpected real quota request'); };
 });
-after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 test('removal includes proven aliases but preserves other workspaces and users with the same email', async () => {
   put(agent.homeDir, 'personal');
@@ -189,16 +187,16 @@ test('saving uses the identity and bytes captured before an external account cha
   put(agent.homeDir, 'A', 2); put(dir('named'), 'A'); put(dir('B'), 'B');
   store.setActiveProfile('codex', 'B');
   const read = agent.readCredentials.bind(agent);
-  let changed = false;
+  let changed = false, locked = false;
   t.mock.method(agent, 'readCredentials', (location = agent.homeDir) => {
     const captured = read(location);
-    if (!changed && location === agent.homeDir) {
+    if (locked && !changed && location === agent.homeDir) {
       changed = true;
       put(agent.homeDir, 'B');
     }
     return captured;
   });
-  await accounts.saveAccount(agent, 'named');
+  await accounts.saveAccount(agent, 'named', () => { locked = true; });
   assert.equal(changed, true);
   assert.equal(version(dir('named')), 'refresh-A-2');
   assert.equal(version(agent.homeDir), 'refresh-B-1');

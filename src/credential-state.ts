@@ -1,5 +1,5 @@
 import type { BaseAgent, StatusResult } from './agents/base';
-import { fingerprint } from './utils';
+import { fingerprint, jwtInfo } from './utils';
 
 export interface CredentialState { revision?: string; updatedAt?: number }
 
@@ -14,7 +14,7 @@ export function credentialStateFromFiles(agentId: string, files: ReadonlyArray<r
   if (agentId === 'agy') {
     try {
       const auth = JSON.parse(files[0][1]!.toString()), token = auth.token || auth;
-      const updatedAt = Date.parse(token.expiry);
+      const updatedAt = Date.parse(token.expiry ?? auth.expiry);
       return { revision: fingerprint(JSON.stringify([auth.auth_method, auth.id_token_email, auth.id_token,
         token.id_token, token.access_token, token.refresh_token])), updatedAt: Number.isFinite(updatedAt) ? updatedAt : undefined };
     } catch { /* Invalid data still has its own revision. */ }
@@ -30,7 +30,7 @@ export function credentialStateFromFiles(agentId: string, files: ReadonlyArray<r
       }
       let updatedAt = Date.parse(auth.last_refresh);
       if (!Number.isFinite(updatedAt)) {
-        try { updatedAt = JSON.parse(Buffer.from(tokens.access_token.split('.')[1], 'base64url').toString()).iat * 1000; } catch { /* Unknown age is not newer. */ }
+        updatedAt = Number(jwtInfo(tokens.access_token).iat) * 1000;
       }
       return { revision: fingerprint(JSON.stringify(material)), updatedAt: Number.isFinite(updatedAt) ? updatedAt : undefined };
     } catch { /* Malformed files still invalidate a previous snapshot. */ }
@@ -66,3 +66,6 @@ export function snapshotForCredentials(status: StatusResult | undefined, revisio
 export class CredentialChangedError extends Error {
   constructor() { super('查询期间登录凭据已更新，请重试'); }
 }
+
+export class QuotaBearerRejected extends Error {}
+export class LiveWriteDeferred extends Error {}

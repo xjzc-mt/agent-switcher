@@ -2,22 +2,23 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { isDeepStrictEqual } from 'util';
-import { BaseAgent, StatusResult, Identity, type CredentialFiles, type CredentialQuery } from './agents/base';
-import { CodexAgent, codexAgent } from './agents/codex';
-import { claudeAgent } from './agents/claude';
-import { AntigravityAgent, antigravityAgent, antigravityRenewalHint } from './agents/antigravity';
-import { compareNativeSessionCopies, ConflictingNativeFileLogins, findQuotaBearer, parseNativeToken, readAuxiliaryNativeTokens, sharedAntigravitySessions } from './antigravity-native';
+import { BaseAgent, StatusResult, Identity, type CredentialFiles, type CredentialQuery, type CredentialTracker } from './agents/base';
+import { codexAgent } from './agents/codex';
+import { codexQuotaRecovery, RecoveredCodexIdentity } from './codex-quota-recovery';
+import { antigravityAgent } from './agents/antigravity';
+import { withNativeReadSnapshot } from './antigravity-native';
 import { listProfiles, getActiveProfile, setActiveProfile, clearActiveProfile, profileDir, profileExists, readProfileMeta, writeProfileMeta, withStoreLock, validateName, sameProfileName, PENDING_RENAME_FILE, setInProcessRename, ProfileMeta } from './store';
-import { atomicWrite, replaceFiles, readBuffer, fingerprint, differentEmail, type CredentialWriter } from './utils';
+import { atomicWrite, replaceFiles, readBuffer, extractRefreshToken, fingerprint, differentEmail, type CredentialWriter } from './utils';
 import { runningClients } from './clients';
-import { logoutSupport, assertLogoutReady, clearClientCredentials, runningCodexSessions } from './client-logout';
-import { allowUnchangedTemporaryRefresh, createTemporaryCredentials, releaseTemporaryCredentials, removeTemporaryCredentials } from './temporary-credentials';
-import { MIN_REFRESH_INTERVAL_MS, quotaRefreshAt } from './quota-refresh';
-import { credentialState, credentialStateFromFiles, credentialOrder, snapshotForCredentials, CredentialChangedError } from './credential-state';
+import { logoutSupport, assertLogoutReady, clearClientCredentials } from './client-logout';
+import { discardSupersededQuota, PendingQuotaConflict, ConsumedCodexRotation, recordCodexQuotaOutput, createTemporaryCredentials, releaseTemporaryCredentials, removeTemporaryCredentials } from './temporary-credentials';
+import { MIN_REFRESH_INTERVAL_MS, refreshPeriodMs, quotaRefreshAt } from './quota-refresh';
+import { readRefreshIntervals } from './settings';
+import { credentialState, credentialStateFromFiles, credentialOrder, snapshotForCredentials, CredentialChangedError, QuotaBearerRejected, LiveWriteDeferred } from './credential-state';
 import { assertCredentialWriteReady, STAGED_CREDENTIAL_SUFFIX } from './credential-vault';
 import { resultDiagnostic, stepDiagnostic } from './diagnostics';
 
-export const ALL_AGENTS: BaseAgent[] = [codexAgent, antigravityAgent, claudeAgent];
+export const ALL_AGENTS: BaseAgent[] = [codexAgent, antigravityAgent];
 export function resolveAgent(id: string): BaseAgent {
   const agent = ALL_AGENTS.find(a => a.id === id);
   if (!agent) throw new Error('未知平台');
@@ -27,14 +28,17 @@ const liveCache = new Map<string, { identity: string; status: StatusResult }>();
 const pendingQueries = new Map<string, Promise<StatusResult>>();
 const refreshWriteFailures = new Map<string, { at: number; message: string }>();
 const loginDirs = new Map<string, string>();
-let criticalCommitTracker: <T>(work: () => Promise<T>) => Promise<T> = work => work();
-export function setCriticalCommitTracker(tracker: <T>(work: () => Promise<T>) => Promise<T>): void {
-  criticalCommitTracker = tracker;
+let criticalCommitTracker: CredentialTracker = work => work();
+let sharedRenewalTracker = criticalCommitTracker;
+export function setCriticalCommitTracker(commit: CredentialTracker, startSharedRenewal: CredentialTracker = commit): void {
+  criticalCommitTracker = commit;
+  sharedRenewalTracker = startSharedRenewal;
 }
 
 const stagedFileName = (agent: BaseAgent) => `${agent.authFiles[0]}${STAGED_CREDENTIAL_SUFFIX}`;
 const stagedFilePath = (agent: BaseAgent, dir: string) => path.join(dir, stagedFileName(agent));
 const stagedClientBusy = '客户端正在运行，为避免续期冲突暂不验证新凭据；请先关闭客户端后刷新验证';
+const nativeSourcesUnknown = '无法确认 Antigravity 的全部登录来源，已暂停续期。请检查官方登录存储后重试';
 function readStagedBytes(agent: BaseAgent, dir: string): Buffer | null {
   return readBuffer(stagedFilePath(agent, dir));
 }
@@ -63,15 +67,9 @@ export function isSameIdentity(
   if (!a || !b) return false;
   // A single email may have separate personal and organization identities.
   // Never merge or synchronize credentials when their stable IDs disagree.
-  if (a.id && b.id) {
-    return a.id === b.id;
-  }
-  const emailA = a.email?.trim().toLowerCase();
-  const emailB = b.email?.trim().toLowerCase();
-  if (emailA && emailB) {
-    return emailA === emailB;
-  }
-  return false;
+  if (a.id && b.id) return a.id === b.id;
+  const email = a.email?.trim().toLowerCase();
+  return !!email && email === b.email?.trim().toLowerCase();
 }
 
 function safeIdentity(agent: BaseAgent, dir?: string): Identity | undefined {
@@ -85,7 +83,7 @@ function conflictingQuotaEmail(registered?: string, observed?: string, status?: 
 }
 
 function quotaSnapshot(agent: BaseAgent, revision?: string, registered?: string, observed?: string, stored?: StatusResult): StatusResult | undefined {
-  if (agent instanceof CodexAgent && conflictingQuotaEmail(registered, observed, stored)) {
+  if (agent.bindsQuotaEmail && conflictingQuotaEmail(registered, observed, stored)) {
     const account = registered || observed;
     const checked = revision && stored?.credentialRevision === revision && stored.state === 'error' && account &&
       stored.account?.trim().toLowerCase() === account.trim().toLowerCase();
@@ -93,17 +91,18 @@ function quotaSnapshot(agent: BaseAgent, revision?: string, registered?: string,
       checkedAt: checked ? stored?.checkedAt : undefined, refreshFailures: checked ? stored?.refreshFailures : undefined,
       extra: '额度身份与账号记录不一致，请刷新核对' };
   }
-  const snapshot = snapshotForCredentials(stored, revision);
-  if (agent instanceof AntigravityAgent && snapshot?.state === 'unverified' && !snapshot.stagedReplacement && snapshot.extra) {
-    const extra = snapshot.extra;
-    const oldHint = [
-      '本次额度未更新。可以继续使用 Antigravity。客户端更新登录信息后，AGS 会在下次刷新时重新查询额度。',
-      'Antigravity 客户端正在运行，暂时没有可用于只读查询的有效访问令牌；客户端续期或关闭后可重试',
-      '额度暂未更新。可等 Antigravity 自动续期，或保存工作后按 ⌘Q 退出 Antigravity。如有正在使用该账号的 agy 终端或 Antigravity IDE 会话，也请结束。30 秒后再刷新额度。',
-    ].find(hint => extra.startsWith(hint));
-    if (oldHint) return { ...snapshot, extra: antigravityRenewalHint + extra.slice(oldHint.length) };
-  }
-  return snapshot;
+  // A plan-only response contains no quota sample. Do not carry its tier to another credential generation.
+  const history = stored?.plan && !stored.quota && (!revision || revision !== stored.credentialRevision)
+    ? { ...stored, plan: undefined } : stored;
+  const snapshot = snapshotForCredentials(history, revision);
+  return snapshot && agent.sharedQuotaLogin ? agent.sharedQuotaLogin.normalizeQuotaHistory(snapshot) : snapshot;
+}
+
+function reportedQuotaHistory(status?: StatusResult) {
+  return {
+    ...(status?.plan ? { plan: status.plan } : {}),
+    ...(status?.quota ? { quota: status.quota, fetchedAt: status.fetchedAt } : {}),
+  };
 }
 
 function currentQuotaSnapshot(revision: string | undefined, saved?: StatusResult, live?: StatusResult) {
@@ -138,9 +137,16 @@ export function findExistingProfile(
   return undefined;
 }
 
-function matchingProfiles(agent: BaseAgent, identity: Identity): string[] {
+function matchingProfiles(agent: BaseAgent, identity: Identity, login?: CredentialFiles): string[] {
+  const native = login && agent.sharedQuotaLogin;
   return listProfiles(agent.id).filter(name => {
-    const target = safeIdentity(agent, profileDir(agent.id, name));
+    const dir = profileDir(agent.id, name);
+    if (native) {
+      const file = agent.authFiles[0];
+      try { return agent.compareSessionCopies?.(login[file], agent.readCredentials(dir)[file]) !== undefined; }
+      catch { return false; }
+    }
+    const target = safeIdentity(agent, dir);
     return target && isSameIdentity(identity, target);
   });
 }
@@ -154,7 +160,11 @@ function nextBackupName(agentId: string): string {
 export function activeProfile(agent: BaseAgent): string | undefined {
   const identity = safeIdentity(agent);
   if (!identity) return undefined;
-  return preferredMatch(matchingProfiles(agent, identity), getActiveProfile(agent.id));
+  const matches = matchingProfiles(agent, identity).filter(name => {
+    try { return !readProfileMeta(agent.id, name).pendingLiveRevision || credentialState(agent, profileDir(agent.id, name)).revision === credentialState(agent).revision; }
+    catch { return false; }
+  });
+  return preferredMatch(matches, getActiveProfile(agent.id));
 }
 
 function preferredMatch(matching: string[], preferred?: string) {
@@ -167,6 +177,90 @@ export function clientSwitchRevision(agent: BaseAgent): string {
   return agent.switchFingerprint() || fileSwitchRevision(agent, agent.readSwitchableCredentials());
 }
 
+/** Keep the same lock order as quota refresh, including when a backup selects multiple accounts. */
+export async function withProfileCredentialLocks<T>(
+  profiles: { agent: BaseAgent; profile?: string; source?: string }[],
+  work: (lockedIds: ReadonlySet<string>) => Promise<T>,
+  inputIds: readonly string[] = [],
+): Promise<T> {
+  const observe = ({ agent, profile, source }: typeof profiles[number]) => {
+    const dir = source ?? (profile === undefined ? agent.homeDir : profileDir(agent.id, profile));
+    return safeIdentity(agent, dir)?.id ?? dir;
+  };
+  const { observed, ids } = withNativeReadSnapshot(() => {
+    const observed = profiles.map(observe);
+    const ids = new Set([...observed, ...inputIds]);
+    for (const { agent, profile, source } of profiles) {
+      if (!source && profile === undefined) {
+        try { for (const aux of agent.auxiliaryCredentials()) ids.add(aux.identity.id); }
+        catch { /* syncCurrent will require every source it modifies to be readable and locked. */ }
+      }
+    }
+    return { observed, ids };
+  });
+  const locked = () => withStoreLock(() => withNativeReadSnapshot(() => {
+    if (profiles.some((item, i) => observe(item) !== observed[i])) throw new CredentialChangedError();
+    return work(ids);
+  }));
+  try {
+    return await [...ids].sort().reduceRight<() => Promise<T>>((next, id) => () => withStoreLock(() => Promise.resolve().then(next), id), locked)();
+  } catch (error) {
+    if (error instanceof RecoveredCodexIdentity) return withProfileCredentialLocks(profiles, work, inputIds);
+    throw error;
+  }
+}
+
+/** Called under the selected identities' locks and the pool lock; never renews or writes to a client. */
+export function preparedProfileCredentials(agent: BaseAgent, name: string, readCurrent?: (agent: BaseAgent) => Buffer | null): CredentialFiles {
+  const dir = profileDir(agent.id, name), files = agent.credentials(dir);
+  const shared = agent.sharedQuotaLogin;
+  const file = agent.authFiles[0], original = files[file]!, identity = agent.identityFromBytes(original)!;
+  try {
+    if (!shared) {
+      const recovery = codexQuotaRecovery(agent, dir, name, identity.id, original);
+      return recovery ? { ...files, [file]: recovery.apply() } : files;
+    }
+    const recovered = shared.recoverProfileCredential(dir, identity.id, original);
+    if (recovered.readOnly) throw new PendingQuotaConflict();
+    // A saved active profile may lag an official refresh. Only the same login's
+    // verifiably newer bearer may be copied; independent logins keep their own files.
+    const preferred = getActiveProfile(agent.id) === name;
+    let current: Buffer | null = null;
+    try {
+      current = readCurrent ? readCurrent(agent) : agent.readSwitchableCredentials().files[file];
+    } catch (error) {
+      if (preferred) throw error;
+    }
+    const superseded = readProfileMeta(agent.id, name).pendingLiveRevision;
+    if (current && (!superseded || superseded !== credentialStateFromFiles(agent.id, [[file, current]]).revision) &&
+        (agent.compareSessionCopies?.(current, recovered.bytes) ?? 0) > 0) {
+      agent.writeCredentials(dir, { [file]: current });
+      if (!agent.readCredentials(dir)[file]?.equals(current)) throw new Error('未能确认当前登录已同步到账号池');
+      return { ...files, [file]: current };
+    }
+    return { ...files, [file]: recovered.bytes };
+  } catch (error) {
+    if (error instanceof Error) error.message = `「${name}」${error.message}`;
+    throw error;
+  }
+}
+
+function inspectSwitchTarget(agent: BaseAgent, name: string, expectedCurrentRevision?: string) {
+  return withNativeReadSnapshot(() => {
+    const current = agent.readSwitchableCredentials();
+    const target = preparedProfileCredentials(agent, name, a => current.files[a.authFiles[0]]);
+    const bytes = target[agent.authFiles[0]], live = current.files[agent.authFiles[0]];
+    const alreadySelected = !!bytes && !!live?.equals(bytes) && !current.corrupted && !agent.hasPendingSwitchCleanup() &&
+      (!expectedCurrentRevision || clientSwitchRevision(agent) === expectedCurrentRevision);
+    if (alreadySelected) setActiveProfile(agent.id, name);
+    return { target, alreadySelected };
+  });
+}
+
+export function prepareSwitchTarget(agent: BaseAgent, name: string, expectedCurrentRevision?: string) {
+  return withProfileCredentialLocks([{ agent, profile: name }], async () => inspectSwitchTarget(agent, name, expectedCurrentRevision));
+}
+
 function fileSwitchRevision(agent: BaseAgent, { files, corrupted }: ReturnType<BaseAgent['readSwitchableCredentials']>): string {
   const primaryRev = corrupted ? 'corrupt' : credentialStateFromFiles(agent.id, Object.entries(files)).revision || 'none';
   const auxRevs = agent.auxiliaryCredentials().map(aux =>
@@ -174,23 +268,25 @@ function fileSwitchRevision(agent: BaseAgent, { files, corrupted }: ReturnType<B
   return fingerprint(JSON.stringify([primaryRev, auxRevs]));
 }
 
-async function syncCurrent(agent: BaseAgent, saveUnmanaged = true, skipPrimary = false): Promise<Map<string, string | undefined>> {
-  const primaryFiles = skipPrimary ? undefined : agent.readCredentials();
+async function syncCurrent(agent: BaseAgent, saveUnmanaged = true, skipPrimary = false, lockedIds?: ReadonlySet<string>): Promise<Map<string, string | undefined>> {
+  const [primaryFiles, auxiliaries] = withNativeReadSnapshot(() => [skipPrimary ? undefined : agent.readCredentials(), agent.auxiliaryCredentials()] as const);
   const primaryIdentity = primaryFiles && agent.identity(agent.homeDir, primaryFiles);
-  const auxiliaries = agent.auxiliaryCredentials();
   if (agent.management().quota) {
     const allSources = [
       ...(primaryIdentity && primaryFiles ? [{ identity: primaryIdentity, files: primaryFiles }] : []),
       ...auxiliaries,
     ];
+    if (lockedIds && agent.sharedQuotaLogin && allSources.some(source => !lockedIds.has(source.identity.id))) {
+      throw new CredentialChangedError();
+    }
     for (let i = 0; i < allSources.length; i++) {
       const stateA = credentialStateFromFiles(agent.id, Object.entries(allSources[i].files));
       for (let j = i + 1; j < allSources.length; j++) {
         if (!isSameIdentity(allSources[i].identity, allSources[j].identity)) continue;
         const stateB = credentialStateFromFiles(agent.id, Object.entries(allSources[j].files));
         const file = agent.authFiles[0];
-        const independent = agent.id === 'agy' &&
-          rawRefreshToken(allSources[i].files[file]) !== rawRefreshToken(allSources[j].files[file]);
+        const independent = !!agent.sharedQuotaLogin &&
+          extractRefreshToken(allSources[i].files[file]) !== extractRefreshToken(allSources[j].files[file]);
         if (independent || credentialOrder(stateA, stateB) === 'unknown') {
           const label = allSources[i].identity.email || allSources[i].identity.id;
           throw new Error(`检测到账号「${label}」在客户端多处认证存储中存在无法确认新旧的独立凭据，已保留原凭据并取消操作`);
@@ -199,8 +295,8 @@ async function syncCurrent(agent: BaseAgent, saveUnmanaged = true, skipPrimary =
     }
   }
   if (primaryIdentity && primaryFiles) {
-    const active = preferredMatch(matchingProfiles(agent, primaryIdentity), getActiveProfile(agent.id));
-    await syncCopies(agent, agent.homeDir, { files: primaryFiles });
+    const active = preferredMatch(matchingProfiles(agent, primaryIdentity, primaryFiles), getActiveProfile(agent.id));
+    await syncCopies(agent, agent.homeDir, { files: primaryFiles, liveProfile: active });
     if (!active && saveUnmanaged) {
       const name = nextBackupName(agent.id);
       await agent.save(name, agent.homeDir, primaryFiles);
@@ -209,7 +305,12 @@ async function syncCurrent(agent: BaseAgent, saveUnmanaged = true, skipPrimary =
   }
   const updated = new Map<string, string | undefined>();
   for (const aux of auxiliaries) {
-    const matches = matchingProfiles(agent, aux.identity);
+    let matches = matchingProfiles(agent, aux.identity);
+    if (matches.length && agent.sharedQuotaLogin) {
+      const file = agent.authFiles[0];
+      matches = matches.filter(name => agent.compareSessionCopies?.(aux.files[file], agent.readCredentials(profileDir(agent.id, name))[file]) !== undefined);
+      if (!matches.length) throw new Error('客户端认证回退文件与池内同账号的凭据无法确认新旧，已保留两个登录并取消切换');
+    }
     if (matches.length) {
       const auxState = credentialStateFromFiles(agent.id, Object.entries(aux.files));
       for (const name of matches) {
@@ -233,10 +334,11 @@ async function syncCurrent(agent: BaseAgent, saveUnmanaged = true, skipPrimary =
 }
 
 function poolCopyOrder(agent: BaseAgent, source: CredentialFiles, target: CredentialFiles,
-  order = credentialOrder(credentialStateFromFiles(agent.id, Object.entries(source)), credentialStateFromFiles(agent.id, Object.entries(target)))) {
-  if (!(agent instanceof AntigravityAgent)) return order;
-  const file = agent.authFiles[0], preference = compareNativeSessionCopies(source[file], target[file]);
-  if (preference === undefined) return order;
+  order = credentialOrder(credentialStateFromFiles(agent.id, Object.entries(source)), credentialStateFromFiles(agent.id, Object.entries(target))),
+  confirmedSuccessor = false) {
+  if (!agent.compareSessionCopies) return order;
+  const file = agent.authFiles[0], preference = agent.compareSessionCopies(source[file], target[file]);
+  if (preference === undefined) return agent.management().quota && !confirmedSuccessor ? 'unknown' : order;
   if (preference > 0) return 'newer';
   if (preference < 0) return 'older';
   return order === 'unknown' ? 'same' : order;
@@ -258,30 +360,33 @@ async function syncCopies(
   const writes: Array<{ name: string; revision?: string }> = [];
   for (const name of listProfiles(agent.id)) {
     const dest = profileDir(agent.id, name);
-    if (dest !== source) {
-      // Email metadata alone cannot authorize a credential write.
-      let target: Identity | undefined;
-      let targetState: ReturnType<typeof credentialState>;
-      let copy: CredentialFiles;
-      try {
-        copy = agent.readCredentials(dest);
-        target = agent.identity(dest, copy);
-        targetState = credentialStateFromFiles(agent.id, Object.entries(copy));
-      } catch { continue; }
-      if (!target) continue;
-      const sameAccount = target.id === identity.id ||
-        Boolean(upgradedFrom?.revision && target.id === upgradedFrom.id && targetState.revision === upgradedFrom.revision);
-      if (sameAccount) {
-        // Only the active card can follow an official-client renewal by date.
-        // A background query may update other copies only from its exact previous generation.
-        if (!strict && name !== options.liveProfile && targetState.revision !== previousRevision) continue;
-        const order = agent.management().quota ? poolCopyOrder(agent, files, copy, credentialOrder(sourceState, targetState, previousRevision)) : 'newer';
-        if (order === 'unknown' && strict) throw new Error(`「${name}」存在不同版本的凭据，无法确认新旧，已保留两份凭据并取消操作`);
-        if (order === 'newer') {
-          if (expectedRevision && agent instanceof CodexAgent && differentEmail(readProfileMeta(agent.id, name).email, identity.email)) continue;
-          writes.push({ name, revision: targetState.revision });
-        }
-      }
+    if (dest === source) continue;
+    // Email metadata alone cannot authorize a credential write.
+    let target: Identity | undefined;
+    let targetState: ReturnType<typeof credentialState>;
+    let copy: CredentialFiles;
+    try {
+      copy = agent.readCredentials(dest);
+      target = agent.identity(dest, copy);
+      targetState = credentialStateFromFiles(agent.id, Object.entries(copy));
+    } catch { continue; }
+    if (!target) continue;
+    const sameAccount = target.id === identity.id ||
+      Boolean(upgradedFrom?.revision && target.id === upgradedFrom.id && targetState.revision === upgradedFrom.revision);
+    if (!sameAccount) continue;
+    if (source === agent.homeDir && readProfileMeta(agent.id, name).pendingLiveRevision) continue;
+    if (strict && agent.sharedQuotaLogin && name !== options.liveProfile) {
+      const file = agent.authFiles[0];
+      if (agent.compareSessionCopies?.(files[file], copy[file]) === undefined) continue;
+    }
+    // A background query may update other copies only from its exact previous generation.
+    if (!strict && name !== options.liveProfile && targetState.revision !== previousRevision) continue;
+    const successor = !!previousRevision && targetState.revision === previousRevision && sourceState.revision !== previousRevision;
+    const order = agent.management().quota ? poolCopyOrder(agent, files, copy, credentialOrder(sourceState, targetState, previousRevision), successor) : 'newer';
+    if (order === 'unknown' && strict) throw new Error(`「${name}」存在不同版本的凭据，无法确认新旧，已保留两份凭据并取消操作`);
+    if (order === 'newer') {
+      if (expectedRevision && agent.bindsQuotaEmail && differentEmail(readProfileMeta(agent.id, name).email, identity.email)) continue;
+      writes.push({ name, revision: targetState.revision });
     }
   }
   for (const { name, revision } of writes) {
@@ -292,15 +397,17 @@ async function syncCopies(
 }
 
 export async function saveAccount(agent: BaseAgent, name: string, validateLogin?: () => void): Promise<{ ok: true; files: string[]; warnings: string[]; profile?: string; updated?: boolean }> {
-  return withStoreLock(async () => {
+  const isolatedSource = loginDirs.get(agent.id);
+  const source = isolatedSource || agent.homeDir;
+  return withProfileCredentialLocks([{ agent, source }], async lockedIds => {
     validateLogin?.();
+    if (isolatedSource !== loginDirs.get(agent.id)) throw new CredentialChangedError();
     validateName(name);
-    const isolatedSource = loginDirs.get(agent.id);
-    const source = isolatedSource || agent.homeDir;
     if (source === agent.homeDir && !agent.management().canSaveCurrent) throw new Error(agent.switchSupport() || '当前登录不支持保存为文件凭据');
     const captured = agent.readCredentials(source);
     const identity = agent.identity(source, captured);
     if (!identity) throw new Error('尚未检测到登录凭据，请完成登录后再保存');
+    if (!lockedIds.has(identity.id)) throw new CredentialChangedError();
     const sourceState = credentialStateFromFiles(agent.id, Object.entries(captured));
     const finishSave = (profile: string) => {
       if (source !== agent.homeDir) releaseLoginDirectory(agent);
@@ -311,9 +418,9 @@ export async function saveAccount(agent: BaseAgent, name: string, validateLogin?
     const update = existingProfile && availableCredentialUpdateTarget(agent, existingProfile.name, { allowStaged: Boolean(isolatedSource) });
     if (update) {
       const files = Object.keys(captured);
-      replaceAccountCredentialsLocked(update, source, { trusted: Boolean(isolatedSource), sourceFiles: captured });
+      const { result } = await replaceAccountCredentialsLocked(update, source, { trusted: Boolean(isolatedSource), sourceFiles: captured });
       finishSave(update.profile);
-      return { ok: true, files, warnings: [], profile: update.profile, updated: true };
+      return { ok: true, files, warnings: result.warning ? [result.warning] : [], profile: update.profile, updated: true };
     }
 
     const duplicate = existingProfile?.name === name ? findExistingProfile(agent, identity, name) : existingProfile;
@@ -367,46 +474,57 @@ export async function saveAccount(agent: BaseAgent, name: string, validateLogin?
 
 export function needsUnmanagedChoice(agent: BaseAgent, name: string): boolean {
   const { files, corrupted } = agent.readSwitchableCredentials();
+  const acceptedPrevious = readProfileMeta(agent.id, name).pendingLiveRevision;
+  const replacingPrevious = !!acceptedPrevious && acceptedPrevious === credentialStateFromFiles(agent.id, Object.entries(files)).revision;
   const live = corrupted ? undefined : agent.identityFromBytes(files[agent.authFiles[0]]);
   const targetId = agent.identity(profileDir(agent.id, name))?.id;
-  if (live && live.id !== targetId && !matchingProfiles(agent, live).length) return true;
+  const native = agent.sharedQuotaLogin;
+  if (!replacingPrevious && live && (native || live.id !== targetId) && !matchingProfiles(agent, live, files).length) return true;
   return agent.auxiliaryCredentials().some(aux =>
     aux.identity.id !== live?.id && aux.identity.id !== targetId && !matchingProfiles(agent, aux.identity).length);
 }
 
 export async function useAccount(agent: BaseAgent, name: string, options: { saveUnmanaged?: boolean; expectedCurrentRevision?: string; allowFileMigration?: boolean } = {}) {
-  return withStoreLock(async () => {
+  return withProfileCredentialLocks([{ agent, profile: name }, { agent }], async lockedIds => {
     const unsupported = agent.switchSupport();
     if (unsupported) throw new Error(unsupported);
     const target = profileDir(agent.id, name);
-    agent.credentials(target); // Validate before backing up or changing anything.
-    if (process.platform === 'win32' && agent.id === 'codex' && (await runningCodexSessions({ failClosed: true })).length) {
-      throw new Error('请先退出 Codex 桌面并结束共用登录的 CLI 或 IDE 会话，再切换账号');
+    if (agent.hasInterruptedSwitch?.()) await agent.recoverInterruptedSwitch?.();
+    if (agent.sharedQuotaLogin && inspectSwitchTarget(agent, name, options.expectedCurrentRevision).alreadySelected) {
+      return { ok: true, files: [], warnings: [] };
     }
-    const clients = await runningClients(agent.id, { failClosed: agent.id === 'agy' && options.allowFileMigration === true });
+    await agent.assertSwitchSessions?.();
+    const clients = await runningClients(agent.id, { failClosed: !!agent.compareSessionCopies && options.allowFileMigration === true });
     if (clients.length) throw new Error(`请先退出 ${clients.join('、')}，完成切换后重新打开`);
-    await agent.recoverInterruptedSwitch?.();
-    const targetIdentity = getProfileIdentity(agent, name);
-    const nativeFingerprint = agent.switchFingerprint();
-    const currentLogin = agent.readSwitchableCredentials();
-    const initialSwitchRev = nativeFingerprint || fileSwitchRevision(agent, currentLogin);
-    const { files: liveFiles, corrupted: liveCorrupted } = currentLogin;
-    const liveIdentity = liveCorrupted ? undefined : agent.identityFromBytes(liveFiles[agent.authFiles[0]]);
-    const liveRevision = liveCorrupted ? undefined : credentialStateFromFiles(agent.id, Object.entries(liveFiles)).revision;
-    if (options.expectedCurrentRevision && initialSwitchRev !== options.expectedCurrentRevision &&
-        (nativeFingerprint || liveRevision !== options.expectedCurrentRevision)) {
-      throw new Error('确认期间当前凭据已变化，未执行切换，请重新核对');
-    }
-    const targetRevision = credentialState(agent, target).revision;
-    const alreadySelected = !liveCorrupted && isSameIdentity(liveIdentity, targetIdentity);
-    if (needsUnmanagedChoice(agent, name) && typeof options.saveUnmanaged !== 'boolean') {
-      throw new Error('当前账号未保存在 AGS，请明确选择保存后切换或不保存并切换（CLI：--save-current / --discard-current）');
-    }
-    const syncedAuxiliary = await syncCurrent(agent, options.saveUnmanaged !== false, liveCorrupted === true);
+    if (agent.canRecoverQuotaRotation) preparedProfileCredentials(agent, name);
+    const { initialSwitchRev, targetRevision, alreadySelected, acceptingUpdate, syncing } = withNativeReadSnapshot(() => {
+      const targetIdentity = getProfileIdentity(agent, name);
+      const nativeFingerprint = agent.switchFingerprint();
+      const currentLogin = agent.readSwitchableCredentials();
+      const initialSwitchRev = nativeFingerprint || fileSwitchRevision(agent, currentLogin);
+      const { files: liveFiles, corrupted: liveCorrupted } = currentLogin;
+      const liveIdentity = liveCorrupted ? undefined : agent.identityFromBytes(liveFiles[agent.authFiles[0]]);
+      const liveRevision = liveCorrupted ? undefined : credentialStateFromFiles(agent.id, Object.entries(liveFiles)).revision;
+      if (options.expectedCurrentRevision && initialSwitchRev !== options.expectedCurrentRevision &&
+          (nativeFingerprint || liveRevision !== options.expectedCurrentRevision)) {
+        throw new Error('确认期间当前凭据已变化，未执行切换，请重新核对');
+      }
+      const targetRevision = credentialState(agent, target).revision;
+      const native = agent.sharedQuotaLogin;
+      const alreadySelected = !liveCorrupted && isSameIdentity(liveIdentity, targetIdentity) &&
+        (!native || agent.compareSessionCopies?.(liveFiles[agent.authFiles[0]], agent.readCredentials(target)[agent.authFiles[0]]) !== undefined);
+      if (needsUnmanagedChoice(agent, name) && typeof options.saveUnmanaged !== 'boolean') {
+        throw new Error('当前账号未保存在 AGS，请明确选择保存后切换或不保存并切换（CLI：--save-current / --discard-current）');
+      }
+      const acceptingUpdate = !!liveRevision && readProfileMeta(agent.id, name).pendingLiveRevision === liveRevision && isSameIdentity(liveIdentity, targetIdentity);
+      const syncing = syncCurrent(agent, options.saveUnmanaged !== false, liveCorrupted === true || acceptingUpdate, lockedIds);
+      return { initialSwitchRev, targetRevision, alreadySelected, acceptingUpdate, syncing };
+    });
+    const syncedAuxiliary = await syncing;
     if (clientSwitchRevision(agent) !== initialSwitchRev) throw new CredentialChangedError();
     const expectedTargetRevision = syncedAuxiliary.has(name) ? syncedAuxiliary.get(name) : targetRevision;
     if (!alreadySelected && credentialState(agent, target).revision !== expectedTargetRevision) throw new CredentialChangedError();
-    if (alreadySelected) {
+    if (alreadySelected && !acceptingUpdate) {
       const order = poolCopyOrder(agent, agent.readCredentials(target), agent.readCredentials());
       if (order === 'unknown') throw new Error('当前登录与账号池凭据版本不同，无法确认新旧，已取消覆盖');
       if (order !== 'newer' && !agent.hasPendingSwitchCleanup()) {
@@ -431,6 +549,10 @@ export async function useAccount(agent: BaseAgent, name: string, options: { save
         setActiveProfile(agent.id, name);
       }
       liveCache.delete(agent.id);
+      if (acceptingUpdate) {
+        try { writeProfileMeta(agent.id, name, { ...readProfileMeta(agent.id, name), pendingLiveRevision: undefined }); }
+        catch { result.warnings.push('新登录已生效，待应用标记暂未清除'); }
+      }
       try { journal.finish?.(); }
       catch { result.warnings.push('账号已切换，下次切换时将核对并清理恢复记录'); }
       return result;
@@ -481,13 +603,16 @@ function removalPreview(agent: BaseAgent, name: string): RemovalPreview {
   const states = profiles.map(profile => {
     const dir = profileDir(agent.id, profile), stat = fs.lstatSync(dir);
     if (!stat.isDirectory()) throw new Error('账号目录无效');
-    const allowed = [...agent.authFiles, stagedFileName(agent), '_meta.json', 'config.toml', 'settings.json', 'settings.local.json'];
+    const confirmedFiles = [stagedFileName(agent)];
+    const allowed = [...agent.authFiles, ...confirmedFiles, '_meta.json', 'config.toml', 'settings.json', 'settings.local.json'];
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!allowed.includes(entry.name) || !entry.isFile()) throw new Error(`「${profile}」含非账号管理文件，已保留，请先核对`);
     }
-    const staged = stagedFilePath(agent, dir);
-    const pendingRevision = fs.existsSync(staged) ? fingerprint(fs.readFileSync(staged).toString('base64')) : null;
-    return [profile, stat.dev, stat.ino, stat.birthtimeMs, safeProfileRevision(agent, dir), pendingRevision];
+    const revisions = confirmedFiles.map(name => {
+      const file = path.join(dir, name);
+      return fs.existsSync(file) ? fingerprint(fs.readFileSync(file).toString('base64')) : null;
+    });
+    return [profile, stat.dev, stat.ino, stat.birthtimeMs, safeProfileRevision(agent, dir), ...revisions];
   });
   let live: Identity | undefined, unsupported: string | undefined;
   try { live = agent.identity(); unsupported = logoutSupport(agent); }
@@ -505,28 +630,32 @@ export async function previewRemoveAccount(agent: BaseAgent, name: string): Prom
 export async function removeAccount(agent: BaseAgent, name: string, options: { preview?: RemovalPreview; logout?: boolean } = {}) {
   const expected = options.preview || await previewRemoveAccount(agent, name);
   if (expected.agent !== agent.id || expected.profile !== name) throw new Error('删除范围已变化，请重新核对');
-  return withStoreLock(async () => {
-    return withStoreLock(async () => {
-      if (options.logout) await assertLogoutReady(agent);
-      const latest = removalPreview(agent, name);
-      if (latest.signature !== expected.signature || latest.identity !== expected.identity) throw new Error('账号或备份范围已变化，请重新核对后删除');
-      if (options.logout && (!expected.current || !latest.current || latest.liveRevision !== expected.liveRevision || latest.logoutUnsupported)) {
-        throw new Error(latest.logoutUnsupported || '客户端当前账号已变化，未退出或删除，请重新核对');
-      }
-      if (options.logout) clearClientCredentials(agent, latest.identity!, expected.liveRevision);
-      const removed: string[] = [];
-      try {
-        if (latest.profiles.includes(getActiveProfile(agent.id) || '')) clearActiveProfile(agent.id);
-        for (const profile of latest.profiles) {
-          fs.rmSync(profileDir(agent.id, profile), { recursive: true });
-          removed.push(profile);
-        }
-      } catch {
-        throw new Error(`${options.logout ? '客户端已退出；' : ''}已移除 ${removed.length} 条备份，其余已保留，请重新核对后重试`);
-      } finally { liveCache.delete(agent.id); }
-      return { ok: true, removed, loggedOut: options.logout === true };
+  return withProfileCredentialLocks([{ agent, profile: name }], async () => {
+    if (options.logout) await assertLogoutReady(agent);
+    const latest = removalPreview(agent, name);
+    if (latest.signature !== expected.signature || latest.identity !== expected.identity) throw new Error('账号或备份范围已变化，请重新核对后删除');
+    if (options.logout && (!expected.current || !latest.current || latest.liveRevision !== expected.liveRevision || latest.logoutUnsupported)) {
+      throw new Error(latest.logoutUnsupported || '客户端当前账号已变化，未退出或删除，请重新核对');
+    }
+    if (options.logout) clearClientCredentials(agent, latest.identity!, expected.liveRevision);
+    const formerTokens = latest.profiles.flatMap(profile => {
+      const dir = profileDir(agent.id, profile);
+      try { return [extractRefreshToken(agent.readCredentials(dir)[agent.authFiles[0]]), extractRefreshToken(readStagedBytes(agent, dir))]; }
+      catch { return []; }
     });
-  }, expected.identity || profileDir(agent.id, name));
+    const removed: string[] = [];
+    try {
+      if (latest.profiles.includes(getActiveProfile(agent.id) || '')) clearActiveProfile(agent.id);
+      for (const profile of latest.profiles) {
+        fs.rmSync(profileDir(agent.id, profile), { recursive: true });
+        removed.push(profile);
+      }
+    } catch {
+      throw new Error(`${options.logout ? '客户端已退出；' : ''}已移除 ${removed.length} 条备份，其余已保留，请重新核对后重试`);
+    } finally { liveCache.delete(agent.id); }
+    if (latest.identity) discardUnusedQuota(agent, latest.identity, formerTokens);
+    return { ok: true, removed, loggedOut: options.logout === true };
+  });
 }
 
 export async function renameAccount(agent: BaseAgent, oldName: string, newName: string) {
@@ -610,7 +739,7 @@ export function credentialUpdateTarget(agent: BaseAgent, name: string, options: 
     isSameIdentity(safeIdentity(agent), identity) && live.status.credentialRevision === credentialState(agent).revision
     ? live.status : readProfileMeta(agent.id, name).snapshot;
   if (status?.credentialRevision && status.credentialRevision !== revision) throw new Error('账号凭据已变化，请刷新后重试');
-  const authUnresolved = status?.state === 'error' && ['authentication-rejected', 'account-unavailable'].includes(status.authFailure || '');
+  const authUnresolved = status?.state === 'error' && ['authentication-rejected', 'account-unavailable', 'quota-recovery-required'].includes(status.authFailure || '');
   if (!status?.authExpired && status?.state !== 'expired' && !authUnresolved) throw new Error('此账号当前未标记为认证异常，请刷新后重试');
   return { agent: agent.id, profile: name, identity, revision };
 }
@@ -626,19 +755,20 @@ export async function updateAccountCredentials(
   validateLogin?: () => void,
   options: { trusted?: boolean } = {},
 ) {
-  return withStoreLock(async () => {
+  const agent = resolveAgent(target.agent);
+  return withProfileCredentialLocks([{ agent, profile: target.profile }], async () => {
     validateLogin?.();
-    return replaceAccountCredentialsLocked(target, source, options).result;
+    return (await replaceAccountCredentialsLocked(target, source, options)).result;
   });
 }
 
 /**
- * Caller must hold the store lock.
+ * Caller holds the identity lock followed by the store lock.
  * Official isolated browser re-login (`trusted: true`) updates directly;
  * external untrusted credentials (`trusted !== true`) are staged in `.pending`
  * without touching the pool or live login until server verification binds user + workspace.
  */
-export function replaceAccountCredentialsLocked(target: CredentialUpdateTarget, source: string | CredentialFiles, options: { trusted?: boolean; importWriter?: CredentialWriter; sourceFiles?: CredentialFiles } = {}) {
+export async function replaceAccountCredentialsLocked(target: CredentialUpdateTarget, source: string | CredentialFiles, options: { trusted?: boolean; importWriter?: CredentialWriter; sourceFiles?: CredentialFiles } = {}) {
   const agent = resolveAgent(target.agent);
   const current = credentialUpdateTarget(agent, target.profile, { allowStaged: options.trusted === true });
   if (!isSameIdentity(current.identity, target.identity)) throw new Error('原账号已变化，请重新选择');
@@ -650,15 +780,16 @@ export function replaceAccountCredentialsLocked(target: CredentialUpdateTarget, 
   const dir = profileDir(agent.id, target.profile);
   const originalBytes = agent.readCredentials(dir)[agent.authFiles[0]];
   const meta = readProfileMeta(agent.id, target.profile);
+  const originalSnapshot = quotaSnapshot(agent, current.revision, meta.email, current.identity.email, meta.snapshot);
   const previousStaged = readStagedBytes(agent, dir);
   const previousStagedRevision = previousStaged && credentialStateFromFiles(agent.id, [[agent.authFiles[0], previousStaged]]).revision;
   const consumed = consumedLogin(meta.snapshot, originalBytes, current.revision, previousStagedRevision || undefined);
-  if (consumed && rawRefreshToken(files[agent.authFiles[0]]) === rawRefreshToken(originalBytes)) {
+  if (consumed && extractRefreshToken(files[agent.authFiles[0]]) === extractRefreshToken(originalBytes)) {
     throw new Error('此续期凭据已被消耗，请重新授权后使用新的凭据');
   }
 
   if (!options.trusted) {
-    if (agent instanceof CodexAgent && differentEmail(meta.email, incoming.email)) {
+    if (agent.bindsQuotaEmail && differentEmail(meta.email, incoming.email)) {
       throw new Error('凭据与原账号登记的邮箱不符，已保留原凭据');
     }
     if (!agent.canVerifyReplacement(originalBytes)) {
@@ -667,7 +798,7 @@ export function replaceAccountCredentialsLocked(target: CredentialUpdateTarget, 
     const candidateBytes = files[agent.authFiles[0]];
     const stagedRev = credentialStateFromFiles(agent.id, [[agent.authFiles[0], candidateBytes]]).revision;
     const snapshot: StatusResult = {
-      ...meta.snapshot, available: true, account: incoming.email || meta.email,
+      ...originalSnapshot, available: true, account: incoming.email || meta.email,
       state: 'unverified', authExpired: false, extra: '待通过官方服务验证凭据归属后生效', checkedAt: undefined,
       refreshFailures: undefined, creditActivity: undefined,
       credentialRevision: stagedRev, stagedReplacement: true, authFailure: undefined,
@@ -679,7 +810,7 @@ export function replaceAccountCredentialsLocked(target: CredentialUpdateTarget, 
       '_meta.json': Buffer.from(JSON.stringify({ ...meta, stagedCheck: undefined, email: meta.email || incoming.email, snapshot: consumed || snapshot }, null, 2)),
     }, options.importWriter);
     return {
-      result: { ok: true, agent: agent.id, profile: target.profile, staged: true },
+      result: { ok: true, agent: agent.id, profile: target.profile, staged: true, warning: undefined },
       rollback() {
         replaceFiles(dir, { [stagedName]: previousStaged, '_meta.json': previousMeta });
       },
@@ -689,50 +820,58 @@ export function replaceAccountCredentialsLocked(target: CredentialUpdateTarget, 
   const isLive = agent.management().canSaveCurrent && isSameIdentity(safeIdentity(agent), current.identity) &&
     credentialState(agent).revision === current.revision;
   const snapshot: StatusResult = {
-    ...meta.snapshot, available: true, account: incoming.email || meta.email,
+    ...originalSnapshot, available: true, account: incoming.email || meta.email,
     state: 'unverified', authExpired: false, extra: undefined, checkedAt: undefined,
     refreshFailures: undefined, creditActivity: undefined,
     credentialRevision: credentialStateFromFiles(agent.id, Object.entries(files)).revision, stagedReplacement: undefined, authFailure: undefined,
     refreshConsumed: undefined, consumedRefreshFingerprint: undefined,
   };
   const stagedName = stagedFileName(agent);
-  const writes: Array<{ dir: string; files: Record<string, Buffer | null> }> = [
-    { dir, files: { ...files, [stagedName]: null, '_meta.json': Buffer.from(JSON.stringify({ ...meta, stagedCheck: undefined, email: incoming.email || meta.email, snapshot }, null, 2)) } },
-    ...(isLive ? [{ dir: agent.homeDir, files }] : []),
-  ];
-  const previous = writes.map(write => ({
-    dir: write.dir,
-    files: write.dir === agent.homeDir
-      ? agent.readCredentials()
-      : Object.fromEntries(Object.keys(write.files).map(file => [file, readBuffer(path.join(write.dir, file))])),
-  }));
-  const apply = (write: { dir: string; files: Record<string, Buffer | null> }) => write.dir === agent.homeDir
-    ? agent.writeCredentials(write.dir, write.files) : replaceFiles(write.dir, write.files);
-  let applied = 0;
-  try {
-    for (const write of writes) {
-      if (write.dir === agent.homeDir && credentialState(agent).revision !== current.revision) continue;
-      apply(write); applied++;
-    }
-  } catch (error) {
-    for (let i = applied - 1; i >= 0; i--) apply(previous[i]);
-    throw error;
-  }
-  const cached = liveCache.get(agent.id);
-  if (isLive) liveCache.delete(agent.id);
-  return {
-    result: { ok: true, agent: agent.id, profile: target.profile },
-    rollback() {
-      for (const write of previous.slice(0, applied).reverse()) {
-        if (write.dir !== agent.homeDir || credentialState(agent).revision === snapshot.credentialRevision) apply(write);
+  const originalMetaBytes = isLive && !agent.writeRenewedCredentials ? readBuffer(path.join(dir, '_meta.json')) : undefined;
+  const savedMeta = { ...meta, stagedCheck: undefined, pendingLiveRevision: isLive ? current.revision : undefined, email: incoming.email || meta.email, snapshot };
+  replaceFiles(dir, { ...files, [stagedName]: null, '_meta.json': Buffer.from(JSON.stringify(savedMeta, null, 2)) });
+  let warning: string | undefined;
+  if (isLive) {
+    try { warning = await applyVerifiedLiveCredential(agent, files, current.revision); }
+    catch (error) {
+      // A failed file replacement left the original client login intact. The official login
+      // directory still holds the new grant for retry until the trusted update succeeds.
+      if (originalMetaBytes !== undefined && credentialState(agent).revision === current.revision) {
+        replaceFiles(dir, { [agent.authFiles[0]]: originalBytes, [stagedName]: previousStaged, '_meta.json': originalMetaBytes });
+        throw error;
       }
-      if (isLive && cached) liveCache.set(agent.id, cached);
-      else if (isLive) liveCache.delete(agent.id);
-    },
-  };
+      warning = pendingClientSync;
+    }
+  }
+  if (isLive && !warning) writeProfileMeta(agent.id, target.profile, { ...savedMeta, pendingLiveRevision: undefined });
+  if (isLive) liveCache.delete(agent.id);
+  const oldTokens = [extractRefreshToken(originalBytes), extractRefreshToken(previousStaged)];
+  discardUnusedQuota(agent, current.identity.id, oldTokens, target.profile, extractRefreshToken(files[agent.authFiles[0]]));
+  return { result: { ok: true, agent: agent.id, profile: target.profile, warning } };
+}
+
+const pendingClientSync = '账号池凭据已更新，客户端登录尚未同步。请切换到此账号以应用新凭据。';
+async function applyVerifiedLiveCredential(agent: BaseAgent, files: CredentialFiles, expected?: string) {
+  if (!expected || credentialState(agent).revision !== expected) return pendingClientSync;
+  if (agent.writeRenewedCredentials) await agent.writeRenewedCredentials(files, expected);
+  else agent.writeCredentials(agent.homeDir, files);
+}
+
+function discardUnusedQuota(agent: BaseAgent, id: string, oldTokens: (string | undefined)[], replaced?: string, currentToken?: string) {
+  try {
+    // An unreadable profile may still hold the grant. Preserve any recovery evidence.
+    for (const name of listProfiles(agent.id, { includeInvalid: true })) {
+      if (name === replaced) continue;
+      const copy = agent.identity(profileDir(agent.id, name));
+      if (!copy || copy.id === id) return;
+    }
+    discardSupersededQuota(agent.id, id, oldTokens, replaced !== undefined, currentToken);
+  } catch { stepDiagnostic('storage-unavailable'); }
 }
 
 export function dashboard() {
+  const now = Date.now();
+  const intervals = readRefreshIntervals();
   return ALL_AGENTS.map(agent => {
     const management = agent.management();
     const profiles = listProfiles(agent.id, { includeInvalid: true }).map(name => {
@@ -754,57 +893,61 @@ export function dashboard() {
             const deferred = meta.stagedCheck;
             const checkedAt = deferred?.revision === revision ? deferred?.checkedAt : undefined;
             snapshot = { ...snapshot, available: true, state: 'unverified', stagedReplacement: true,
-              checkedAt: checkedAt || snapshot?.checkedAt, extra: checkedAt ? stagedClientBusy : snapshot?.extra };
+              checkedAt: checkedAt || snapshot?.checkedAt, extra: checkedAt ? (deferred?.sourcesUnavailable ? nativeSourcesUnknown : stagedClientBusy) : snapshot?.extra };
           }
         } else {
           saved = agent.identity(dir);
           snapshot = agent.credentialStatus(dir);
         }
       } catch (error) {
-        snapshot = { available: false, account: meta.email, state: 'error', extra: (error as Error).message };
+        const plan = conflictingQuotaEmail(meta.email, saved?.email, stored) ? undefined : stored?.plan || stored?.quota?.plan;
+        snapshot = { available: false, account: meta.email, plan, state: 'error', extra: (error as Error).message };
       }
       return { name, meta: { ...meta, email: meta.email || saved?.email, snapshot }, stored, saved };
     });
     const switchUnsupported = agent.switchSupport();
     let active: string | undefined, status: StatusResult;
     try {
-      const liveFiles = management.quota ? agent.readCredentials() : undefined;
+      const desktop = management.quota && agent.sharedQuotaLogin?.desktopLogin();
+      const liveFiles = desktop ? { [agent.authFiles[0]]: desktop } : management.quota ? agent.readCredentials() : undefined;
       const identity = agent.identity(agent.homeDir, liveFiles);
-      const matches = profiles.filter(p => isSameIdentity(identity, p.saved)).map(p => p.name);
+      const revision = identity && liveFiles && credentialStateFromFiles(agent.id, Object.entries(liveFiles)).revision;
+      const matches = profiles.filter(p => isSameIdentity(identity, p.saved) &&
+        (!p.meta.pendingLiveRevision || revision === p.stored?.credentialRevision)).map(p => p.name);
       if (management.canSaveCurrent && !switchUnsupported && matches.length) active = preferredMatch(matches, getActiveProfile(agent.id));
       if (management.quota) {
         const live = liveCache.get(agent.id);
         const activeProfileEntry = profiles.find(p => p.name === active);
         const activeHasStaged = activeProfileEntry?.meta.snapshot?.stagedReplacement;
-        const revision = identity && liveFiles && credentialStateFromFiles(agent.id, Object.entries(liveFiles)).revision;
         const cached = currentQuotaSnapshot(revision, activeHasStaged ? undefined : activeProfileEntry?.stored,
           live && identity?.id === live.identity ? live.status : undefined);
         const registered = activeProfileEntry?.meta.email;
-        status = (identity && quotaSnapshot(agent, revision, registered, identity.email, cached)) || {
+        const history = desktop && cached?.credentialRevision !== revision ? undefined : cached;
+        status = (identity && quotaSnapshot(agent, revision, registered, identity.email, history)) || {
             available: !!identity, account: identity?.email, state: identity ? 'unverified' : 'signed-out', extra: switchUnsupported,
           };
       } else {
-        status = agent.displayStatus();
+        status = agent.credentialStatus();
       }
     } catch (error) { status = { available: false, state: 'error', extra: (error as Error).message }; }
     return {
-      id: agent.id, label: agent.label, active, status, management, switchUnsupported, refreshAt: quotaRefreshAt(status, true),
+      id: agent.id, label: agent.label, active, status, management, switchUnsupported,
+      refreshPeriods: { live: refreshPeriodMs[intervals.live], spare: refreshPeriodMs[intervals.spare] },
+      refreshAt: quotaRefreshAt(status, intervals.live, now),
       profiles: profiles.map(({ name, meta }) => ({ name, meta, isActive: name === active,
-        refreshAt: meta.snapshot?.available === false ? Infinity : quotaRefreshAt(meta.snapshot, name === active) })),
+        refreshAt: meta.snapshot?.available === false ? Infinity : quotaRefreshAt(meta.snapshot, name === active ? intervals.live : intervals.spare, now) })),
     };
   });
 }
 
-async function hasRunningLiveSession(agent: BaseAgent): Promise<boolean> {
+async function hasRunningLiveSession(agent: BaseAgent): Promise<boolean | 'unknown'> {
   try {
-    const busy = (await runningClients(agent.id, { failClosed: true })).length > 0 ||
-      (agent.id === 'codex' && (await runningCodexSessions({ failClosed: true })).length > 0) ||
-      (agent instanceof AntigravityAgent && agent.management().storage === 'keychain' && (await sharedAntigravitySessions()).length > 0);
+    const busy = (await runningClients(agent.id, { failClosed: true })).length > 0 || !!(await agent.sharedSessionIssue());
     if (busy) stepDiagnostic('live-session');
     return busy;
   } catch {
     stepDiagnostic('process-unknown');
-    return true; // Fail-closed when client process status cannot be reliably confirmed.
+    return 'unknown'; // Protect the login without starting another shared client.
   }
 }
 
@@ -831,26 +974,13 @@ function checkRefreshWriteFailure(agent: BaseAgent, identity: Identity | undefin
   return key;
 }
 
-function rawRefreshToken(bytes: Buffer | null): string | undefined {
-  if (!bytes) return undefined;
-  try {
-    const parsed = JSON.parse(bytes.toString());
-    const rt = parsed?.tokens?.refresh_token ?? parsed?.token?.refresh_token ?? parsed?.refresh_token;
-    return typeof rt === 'string' && rt ? rt : undefined;
-  } catch { return undefined; }
-}
-
-function rememberRefreshWriteFailure(key: string, error: unknown, query: CredentialQuery, input: Buffer | null): void {
+function rememberRefreshWriteFailure(key: string, error: unknown): void {
   if (error instanceof Error) refreshWriteFailures.set(key, { at: Date.now(), message: error.message });
-  const previous = rawRefreshToken(input);
-  if (query.verifiedReplacement !== false && query.temporaryDirectory && previous && previous === rawRefreshToken(query.rotated ?? null)) {
-    allowUnchangedTemporaryRefresh(query.temporaryDirectory);
-  }
 }
 
 function consumedLogin(status: StatusResult | undefined, bytes: Buffer | null, revision?: string, stagedRevision?: string): StatusResult | undefined {
   if (!status?.refreshConsumed || !revision) return;
-  const token = rawRefreshToken(bytes);
+  const token = extractRefreshToken(bytes);
   if (!token) return;
   const digest = fingerprint(token);
   // Older pending snapshots copied the original consumed flag to the staged file's revision.
@@ -862,25 +992,17 @@ function consumedLogin(status: StatusResult | undefined, bytes: Buffer | null, r
     consumedRefreshFingerprint: digest };
 }
 
-function sharesClientCredential(agent: BaseAgent, credentials: Array<Buffer | null>, quotaCopies?: Buffer[]): boolean {
+function sharesClientCredential(agent: BaseAgent, credentials: Array<Buffer | null>, quotaCopies?: Buffer[]): boolean | 'unknown' {
   if (!agent.management().canSaveCurrent) return false;
-  const file = agent.authFiles[0];
   try {
-    let copies: Array<Buffer | null>;
-    try {
-      copies = [agent.readCredentials()[file], ...agent.auxiliaryCredentials().map(source => source.files[file])];
-    } catch (error) {
-      if (!(error instanceof ConflictingNativeFileLogins)) throw error;
-      // Both files can be compared with the pool without choosing an active login.
-      copies = readAuxiliaryNativeTokens(null, true);
-    }
+    const copies = agent.readClientCopies();
     let shared = false;
     for (const bytes of credentials) {
       const identity = agent.identityFromBytes(bytes);
-      const token = rawRefreshToken(bytes);
+      const token = extractRefreshToken(bytes);
       for (const copy of copies) {
         const sameIdentity = isSameIdentity(identity, agent.identityFromBytes(copy));
-        const sameToken = token && token === rawRefreshToken(copy);
+        const sameToken = token && token === extractRefreshToken(copy);
         if (!sameIdentity && !sameToken) continue;
         if (!quotaCopies) return true;
         shared = true;
@@ -889,18 +1011,19 @@ function sharesClientCredential(agent: BaseAgent, credentials: Array<Buffer | nu
     }
     return shared;
   } catch {
-    return true;
+    return agent.sharedQuotaLogin ? 'unknown' : true;
   }
 }
 
-async function verifyStagedProfileCredential(agent: BaseAgent, name: string): Promise<StatusResult | undefined> {
+async function verifyStagedProfileCredential(agent: BaseAgent, name: string, lockedIdentity: string | undefined, sourcesUnavailable = false): Promise<StatusResult | undefined> {
   const targetDir = profileDir(agent.id, name);
   const snapshot = await withStoreLock(async () => {
     if (!profileExists(agent.id, name)) throw new Error('账号不存在');
     const staged = readStagedBytes(agent, targetDir);
     if (!staged) return undefined;
     const original = agent.readCredentials(targetDir)[agent.authFiles[0]];
-    const preIdentity = safeIdentity(agent, targetDir);
+    const preIdentity = agent.identityFromBytes(original);
+    if (!preIdentity || preIdentity.id !== lockedIdentity) throw new CredentialChangedError();
     const originalRevision = credentialStateFromFiles(agent.id, [[agent.authFiles[0], original]]).revision;
     const stagedRevision = credentialStateFromFiles(agent.id, [[agent.authFiles[0], staged]]).revision;
     const meta = readProfileMeta(agent.id, name);
@@ -909,8 +1032,9 @@ async function verifyStagedProfileCredential(agent: BaseAgent, name: string): Pr
   });
   if (!snapshot) return undefined;
 
-  const backendIssue = agent instanceof CodexAgent && agent.switchSupport();
-  if (backendIssue || sharesClientCredential(agent, [snapshot.original, snapshot.staged]) && await hasRunningLiveSession(agent)) {
+  const backendIssue = agent.switchSupport();
+  const shared = sourcesUnavailable ? 'unknown' : !backendIssue && sharesClientCredential(agent, [snapshot.original, snapshot.staged]);
+  if (backendIssue || shared === 'unknown' || shared && await hasRunningLiveSession(agent)) {
     return withStoreLock(async () => {
       if (!profileExists(agent.id, name) ||
           credentialState(agent, targetDir).revision !== snapshot.originalRevision ||
@@ -926,23 +1050,23 @@ async function verifyStagedProfileCredential(agent: BaseAgent, name: string): Pr
         refreshConsumed: undefined, consumedRefreshFingerprint: undefined,
         stagedReplacement: true,
         credentialRevision: snapshot.stagedRevision,
-        extra: backendIssue || stagedClientBusy,
+        extra: backendIssue || (shared === 'unknown' ? nativeSourcesUnknown : stagedClientBusy),
         checkedAt,
       };
       writeProfileMeta(agent.id, name, { ...meta, snapshot: snapshot.consumed || deferredStatus,
-        stagedCheck: snapshot.stagedRevision ? { revision: snapshot.stagedRevision, checkedAt } : undefined });
+        stagedCheck: snapshot.stagedRevision ? { revision: snapshot.stagedRevision, checkedAt, sourcesUnavailable: shared === 'unknown' || undefined } : undefined });
       resultDiagnostic(backendIssue ? 'unsupported' : 'waiting', meta.snapshot?.fetchedAt);
       return deferredStatus;
     });
   }
 
-  const repeatsConsumed = snapshot.consumed && rawRefreshToken(snapshot.staged) === rawRefreshToken(snapshot.original);
+  const repeatsConsumed = snapshot.consumed && extractRefreshToken(snapshot.staged) === extractRefreshToken(snapshot.original);
   if (!repeatsConsumed) assertRefreshWriteReady(path.join(targetDir, agent.authFiles[0]));
   const failureKey = checkRefreshWriteFailure(agent, snapshot.preIdentity, snapshot.stagedRevision, snapshot.meta.email, snapshot.originalRevision);
   const query: CredentialQuery = repeatsConsumed ? { status: { available: true, extra: '待验证的续期凭据已被消耗，请重新授权' } }
     : await agent.queryCredential!(snapshot.staged, { allowRefresh: true, verifyTarget: snapshot.original, expectedEmail: snapshot.meta.email });
-  const replacementRefresh = rawRefreshToken(query.rotated ?? null);
-  if (replacementRefresh && replacementRefresh !== rawRefreshToken(snapshot.staged)) stepDiagnostic('rotation');
+  const replacementRefresh = extractRefreshToken(query.rotated ?? null);
+  if (replacementRefresh && replacementRefresh !== extractRefreshToken(snapshot.staged)) stepDiagnostic('rotation');
   if (query.temporaryDirectory) stepDiagnostic('pending-commit');
   try {
     return await criticalCommitTracker(() => withStoreLock(async () => {
@@ -952,7 +1076,7 @@ async function verifyStagedProfileCredential(agent: BaseAgent, name: string): Pr
       }
       const currentOriginal = agent.readCredentials(targetDir)[agent.authFiles[0]];
       const currentStaged = readStagedBytes(agent, targetDir);
-      if ((agent instanceof CodexAgent && readProfileMeta(agent.id, name).email !== snapshot.meta.email) ||
+      if ((agent.bindsQuotaEmail && readProfileMeta(agent.id, name).email !== snapshot.meta.email) ||
           credentialStateFromFiles(agent.id, [[agent.authFiles[0], currentOriginal]]).revision !== snapshot.originalRevision ||
           credentialStateFromFiles(agent.id, [[agent.authFiles[0], currentStaged]]).revision !== snapshot.stagedRevision) {
         throw new CredentialChangedError();
@@ -960,7 +1084,7 @@ async function verifyStagedProfileCredential(agent: BaseAgent, name: string): Pr
       const stagedName = stagedFileName(agent);
       if (query.verifiedReplacement && query.status.state === 'ok' && query.rotated) {
         const liveBusy = await hasRunningLiveSession(agent);
-        const isLiveSame = !liveBusy && agent.management().canSaveCurrent &&
+        const isLiveSame = agent.management().canSaveCurrent &&
           isSameIdentity(safeIdentity(agent), snapshot.preIdentity) &&
           credentialState(agent).revision === snapshot.originalRevision;
         const newRev = credentialStateFromFiles(agent.id, [[agent.authFiles[0], query.rotated]]).revision;
@@ -973,15 +1097,24 @@ async function verifyStagedProfileCredential(agent: BaseAgent, name: string): Pr
         replaceFiles(targetDir, {
           [agent.authFiles[0]]: query.rotated,
           [stagedName]: null,
-          '_meta.json': Buffer.from(JSON.stringify({ ...meta, stagedCheck: undefined, email: postIdentity?.email || meta.email, snapshot: committedStatus }, null, 2)),
+          '_meta.json': Buffer.from(JSON.stringify({ ...meta, stagedCheck: undefined, pendingLiveRevision: isLiveSame ? snapshot.originalRevision : undefined, email: postIdentity?.email || meta.email, snapshot: committedStatus }, null, 2)),
         });
-        if (isLiveSame && credentialState(agent).revision === snapshot.originalRevision) {
-          agent.writeCredentials(agent.homeDir, { [agent.authFiles[0]]: query.rotated });
-          if (postIdentity) liveCache.set(agent.id, { identity: postIdentity.id, status: committedStatus });
+        try {
+          if (isLiveSame) {
+            const warning = liveBusy ? pendingClientSync : await applyVerifiedLiveCredential(agent, { [agent.authFiles[0]]: query.rotated }, snapshot.originalRevision).catch(() => pendingClientSync);
+            if (warning) committedStatus.extra = warning;
+            else {
+              writeProfileMeta(agent.id, name, { ...readProfileMeta(agent.id, name), pendingLiveRevision: undefined });
+              if (postIdentity) liveCache.set(agent.id, { identity: postIdentity.id, status: committedStatus });
+            }
+          }
+          await syncCopies(agent, targetDir, { previousRevision: snapshot.originalRevision, strict: false, expectedRevision: newRev,
+            upgradedFrom: snapshot.preIdentity ? { id: snapshot.preIdentity.id, revision: snapshot.originalRevision } : undefined });
+        } catch {
+          committedStatus.extra ??= '账号池凭据已更新，账号副本尚未全部同步。';
+        } finally {
+          if (query.temporaryDirectory) releaseTemporaryCredentials(query.temporaryDirectory);
         }
-        await syncCopies(agent, targetDir, { previousRevision: snapshot.originalRevision, strict: false, expectedRevision: newRev,
-          upgradedFrom: snapshot.preIdentity ? { id: snapshot.preIdentity.id, revision: snapshot.originalRevision } : undefined });
-        if (query.temporaryDirectory) releaseTemporaryCredentials(query.temporaryDirectory);
         return committedStatus;
       }
       if (!query.rotated && query.temporaryDirectory) releaseTemporaryCredentials(query.temporaryDirectory);
@@ -990,9 +1123,12 @@ async function verifyStagedProfileCredential(agent: BaseAgent, name: string): Pr
         ? appendRecoveryNotice(baseExtra, [query.temporaryDirectory])
         : baseExtra;
       const meta = readProfileMeta(agent.id, name);
+      const previous = snapshot.meta.snapshot;
+      const originalHistory = previous && (previous.credentialRevision === snapshot.originalRevision || previous.credentialRevision === snapshot.stagedRevision)
+        && !conflictingQuotaEmail(meta.email, snapshot.preIdentity?.email, previous) ? previous : undefined;
       const failedStatus: StatusResult = {
         ...snapshot.consumed,
-        ...(snapshot.meta.snapshot?.quota ? { quota: snapshot.meta.snapshot.quota, plan: snapshot.meta.snapshot.plan, fetchedAt: snapshot.meta.snapshot.fetchedAt } : {}),
+        ...reportedQuotaHistory(originalHistory),
         available: true,
         account: snapshot.preIdentity?.email || meta.email,
         state: 'expired',
@@ -1009,10 +1145,10 @@ async function verifyStagedProfileCredential(agent: BaseAgent, name: string): Pr
       return failedStatus;
     }));
   } catch (error) {
-    if (query.rotated && query.temporaryDirectory && error instanceof Error) {
+    if (query.rotated && query.temporaryDirectory && fs.existsSync(query.temporaryDirectory) && error instanceof Error) {
       error.message = appendRecoveryNotice(error.message, [query.temporaryDirectory]);
     }
-    rememberRefreshWriteFailure(failureKey, error, query, snapshot.staged);
+    rememberRefreshWriteFailure(failureKey, error);
     throw error;
   }
 }
@@ -1023,35 +1159,53 @@ function assertRefreshWriteReady(file: string): void {
 }
 
 export function refreshAccount(agent: BaseAgent, name?: string, force = false): Promise<StatusResult> {
-  if (!(agent instanceof CodexAgent || agent instanceof AntigravityAgent && agent.management().quota)) {
+  if (!agent.management().quota) {
     if (name && !profileExists(agent.id, name)) return Promise.reject(new Error('账号不存在'));
-    return name ? Promise.resolve(agent.credentialStatus(profileDir(agent.id, name))) : agent.status();
+    return Promise.resolve().then(() => agent.credentialStatus(name ? profileDir(agent.id, name) : agent.homeDir));
   }
+  const intervals = readRefreshIntervals();
   const requested = name ? profileDir(agent.id, name) : agent.homeDir;
   const staged = name ? readStagedBytes(agent, requested) : null;
-  const identity = agent.identity(requested);
+  const shared = agent.sharedQuotaLogin;
+  const desktop = shared?.desktopLogin();
+  const file = agent.authFiles[0];
+  // A file-only observation is scoped to this refresh. Mutations still read the complete native login.
+  const readView = (dir: string, quotaCopies?: Buffer[]): CredentialFiles | undefined => {
+    if (desktop && shared && dir === agent.homeDir) return { [file]: shared.confirmDesktopLogin(desktop, quotaCopies) };
+  };
+  const identityAt = (dir: string) => {
+    const view = readView(dir);
+    return view ? agent.identity(dir, view) : safeIdentity(agent, dir);
+  };
+  const revisionAt = (dir: string) => {
+    const view = readView(dir);
+    return (view ? credentialStateFromFiles(agent.id, Object.entries(view)) : credentialState(agent, dir)).revision;
+  };
+  const identity = agent.identity(requested, desktop && !name ? { [file]: desktop } : undefined);
   const usesLiveLogin = () => {
     if (!name) return true;
     if (staged || !identity) return false;
     let liveFiles: CredentialFiles;
-    try { liveFiles = agent.readCredentials(); } catch { return false; }
+    try { liveFiles = readView(agent.homeDir) ?? agent.readCredentials(); } catch { return false; }
     if (agent.identity(agent.homeDir, liveFiles)?.id !== identity.id) return false;
-    return credentialStateFromFiles(agent.id, Object.entries(liveFiles)).revision === credentialState(agent, requested).revision ||
-      name === preferredMatch(matchingProfiles(agent, identity), getActiveProfile(agent.id));
+    if (credentialStateFromFiles(agent.id, Object.entries(liveFiles)).revision === credentialState(agent, requested).revision) return true;
+    return !readProfileMeta(agent.id, name).pendingLiveRevision && name === preferredMatch(matchingProfiles(agent, identity), getActiveProfile(agent.id));
   };
   const isLive = usesLiveLogin();
   const dir = isLive ? agent.homeDir : requested;
   const dedupRev = staged
     ? credentialStateFromFiles(agent.id, [[agent.authFiles[0], staged]]).revision
-    : credentialState(agent, dir).revision;
-  const key = JSON.stringify([agent.id, name, dir, dedupRev, Boolean(staged)]);
+    : revisionAt(dir);
+  const fileOnly = Boolean(desktop && isLive);
+  const key = JSON.stringify([agent.id, name, dir, dedupRev, Boolean(staged), fileOnly]);
   const pending = pendingQueries.get(key);
   if (pending) return pending;
-  const supersededEntries: Array<{ dir: string; rotatedRevision?: string }> = [];
-  const reconcileSuperseded = (persistedRevision: string | undefined, persistedFreshRotation: boolean): string[] => {
-    const retained: Array<{ dir: string; rotatedRevision?: string }> = [];
+  const supersededEntries: Array<{ dir: string; rotatedRevision?: string; rotatedToken?: string }> = [];
+  const reconcileSuperseded = (persistedRevision: string | undefined, persistedFreshRotation: boolean, retryInput?: string): string[] => {
+    const retained: typeof supersededEntries = [];
     for (const entry of supersededEntries) {
-      if (persistedFreshRotation || (entry.rotatedRevision && persistedRevision === entry.rotatedRevision)) {
+      const successor = persistedFreshRotation && (!shared || Boolean(entry.rotatedToken && entry.rotatedToken === retryInput));
+      if (successor || (entry.rotatedRevision && persistedRevision === entry.rotatedRevision)) {
         releaseTemporaryCredentials(entry.dir);
       } else {
         retained.push(entry);
@@ -1072,7 +1226,7 @@ export function refreshAccount(agent: BaseAgent, name?: string, force = false): 
   };
   const run = async () => {
     if (name && readStagedBytes(agent, requested)) {
-      const stagedResult = await verifyStagedProfileCredential(agent, name);
+      const stagedResult = await verifyStagedProfileCredential(agent, name, identity?.id, Boolean(desktop));
       if (stagedResult) return stagedResult;
     }
     if (staged) throw new CredentialChangedError();
@@ -1080,24 +1234,66 @@ export function refreshAccount(agent: BaseAgent, name?: string, force = false): 
       for (let attempt = 0; ; attempt++) {
         const snapshot = await withStoreLock(async () => {
           if (name && !profileExists(agent.id, name)) throw new Error('账号不存在');
-          if (safeIdentity(agent, requested)?.id !== identity?.id || usesLiveLogin() !== isLive) throw new CredentialChangedError();
-          const profile = name || activeProfile(agent);
-          if (isLive && identity && !(agent instanceof CodexAgent)) {
+          if (identityAt(requested)?.id !== identity?.id || usesLiveLogin() !== isLive) throw new CredentialChangedError();
+          const profile = name || (fileOnly && identity
+            ? preferredMatch(matchingProfiles(agent, identity), getActiveProfile(agent.id)) : activeProfile(agent));
+          if (isLive && identity && !fileOnly && shared) {
             await syncCopies(agent, agent.homeDir, { strict: false, liveProfile: profile });
+          }
+          const quotaCopies: Buffer[] = [];
+          let original = (readView(dir, quotaCopies) ?? (agent.readCredentials(dir, quotaCopies)))[file];
+          if (agent.identityFromBytes(original, isLive)?.id !== identity?.id) throw new CredentialChangedError();
+          let pendingQuota = false;
+          let recoveryReadOnly = false;
+          let codexRecovered = false;
+          if (original && identity && (agent.canRecoverQuotaRotation || (shared && !isLive && name))) {
+            if (!isLive && name && readStagedBytes(agent, dir)) throw new CredentialChangedError();
+            try {
+              if (shared) {
+                const recovered = shared.recoverProfileCredential(dir, identity.id, original);
+                pendingQuota = recovered.pending;
+                recoveryReadOnly = recovered.readOnly;
+                original = recovered.bytes;
+              } else {
+                const plan = codexQuotaRecovery(agent, dir, profile, identity.id, original);
+                if (plan) {
+                  if (isLive && plan.changed && await hasRunningLiveSession(agent)) {
+                    const busy = new PendingQuotaConflict(false);
+                    busy.message = '客户端正在使用此登录，已保留上次续期结果；请在客户端续期或关闭后刷新';
+                    throw busy;
+                  }
+                  original = plan.apply();
+                  codexRecovered = true;
+                }
+              }
+            } catch (error) {
+              if (!(error instanceof PendingQuotaConflict)) throw error;
+              const revision = credentialStateFromFiles(agent.id, [[file, original]]).revision;
+              const saved = profile ? readProfileMeta(agent.id, profile).snapshot : undefined;
+              const consumed = consumedLogin(saved, original, revision) ||
+                (isLive && liveCache.get(agent.id)?.identity === identity.id ? consumedLogin(liveCache.get(agent.id)?.status, original, revision) : undefined);
+              if (consumed) return { blocked: consumed };
+              const cached = quotaSnapshot(agent, revision, identity.email, identity.email, saved);
+              const due = force ? Date.parse(cached?.checkedAt || '') + MIN_REFRESH_INTERVAL_MS : quotaRefreshAt(cached, isLive ? intervals.live : intervals.spare, Date.now());
+              if (cached?.extra === error.message && due > Date.now()) {
+                stepDiagnostic('cached'); resultDiagnostic('cached', cached.fetchedAt);
+                return { blocked: cached };
+              }
+              const status: StatusResult = { available: true, account: identity.email, credentialRevision: revision, extra: error.message,
+                state: error.needsAuthorization ? 'error' : 'unverified', authFailure: error.needsAuthorization ? 'quota-recovery-required' : undefined };
+              if (error instanceof ConsumedCodexRotation) Object.assign(status, { state: 'expired', authExpired: true,
+                refreshConsumed: true, consumedRefreshFingerprint: fingerprint(extractRefreshToken(original)!) });
+              return { blocked: await recordRefresh(agent, dir, profile, isLive, identity, identity, revision, cached, status) };
+            }
           }
           const profileFiles = isLive && profile ? agent.readCredentials(profileDir(agent.id, profile)) : undefined;
           const profileState = profileFiles && credentialStateFromFiles(agent.id, Object.entries(profileFiles));
-          const quotaCopies: Buffer[] = [];
-          const file = agent.authFiles[0];
-          const original = (agent instanceof AntigravityAgent ? agent.readCredentials(dir, quotaCopies) : agent.readCredentials(dir))[file];
-          if (agent.identityFromBytes(original, isLive)?.id !== identity?.id) throw new CredentialChangedError();
           const sourceState = credentialStateFromFiles(agent.id, [[agent.authFiles[0], original]]);
           const { revision } = sourceState;
           const saved = profileFiles?.[file];
           let separateLogin = !!profileState && ['older', 'unknown'].includes(credentialOrder(sourceState, profileState));
-          if (separateLogin && agent instanceof AntigravityAgent && saved && identity &&
-              agent.identityFromBytes(saved)?.id === identity.id && rawRefreshToken(original) === rawRefreshToken(saved)) {
-            separateLogin = false; // Same renewal credential, even when the bearer dates cannot be ordered.
+          if (shared && saved && identity) {
+            separateLogin = agent.identityFromBytes(saved)?.id !== identity.id || extractRefreshToken(original) !== extractRefreshToken(saved);
           }
           const live = liveCache.get(agent.id);
           const meta = profile ? readProfileMeta(agent.id, profile) : undefined;
@@ -1105,16 +1301,19 @@ export function refreshAccount(agent: BaseAgent, name?: string, force = false): 
           const stored = currentQuotaSnapshot(revision, meta?.snapshot, liveStatus);
           const consumed = consumedLogin(stored, original, revision) ||
             (isLive && live?.identity === identity?.id ? consumedLogin(live?.status, original, revision) : undefined);
-          const cached = consumed || quotaSnapshot(agent, revision, meta?.email, identity?.email, stored);
-          if (agent instanceof AntigravityAgent && saved && original && !original.equals(saved)) quotaCopies.push(saved);
-          return { profile, profileRevision: profileState?.revision, separateLogin, original, revision, expectedEmail: meta?.email, cached, quotaCopies };
+          const history = fileOnly && stored?.credentialRevision !== revision ? undefined : stored;
+          const cached = consumed || quotaSnapshot(agent, revision, meta?.email, identity?.email, history);
+          if (shared && saved && original && !original.equals(saved)) quotaCopies.push(saved);
+          return { profile, profileRevision: profileState?.revision, separateLogin, original, revision, expectedEmail: meta?.email, cached, quotaCopies, pendingQuota, recoveryReadOnly, codexRecovered };
         });
+        if (snapshot.blocked) return snapshot.blocked;
         const { profile, original, revision, cached } = snapshot;
         const failureKey = checkRefreshWriteFailure(agent, identity, revision, snapshot.expectedEmail);
         const refreshAt = force
           ? Date.parse(cached?.checkedAt || '') + MIN_REFRESH_INTERVAL_MS
-          : quotaRefreshAt(cached, isLive);
-        if (cached && (cached.refreshConsumed || refreshAt > Date.now())) {
+          : quotaRefreshAt(cached, isLive ? intervals.live : intervals.spare, Date.now());
+        const clearedRecovery = snapshot.codexRecovered && (cached?.authFailure === 'quota-recovery-required' || cached?.state === 'unverified');
+        if (cached && (cached.refreshConsumed || (!clearedRecovery && refreshAt > Date.now()))) {
           stepDiagnostic('cached');
           resultDiagnostic(cached.refreshConsumed ? 'expired' : 'cached', cached.fetchedAt);
           if (supersededEntries.length) {
@@ -1127,49 +1326,101 @@ export function refreshAccount(agent: BaseAgent, name?: string, force = false): 
           return cached;
         }
         // A rotation could give an independent older login a newer timestamp than the saved card.
-        const copies = agent instanceof AntigravityAgent ? snapshot.quotaCopies : undefined;
-        const readOnly = snapshot.separateLogin || ((isLive || sharesClientCredential(agent, [original], copies)) && await hasRunningLiveSession(agent));
+        const copies = shared ? snapshot.quotaCopies : undefined;
+        const spareBearer = !isLive && (cached?.plan || snapshot.pendingQuota) && original && shared?.quotaBearer(original, [], false);
+        const independentRead = snapshot.recoveryReadOnly || Boolean(spareBearer) || snapshot.separateLogin;
+        // A different saved grant stays read-only while the official client can renew its own current grant.
+        const followsCurrent = isLive && !!shared;
+        const sharesLogin = desktop ? 'unknown' : followsCurrent || (!independentRead && (isLive || sharesClientCredential(agent, [original], copies)));
+        const liveSession = sharesLogin === 'unknown' ? 'unknown' : sharesLogin && await hasRunningLiveSession(agent);
+        // Let the official Windows client persist its own renewal, including transitions beyond WinCred's blob limit.
+        const officialRenewal = shared?.clientOwnsRenewal === true && followsCurrent && liveSession !== 'unknown' && !snapshot.separateLogin;
+        let readOnly = independentRead || Boolean(liveSession) || officialRenewal;
         if (readOnly) stepDiagnostic('read-only');
-        const readOnlyUsage = readOnly && agent instanceof AntigravityAgent;
+        const readOnlyUsage = readOnly && !!shared;
         if (profile && !readOnlyUsage) assertRefreshWriteReady(path.join(profileDir(agent.id, profile), agent.authFiles[0]));
-        const options = { allowRefresh: !readOnly, expectedEmail: snapshot.expectedEmail,
-          quotaCopies: snapshot.quotaCopies, allowUndatedBearer: !snapshot.separateLogin };
-        const query = await agent.queryCredential!(original, options);
-        if (query.status.extra === antigravityRenewalHint) resultDiagnostic('waiting', cached?.fetchedAt);
-        if (snapshot.separateLogin && (query.status.extra === antigravityRenewalHint || query.status.extra?.includes('客户端正在运行'))) {
+        const separateBearer = followsCurrent && snapshot.separateLogin && liveSession === true && original
+          ? shared?.quotaBearer(original, copies) : undefined;
+        const retryRejected = (!!spareBearer || (!!agent.canRecoverQuotaRotation && !readOnly)) && !snapshot.recoveryReadOnly && !snapshot.separateLogin && !desktop;
+        const options = { allowRefresh: !readOnly, reportRejectedBearer: retryRejected, expectedEmail: snapshot.expectedEmail,
+          withSharedRenewal: isLive && (liveSession === true || officialRenewal) && attempt === 0 ? sharedRenewalTracker : undefined,
+          quotaCopies: snapshot.quotaCopies, allowUndatedBearer: !fileOnly && (!snapshot.separateLogin ||
+            Boolean(separateBearer && !separateBearer.expiry && original && shared?.ownsQuotaLogin(original))) };
+        let query: CredentialQuery;
+        try {
+          query = await agent.queryCredential!(original, options);
+        } catch (error) {
+          if (!(error instanceof QuotaBearerRejected) || !retryRejected) throw error;
+          // The bearer was read-only. Before consuming its grant, recheck every live source and the saved generation.
+          const sharing = sharesClientCredential(agent, [original]);
+          if (sharing === 'unknown' || (sharing && await hasRunningLiveSession(agent))) {
+            query = { status: { available: true, account: identity?.email, state: 'error', extra: error.message } };
+          } else {
+            if (revisionAt(dir) !== revision || usesLiveLogin() !== isLive || (profile && isLive &&
+                credentialState(agent, profileDir(agent.id, profile)).revision !== snapshot.profileRevision) ||
+                (profile && (readStagedBytes(agent, profileDir(agent.id, profile)) ||
+                  (agent.bindsQuotaEmail && readProfileMeta(agent.id, profile).email !== snapshot.expectedEmail)))) throw new CredentialChangedError();
+            assertRefreshWriteReady(path.join(dir, file));
+            readOnly = false;
+            query = await agent.queryCredential!(original, { ...options, allowRefresh: true, renewRejectedBearer: true });
+          }
+        }
+        const waiting = query.waitingForClient && !snapshot.recoveryReadOnly && sharesLogin !== 'unknown';
+        if (query.waitingForClient && snapshot.recoveryReadOnly) {
+          query.status = { ...query.status, state: 'error', authFailure: 'quota-recovery-required', extra: new PendingQuotaConflict().message };
+        } else if (query.waitingForClient && sharesLogin === 'unknown') query.status.extra = nativeSourcesUnknown;
+        if (waiting) resultDiagnostic('waiting', cached?.fetchedAt);
+        if (snapshot.separateLogin && (waiting || query.status.extra?.includes('客户端正在运行'))) {
           query.status.extra = '当前登录与保存的凭据版本不同，已保留两份凭据；请在官方客户端续期后刷新额度';
         }
         try {
-          const nextRefreshToken = rawRefreshToken(query.rotated ?? null);
-          const persistedFreshRotation = Boolean(!readOnly && nextRefreshToken && nextRefreshToken !== rawRefreshToken(original));
+          const nextRefreshToken = extractRefreshToken(query.rotated ?? null);
+          const persistedFreshRotation = Boolean(!readOnly && nextRefreshToken && nextRefreshToken !== extractRefreshToken(original));
           if (persistedFreshRotation) stepDiagnostic('rotation');
-          if (query.temporaryDirectory) stepDiagnostic('pending-commit');
+          if (query.temporaryDirectory) {
+            stepDiagnostic('pending-commit');
+            if (agent.canRecoverQuotaRotation && query.rotated) recordCodexQuotaOutput(query.temporaryDirectory, revision, query.rotated);
+          }
           const commitWork = () => withStoreLock(async () => {
             if (name && (!profileExists(agent.id, name) || safeIdentity(agent, profileDir(agent.id, name))?.id !== identity?.id)) throw new CredentialChangedError();
-            if (safeIdentity(agent, dir)?.id !== identity?.id || usesLiveLogin() !== isLive ||
+            if (identityAt(dir)?.id !== identity?.id || usesLiveLogin() !== isLive ||
                 (isLive && profile && credentialState(agent, profileDir(agent.id, profile)).revision !== snapshot.profileRevision)) throw new CredentialChangedError();
-            if (agent instanceof CodexAgent && profile && readProfileMeta(agent.id, profile).email !== snapshot.expectedEmail) throw new CredentialChangedError();
+            if (agent.bindsQuotaEmail && profile && readProfileMeta(agent.id, profile).email !== snapshot.expectedEmail) throw new CredentialChangedError();
             let status: StatusResult;
             if (readOnly) {
               if (!query.rotated && query.temporaryDirectory) releaseTemporaryCredentials(query.temporaryDirectory);
-              status = { ...query.status, credentialRevision: revision };
+              status = { ...query.status, credentialRevision: (readOnlyUsage && query.status.credentialRevision) || revision };
               // /usage can return current quota without a new subscription tier.
               if (readOnlyUsage && !status.plan) status.plan = cached?.plan;
             } else {
               if (query.rotated && (!original || !query.rotated.equals(original))) stepDiagnostic('credential-write');
-              status = agent.commitQuery(dir, revision, { ...query, temporaryDirectory: undefined });
+              if (isLive && agent.writeRenewedCredentials && query.rotated) {
+                try { await agent.writeRenewedCredentials({ [file]: query.rotated }, revision); }
+                catch (error) {
+                  // If a client reopened, persist the official successor against the exact saved input.
+                  if (!profile || !(error instanceof LiveWriteDeferred) || snapshot.profileRevision !== revision) throw error;
+                  const savedDir = profileDir(agent.id, profile);
+                  status = agent.commitQuery(savedDir, revision, { ...query, temporaryDirectory: undefined });
+                  const meta = readProfileMeta(agent.id, profile);
+                  writeProfileMeta(agent.id, profile, { ...meta, pendingLiveRevision: revision });
+                  return recordRefresh(agent, savedDir, profile, false, identity, identity, revision, cached,
+                    { ...status, state: 'unverified', extra: error.message }, persistedFreshRotation);
+                }
+                status = { ...query.status, credentialRevision: credentialStateFromFiles(agent.id, [[file, query.rotated]]).revision };
+              } else status = agent.commitQuery(dir, revision, { ...query, temporaryDirectory: undefined });
             }
             if (status.refreshConsumed) {
-              const token = rawRefreshToken(original);
+              const token = extractRefreshToken(original);
               if (token) status.consumedRefreshFingerprint = fingerprint(token);
             }
-            const postIdentity = safeIdentity(agent, dir) || identity;
-            return recordRefresh(agent, dir, profile, isLive, postIdentity, identity, revision, cached, status, persistedFreshRotation);
+            const postIdentity = identityAt(dir) || identity;
+            return recordRefresh(agent, dir, profile, isLive, postIdentity, identity, revision, cached, status, persistedFreshRotation,
+              fileOnly ? () => revisionAt(dir) : undefined);
           });
           let committed = query.rotated || query.temporaryDirectory ? await criticalCommitTracker(commitWork) : await commitWork();
           if (!readOnly && query.temporaryDirectory) releaseTemporaryCredentials(query.temporaryDirectory);
           if (supersededEntries.length) {
-            const retained = reconcileSuperseded(committed.credentialRevision, persistedFreshRotation);
+            const retained = reconcileSuperseded(committed.credentialRevision, persistedFreshRotation, extractRefreshToken(original));
             if (retained.length) {
               committed = { ...committed, extra: appendRecoveryNotice(committed.extra, retained) };
               await persistNotice(profile, committed);
@@ -1179,18 +1430,18 @@ export function refreshAccount(agent: BaseAgent, name?: string, force = false): 
         } catch (error) {
           // Retry once only for a newer generation of the originally requested account.
           if (!(error instanceof CredentialChangedError) || attempt || !identity ||
-              safeIdentity(agent, dir)?.id !== identity.id || credentialState(agent, dir).revision === revision) {
+              identityAt(dir)?.id !== identity.id || revisionAt(dir) === revision) {
             if (query.temporaryDirectory && fs.existsSync(query.temporaryDirectory) && error instanceof Error && !error.message.includes(query.temporaryDirectory)) {
               error.message = appendRecoveryNotice(error.message, [query.temporaryDirectory]);
             }
-            rememberRefreshWriteFailure(failureKey, error, query, original);
+            rememberRefreshWriteFailure(failureKey, error);
             throw error;
           }
           if (query.temporaryDirectory) {
             const rotatedRevision = query.rotated
               ? credentialStateFromFiles(agent.id, [[agent.authFiles[0], query.rotated]]).revision
               : undefined;
-            supersededEntries.push({ dir: query.temporaryDirectory, rotatedRevision });
+            supersededEntries.push({ dir: query.temporaryDirectory, rotatedRevision, rotatedToken: extractRefreshToken(query.rotated ?? null) });
           }
         }
       }
@@ -1201,7 +1452,10 @@ export function refreshAccount(agent: BaseAgent, name?: string, force = false): 
       throw error;
     }
   };
-  const query = withStoreLock(run, identity?.id || dir).finally(() => pendingQueries.delete(key));
+  const query = withStoreLock(run, identity?.id || dir).catch(error => {
+    if (error instanceof RecoveredCodexIdentity) return refreshAccount(agent, name, force);
+    throw error;
+  }).finally(() => pendingQueries.delete(key));
   pendingQueries.set(key, query);
   return query;
 }
@@ -1217,11 +1471,10 @@ async function recordRefresh(
   cached: StatusResult | undefined,
   status: StatusResult,
   rotated = false,
+  observedRevision?: () => string | undefined,
 ) {
-  if ((status.state === 'error' || status.state === 'expired' || status.state === 'unverified') && cached?.quota) {
-    // Retain history and plan grouping; expired credentials are rendered as
-    // a login error, never as currently usable quota.
-    status = { ...status, quota: cached.quota, plan: cached.plan, fetchedAt: cached.fetchedAt };
+  if (status.state === 'error' || status.state === 'expired' || status.state === 'unverified') {
+    status = { ...status, ...reportedQuotaHistory(cached) };
   }
   if (status.state === 'ok') {
     const previous = cached?.quota?.credits?.balance;
@@ -1241,11 +1494,11 @@ async function recordRefresh(
   const upgradedFrom = preIdentity && identity && preIdentity.id !== identity.id
     ? { id: preIdentity.id, revision: previousRevision }
     : undefined;
-  if (identity && (status.state === 'ok' || rotated)) {
+  if (!observedRevision && identity && (status.state === 'ok' || rotated)) {
     await syncCopies(agent, dir, { previousRevision, strict: false, expectedRevision: status.credentialRevision, upgradedFrom,
       liveProfile: isLive ? profile : undefined });
   }
-  if (credentialState(agent, dir).revision !== status.credentialRevision) throw new CredentialChangedError();
+  if ((observedRevision ? observedRevision() : credentialState(agent, dir).revision) !== status.credentialRevision) throw new CredentialChangedError();
   if (isLive && identity) liveCache.set(agent.id, { identity: identity.id, status });
   // Old imported aliases share a result only for the same identity and exact
   // credential generation. Their labels and other metadata remain independent.
@@ -1256,12 +1509,12 @@ async function recordRefresh(
     try { targetRevision = credentialState(agent, target).revision; } catch { continue; }
     if (targetRevision !== status.credentialRevision) continue;
     const meta = readProfileMeta(agent.id, name);
-    if (name !== profile && agent instanceof CodexAgent && differentEmail(meta.email, identity?.email)) {
+    if (name !== profile && agent.bindsQuotaEmail && differentEmail(meta.email, identity?.email)) {
       if (status.refreshConsumed) writeProfileMeta(agent.id, name, { ...meta,
         snapshot: { ...status, account: meta.email, quota: undefined, plan: undefined, fetchedAt: undefined } });
       continue;
     }
-    const email = agent instanceof CodexAgent && status.state !== 'ok' ? meta.email : identity?.email || meta.email;
+    const email = agent.bindsQuotaEmail && status.state !== 'ok' ? meta.email : identity?.email || meta.email;
     writeProfileMeta(agent.id, name, { ...meta, email, snapshot: status });
   }
   return status;
@@ -1289,7 +1542,7 @@ export function loginStatus(agent: BaseAgent) {
   const identity = canSave ? agent.identity(dir) : undefined;
   const duplicate = identity ? findExistingProfile(agent, identity) : undefined;
   return {
-    account: canSave ? identity?.email || (identity ? '已检测到凭据' : undefined) : agent.displayStatus().account,
+    account: canSave ? identity?.email || (identity ? '已检测到凭据' : undefined) : agent.credentialStatus().account,
     email: identity?.email,
     ready: !!identity && canSave,
     isolated: dir !== agent.homeDir,

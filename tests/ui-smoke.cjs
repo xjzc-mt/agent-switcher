@@ -1,37 +1,30 @@
-const outputPath = require('./ui-support.cjs');
-const { app, BrowserWindow } = require('electron');
-const fs = require('fs');
-const path = require('path');
-const assert = require('assert/strict');
-app.whenReady().then(async () => {
-  const win = new BrowserWindow({width:960,height:680,show:false,titleBarStyle:"hiddenInset",webPreferences:{preload:path.join(__dirname,'fixture-preload.cjs'),contextIsolation:true,nodeIntegration:false}});
-  const errors=[];
-  win.webContents.on('console-message',event=>{if(event.level==='error') errors.push(event.message);});
-  try {
-    await win.loadFile(path.join(__dirname,'../renderer/index.html'));
-    await new Promise(r=>setTimeout(r,300));
+const suite = require('./ui-support.cjs');
+const assert = require('node:assert/strict');
+
+module.exports = suite(
+  { width: 960, height: 680, titleBarStyle: "hiddenInset" },
+  async ({ window: win, run: evaluate, load, pause, capture }) => {
+    await load();
     await win.webContents.executeJavaScript('localStorage.clear(); applySidebar()');
-    const evaluate = async code => { try { return await win.webContents.executeJavaScript(code); } catch(error) { console.error({code,errors}); throw error; } };
-    const pause = () => new Promise(r=>setTimeout(r,100));
-    const click = async selector => { await evaluate(`document.querySelector(${JSON.stringify(selector)}).click();Promise.all([...document.querySelectorAll('dialog[data-closing]')].map(d=>d.dismissAccountDialog()))`); await pause(); };
+    const settle = () => pause(100);
+    const click = async selector => { await evaluate(`document.querySelector(${JSON.stringify(selector)}).click();Promise.all([...document.querySelectorAll('dialog[data-closing]')].map(d=>d.dismissAccountDialog()))`); await settle(); };
     const assertCentered = async selector => {
       const bounds = await evaluate(`{ const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); ({x:r.x,y:r.y,w:r.width,h:r.height,vw:innerWidth,vh:innerHeight}); }`);
       assert.ok(Math.abs(bounds.x + bounds.w / 2 - bounds.vw / 2) <= 1 && Math.abs(bounds.y + bounds.h / 2 - bounds.vh / 2) <= 1, JSON.stringify(bounds));
       assert.ok(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.w <= bounds.vw && bounds.y + bounds.h <= bounds.vh, JSON.stringify(bounds));
     };
-    const enterPassword = async () => { await evaluate(`{ document.querySelector('[name="password"]').value='test-password'; const repeat=document.querySelector('[name="repeat"]'); if(repeat) repeat.value='test-password'; document.querySelector('dialog[open] form').requestSubmit(); }`); await pause(); };
+    const enterPassword = async () => { await evaluate(`{ document.querySelector('[name="password"]').value='test-password'; const repeat=document.querySelector('[name="repeat"]'); if(repeat) repeat.value='test-password'; document.querySelector('dialog[open] form').requestSubmit(); }`); await settle(); };
     assert.equal(await evaluate('document.querySelectorAll(".account-card").length'),3);
     assert.equal(await evaluate('document.querySelectorAll(".account-card.is-active").length'),0);
     assert.equal(await evaluate('document.querySelector(".detail-title strong").textContent'),'个人主力');
-    const output = outputPath('agent-switcher-ui.png');
-    fs.writeFileSync(output,(await win.webContents.capturePage()).toPNG());
+    await capture('agent-switcher-ui.png');
     await evaluate('window.testApi.rename(); loadStatus()');
     await click('.account-card');
     assert.equal(await evaluate('document.querySelector(".detail-title strong").textContent'),'个人主力');
     assert.equal(await evaluate('window.testApi.calls().filter(c=>c.method==="switch").length'),0);
     await evaluate('window.testApi.inject(); loadStatus()');
     await evaluate(`Array.from(document.querySelectorAll('.account-card')).find(c=>c.dataset.profile.includes("O'Reilly")).querySelector('[data-action=handleSwitchProfile]').click()`);
-    await pause();
+    await settle();
     assert.equal(await evaluate('window.testApi.calls().find(c=>c.method==="switch").name'),"O'Reilly & <team>");
     assert.equal(await evaluate('document.querySelector(".detail-title strong").textContent'),"O'Reilly & <team>");
     assert.equal(await evaluate('document.querySelectorAll(".account-card").length'),3);
@@ -47,7 +40,7 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate('window.testApi.calls().find(c=>c.method==="export").items.length'), 4);
     assert.equal(await evaluate('document.querySelector(".selection-toolbar")'),null);
     const openAdd = async tab => { await click('[data-action=openSaveModal]'); if(tab !== 'local') await click(`[data-add-tab=${tab}]`); await assertCentered('#saveModalOverlay'); };
-    const submitAdd = async () => { await evaluate('document.querySelector("#addAccountForm").requestSubmit()'); await pause(); };
+    const submitAdd = async () => { await evaluate('document.querySelector("#addAccountForm").requestSubmit()'); await settle(); };
     await evaluate('window.testApi.clearInjection(); loadStatus()');
     await evaluate('document.getElementById("toastBox").replaceChildren()');
     await evaluate('window.testApi.setImportMode("encrypted")');
@@ -62,9 +55,10 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate('document.querySelector("#saveModalOverlay").open'),true);
     assert.equal(await evaluate('document.querySelector("#toastBox").textContent.includes("密码不正确")'),false);
     await assertCentered('#saveModalOverlay');
-    await evaluate('document.getElementById("toastBox").replaceChildren()'); await pause();
+    await evaluate('document.getElementById("toastBox").replaceChildren()'); await settle();
     await evaluate('document.querySelector("#backupPassword").value="test-password"'); await submitAdd();
     assert.equal(await evaluate('document.querySelector("#backupPassword").value'),'');
+    assert.match(await evaluate('document.querySelector("#addImportPreview").textContent'),/已跳过 1 个不受支持的平台账号/);
     await click('#addImportPreview .import-row input'); await submitAdd();
     assert.deepEqual(await evaluate('window.testApi.calls().find(c=>c.method==="import").keys'),['codex/import-B']);
     await openAdd('session');
@@ -72,13 +66,16 @@ app.whenReady().then(async () => {
     await evaluate('document.querySelector("#sessionExtractDetails").open = true');
     assert.equal(await evaluate('document.querySelector("#sessionGuideFile").textContent'),'~/.codex/auth.json');
     assert.equal(await evaluate('document.querySelector("#sessionCmdMac").textContent'),'cat ~/.codex/auth.json | pbcopy');
+    // An invisible fixture has no focused system clipboard. Capture the browser write locally.
+    await evaluate("Object.defineProperty(navigator, 'clipboard', {value:{writeText: async text => {window.copiedInstruction = text;}}})");
     await click('.btn-copy-cmd[data-copy-id=sessionCmdMac]');
+    assert.equal(await evaluate('window.copiedInstruction'),'cat ~/.codex/auth.json | pbcopy');
     assert.ok(await evaluate('document.querySelector("#toastBox").textContent.includes("指令已复制到剪贴板")'));
     await evaluate('document.getElementById("toastBox").replaceChildren()');
     await evaluate('document.querySelector("#sessionCredentials").value="single-session"'); await submitAdd();
     assert.equal(await evaluate('document.querySelector("#addAccountError").textContent'),'请提供完整的客户端凭据 JSON');
     await evaluate(`document.querySelector('#sessionCredentials').value=JSON.stringify({tokens:{access_token:'fake',refresh_token:'fake-refresh'}})`);
-    await evaluate('document.getElementById("addAccountError").textContent=""'); await pause();
+    await evaluate('document.getElementById("addAccountError").textContent=""'); await settle();
     await submitAdd();
     assert.equal(await evaluate('document.querySelectorAll("dialog[open]").length'),1);
     assert.equal(await evaluate('document.querySelector("#sessionCredentials").value'),'');
@@ -86,12 +83,12 @@ app.whenReady().then(async () => {
     await click('[data-action=closeSaveModal]');
     await openAdd('local');
     const savesBefore=await evaluate("window.testApi.calls().filter(c=>c.method==='save').length");
-    await evaluate('window.loginTestApi.blockSave(); document.querySelector("#modalProfileInput").value="saved-local"; document.querySelector("#addAccountForm").requestSubmit(); document.querySelector("#addAccountForm").requestSubmit()'); await pause();
+    await evaluate('window.loginTestApi.blockSave(); document.querySelector("#modalProfileInput").value="saved-local"; document.querySelector("#addAccountForm").requestSubmit(); document.querySelector("#addAccountForm").requestSubmit()'); await settle();
     assert.equal(await evaluate("window.testApi.calls().filter(c=>c.method==='save').length"),savesBefore+1);
     assert.equal(await evaluate("$('btnConfirmSave').textContent"),'保存中…');
     assert.equal(await evaluate("$('btnConfirmSave').disabled"),true);
     assert.equal(await evaluate("$('saveModalOverlay').open"),true);
-    await evaluate('window.loginTestApi.releaseSave()'); await pause();
+    await evaluate('window.loginTestApi.releaseSave()'); await settle();
     assert.equal(await evaluate('window.testApi.calls().find(c=>c.method==="save").name'),'saved-local');
     assert.equal(await evaluate('document.querySelector("#saveModalOverlay").open'),false);
     await openAdd('local');
@@ -124,11 +121,11 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate("$('saveModalOverlay').open"),false);
     await evaluate('selectTab("settings")');
     assert.equal(await evaluate('document.querySelector("#viewTitle").textContent'), '设置');
-    await evaluate('document.getElementById("toastBox").replaceChildren()'); await pause();
+    await evaluate('document.getElementById("toastBox").replaceChildren()'); await settle();
     await click('[name="showResetTimes"][value="false"]');
     assert.equal(await evaluate(`document.querySelector('[name="openPrivateLogin"][value="true"]').checked`),true);
     await click('[name="openPrivateLogin"][value="false"]');
-    assert.deepEqual(await evaluate("window.testApi.calls().filter(c=>c.method==='settings').at(-1).value"),{showResetTimes:false,openPrivateLogin:false});
+    assert.deepEqual(await evaluate("window.testApi.calls().filter(c=>c.method==='settings').at(-1).value"),{showResetTimes:false,openPrivateLogin:false,liveRefreshInterval:'1m',spareRefreshInterval:'5m'});
     await evaluate('selectTab("codex")');
     assert.equal(await evaluate('document.querySelectorAll(".reset-countdown").length'),0);
     assert.ok(await evaluate('document.querySelectorAll(".quota-reset").length') >= 6);
@@ -140,8 +137,5 @@ app.whenReady().then(async () => {
     await evaluate('agentsData.find(a=>a.id==="codex").status.available=false; renderWorkbench()');
     assert.equal(await evaluate('document.querySelector(".unassigned-title").textContent'), '暂未激活账号');
     await evaluate('localStorage.clear(); applySidebar()');
-    assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({passed:true,login:true,backupImport:true,credentialImport:true,exportSelection:true,specialAccountName:true,settings:true,search:true,screenshot:output}));
-    app.exit(0);
-  } catch(error) { console.error(error); fs.writeFileSync(outputPath("agent-switcher-ui-error.png"),(await win.webContents.capturePage()).toPNG()); app.exit(1); }
-});
+  },
+);

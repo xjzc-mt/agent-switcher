@@ -1,22 +1,15 @@
-const outputPath = require('./ui-support.cjs');
-const {app,BrowserWindow}=require('electron');
-const assert=require('node:assert/strict');
-const fs=require('node:fs');
-const path=require('node:path');
-const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-app.whenReady().then(async()=>{
-  const window=new BrowserWindow({width:880,height:700,show:false,titleBarStyle:'hiddenInset',webPreferences:{preload:path.join(__dirname,'fixture-preload.cjs'),contextIsolation:true,backgroundThrottling:false}});
-  const run=script=>window.webContents.executeJavaScript(script),errors=[];
-  window.webContents.on('console-message',event=>{if(event.level==='error')errors.push(event.message);});
-  const until=async script=>{for(let i=0;i<100;i++){if(await run(script))return;await pause(20);}throw new Error(`Timed out: ${script}`);};
-  const click=selector=>run(`document.querySelector(${JSON.stringify(selector)}).click()`);
-  const value=text=>run(`document.querySelector('.account-name-input').value=${JSON.stringify(text)}`);
-  const submit=()=>run(`document.querySelector('.account-name-editor').requestSubmit()`);
-  const count=()=>run(`window.testApi.calls().filter(c=>c.method==='rename').length`);
-  const capture=async name=>fs.writeFileSync(outputPath(`${name}.png`),(await window.webContents.capturePage()).toPNG());
-  const key=keyCode=>{window.webContents.sendInputEvent({type:'keyDown',keyCode});if(keyCode==='Enter')window.webContents.sendInputEvent({type:'char',keyCode:'\r'});window.webContents.sendInputEvent({type:'keyUp',keyCode});};
-  try{
-    await window.loadFile(path.join(__dirname,'../renderer/index.html'));await pause(200);
+const suite = require('./ui-support.cjs');
+const assert = require('node:assert/strict');
+
+module.exports = suite(
+  { width: 880, height: 700, titleBarStyle: 'hiddenInset' },
+  async ({ window, run, load, pause, until, click, capture }) => {
+    const value=text=>run(`document.querySelector('.account-name-input').value=${JSON.stringify(text)}`);
+    const submit=()=>run(`document.querySelector('.account-name-editor').requestSubmit()`);
+    const count=()=>run(`window.testApi.calls().filter(c=>c.method==='rename').length`);
+    const key=keyCode=>{window.webContents.sendInputEvent({type:'keyDown',keyCode});if(keyCode==='Enter')window.webContents.sendInputEvent({type:'char',keyCode:'\r'});window.webContents.sendInputEvent({type:'keyUp',keyCode});};
+
+    await load();
     window.webContents.debugger.attach('1.3');await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled',{enabled:true});
     await run(`localStorage.clear();applySidebar();accountLayout='cards';renderWorkbench();const row=document.querySelector('[data-profile="工作账号"].account-card');row.focus();row.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'F10',shiftKey:true}));window.nameDialog=document.querySelector('dialog[data-account-details]');`);
     await pause(170);
@@ -67,8 +60,6 @@ app.whenReady().then(async()=>{
     assert.equal(await run(`document.querySelector('.active-session-card .current-credit-badge').textContent`),'Credits12.5');
     assert.match(await run(`document.querySelector('.account-dialog-email').textContent`),/account-1@example.test/);
     await run(`document.querySelector('dialog[data-account-details]').dismissAccountDialog();localStorage.clear()`);
-    window.webContents.debugger.detach();assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({passed:true,singleDialog:true,inlineSave:true,escapeCancelsEdit:true,emptyName:true,duplicateName:true,unchangedName:true,composition:true,duplicateSubmit:true,draftSurvivesRefresh:true,renamedRefreshTarget:true,keyboardFocusRestored:true,currentAccountRename:true}));
-    app.exit(0);
-  }catch(error){console.error(error);fs.writeFileSync(outputPath('agent-switcher-rename-error.png'),(await window.webContents.capturePage()).toPNG());app.exit(1);}
-});
+    window.webContents.debugger.detach();
+  },
+);

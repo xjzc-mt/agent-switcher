@@ -30,8 +30,14 @@ jobs:
       - run: npm run lint
       - if: runner.os == 'macOS'
         run: npm test
+      - if: runner.os == 'macOS'
+        run: npm run test:ui
       - if: runner.os == 'Windows'
         run: |
           npm run build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test --test-name-pattern="Windows|portable profile names" tests/codex-process.test.cjs tests/codex-query-identity.test.cjs tests/windows-sessions.test.cjs tests/core.test.cjs tests/credential-vault.test.cjs
+          node --test --test-name-pattern="Windows|portable profile names" tests/codex-process.test.cjs tests/codex-query-identity.test.cjs tests/windows-sessions.test.cjs tests/core.test.cjs tests/credential-vault.test.cjs tests/windows-codex-portable.test.cjs tests/antigravity-windows.test.cjs tests/windows-agy-portable.test.cjs tests/windows-usage-runner.test.cjs tests/app-updates.test.cjs
+      - if: runner.os == 'Windows'
+        name: Verify quota isolation as a standard Windows user
+        shell: powershell
+        run: ./scripts/test-windows-quota.ps1

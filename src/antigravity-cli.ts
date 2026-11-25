@@ -1,52 +1,72 @@
 import fs from 'fs';
-import type { UsageData } from './antigravity-native';
+import { QuotaBearerRejected } from './credential-state';
+import { findQuotaBearer, parseNativeToken, tokenEmail, type UsageData } from './antigravity-native';
 import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { atomicWrite, ensureDir } from './utils';
+import { macUsageLaunch, prepareMacLoginLink } from './mac-usage';
+import { stopWindowsQuota, windowsUsageHome, windowsUsageLaunch } from './windows-usage';
 import { resultDiagnostic, stepDiagnostic } from './diagnostics';
-import { createTemporaryCredentials, drainTemporaryProcessGroup, markTemporaryCredentialsPending, releaseTemporaryCredentials, stopTemporaryProcess, withTemporaryProcess } from './temporary-credentials';
+import { confirmWindowsQuotaExit, createTemporaryCredentials, drainTemporaryProcessGroup, markTemporaryCredentialsPending, PendingQuotaConflict, recordAntigravityQuotaOutput, releaseTemporaryCredentials, stopTemporaryProcess, withTemporaryProcess } from './temporary-credentials';
 
 export const isolatedCliPids = new Set<number>();
 export class AntigravityLoginRequired extends Error {
   constructor() { super('Antigravity 登录已失效，请更新此账号的凭据'); }
 }
-export const cliTokenPath = (directory: string) => path.join(directory, '.gemini/antigravity-cli/antigravity-oauth-token');
+export class AntigravityAccessRejected extends QuotaBearerRejected {
+  constructor() { super('Antigravity 未接受本次额度查询的访问令牌'); }
+}
+const isolatedLaunchFailed = () => new Error('Windows 未能启动隔离的 Antigravity CLI，请检查安装和目录权限后重试。');
+export const cliTokenPath = (directory: string) => path.join(process.platform === 'win32' ? windowsUsageHome(directory) : directory,
+  '.gemini/antigravity-cli/antigravity-oauth-token');
+
+export function antigravityPlan(tier?: { name?: unknown; id?: unknown } | null): string | undefined {
+  const name = tier?.name;
+  if (typeof name !== 'string' || !name.trim()) return undefined;
+  if (name === 'Google AI Ultra') {
+    if (tier?.id === 'g1-ultra-lite-tier') return 'Google AI Ultra 5×';
+    if (tier?.id === 'g1-ultra-tier') return 'Google AI Ultra 20×';
+  }
+  return name;
+}
+
+export function resolveAntigravityCli(): string | undefined {
+  const local = process.env.LOCALAPPDATA;
+  const candidates = process.platform === 'win32'
+    ? [local && path.isAbsolute(local) && path.join(local, 'agy', 'bin', 'agy.exe'), path.join(os.homedir(), '.gemini', 'bin', 'agy.exe')]
+    : [path.join(os.homedir(), '.local/bin/agy'), '/opt/homebrew/bin/agy', '/usr/local/bin/agy'];
+  for (const file of candidates) {
+    try { if (file && fs.statSync(file).isFile()) return file; }
+    catch { /* Check the other official install locations. */ }
+  }
+}
+
+function officialCli(): string {
+  const binary = ['darwin', 'win32'].includes(process.platform) && resolveAntigravityCli();
+  if (!binary) throw new Error('请先安装官方 Antigravity CLI（agy）');
+  return binary;
+}
 
 /** The official CLI owns OAuth and file fallback; the child cannot reach the live login. */
 export function isolatedCli(directory: string, args: string[], original?: Buffer, inheritedEnv = process.env) {
-  if (process.platform !== 'darwin') throw new Error('Antigravity 独立会话目前仅支持 macOS');
-  const binary = [path.join(os.homedir(), '.local/bin/agy'), '/opt/homebrew/bin/agy', '/usr/local/bin/agy'].find(fs.existsSync);
-  if (!binary) throw new Error('请先安装官方 Antigravity CLI（agy）');
+  const binary = officialCli();
   ensureDir(directory);
   const root = fs.realpathSync(directory);
-  const liveHome = fs.realpathSync(os.homedir());
   if (original) atomicWrite(cliTokenPath(root), original);
-  ensureDir(path.join(root, 'tmp'));
-  const blocked = ['.gemini', '.agent-switcher', 'Library/Keychains',
-    'Library/Application Support/Antigravity', 'Library/Application Support/antigravity'];
-  const policy = '(version 1)(allow default)' + blocked.map(name =>
-    `(deny file-read* file-write* (subpath ${JSON.stringify(path.join(liveHome, name))}))`).join('') +
-    '(deny process-exec (literal "/usr/bin/security") (literal "/usr/bin/open"))' +
-    '(deny mach-lookup (global-name "com.apple.securityd"))' +
-    `(deny file-write* (require-all (require-not (subpath ${JSON.stringify(root)})) (require-not (literal "/dev/null"))))`;
-  // Only the child receives this home. HOME alone would not isolate macOS Keychain.
-  const env = { ...inheritedEnv, HOME: root, TMPDIR: path.join(root, 'tmp'),
-    PATH: path.join(root, 'bin') + ':' + process.env.PATH, AGS_LOGIN_LINK: path.join(root, 'login-url') };
-  for (const key of ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY', 'AGY_ADC_AUTH', 'GEMINI_API_KEY',
-    'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_GENAI_USE_VERTEXAI', 'ANTIGRAVITY_GEMINI_DIR',
-    'ANTIGRAVITY_APP_DATA_DIR', 'ANTIGRAVITY_LS_ADDRESS', 'ANTIGRAVITY_CSRF_TOKEN', 'AGY_LLM_GATEWAY_URL']) delete (env as NodeJS.ProcessEnv)[key];
-  return { command: '/usr/bin/sandbox-exec', args: ['-p', policy, binary, ...args], options: { cwd: root, env } };
+  if (process.platform === 'win32') return windowsUsageLaunch(binary, args, root, true, inheritedEnv);
+  return macUsageLaunch(binary, args, root, true, inheritedEnv);
 }
 
-export function startAcpLogin(directory: string, allowBrowser = true) {
+export function startAcpLogin(directory: string, allowBrowser = true, onAuthenticate?: () => void) {
+  const windows = process.platform === 'win32';
+  if (windows && allowBrowser) throw new Error('请在 Windows 官方客户端完成 Antigravity 登录后保存账号');
   const launch = isolatedCli(directory, ['acp']);
-  const linkFile = launch.options.env.AGS_LOGIN_LINK;
-  atomicWrite(path.join(directory, 'bin/open'), '#!/bin/sh\nfor arg in "$@"; do case "$arg" in https://*|http://*) url="$arg"; break ;; esac; done\nprintf "%s" "${url:-$1}" > "$AGS_LOGIN_LINK.tmp"\nmv "$AGS_LOGIN_LINK.tmp" "$AGS_LOGIN_LINK"\n');
-  fs.chmodSync(path.join(directory, 'bin/open'), 0o700);
+  const linkFile = path.join(directory, 'login-url');
+  if (!windows) prepareMacLoginLink(directory);
   const child = withTemporaryProcess(directory, () => spawn(launch.command, launch.args, {
-    ...launch.options, detached: true, stdio: ['pipe', 'pipe', 'ignore'],
+    ...launch.options, detached: !windows, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
   }));
   if (child.pid) isolatedCliPids.add(child.pid);
   let resolveLink!: (url: string) => void, rejectLink!: (error: Error) => void;
@@ -57,10 +77,15 @@ export function startAcpLogin(directory: string, allowBrowser = true) {
   void link.catch(() => {}); void complete.catch(() => {});
   let result: { plan?: string } | undefined, failure: Error | undefined, ending = false;
   let terminate: NodeJS.Timeout | undefined, kill: NodeJS.Timeout | undefined;
-  const stopped = new Promise<void>(resolve => child.once('close', () => {
+  const stopped = new Promise<void>(resolve => child.once('close', code => {
     if (child.pid) isolatedCliPids.delete(child.pid);
     clearTimeout(terminate); clearTimeout(kill); clearTimeout(timer); clearInterval(poll);
     void drainTemporaryProcessGroup(child, 150).finally(() => {
+      if (windows) {
+        const drained = confirmWindowsQuotaExit(directory, child, code);
+        if (drained && code === 124) failure = isolatedLaunchFailed();
+        else if (!drained || code !== 0) failure ??= new Error('Windows 额度查询未正常结束，凭据写回尚未确认');
+      }
       if (result && !failure) resolveDone(result);
       else { const error = failure || new Error('官方 CLI 未完成登录，请重试'); rejectLink(error); rejectDone(error); }
       resolve();
@@ -68,11 +93,14 @@ export function startAcpLogin(directory: string, allowBrowser = true) {
   }));
   const loginTimedOut = () => { resultDiagnostic('timeout'); finish('Antigravity 登录超时，请重试'); };
   let timer = setTimeout(loginTimedOut, 45000);
-  const poll = setInterval(() => {
+  const poll: NodeJS.Timeout | undefined = windows ? undefined : setInterval(() => {
     if (ending || !fs.existsSync(linkFile)) return;
     const value = fs.readFileSync(linkFile, 'utf8'), url = URL.parse(value);
     if (!url || url.origin !== 'https://accounts.google.com' || !url.searchParams.get('state')) return finish('官方 CLI 返回的登录链接无效');
-    if (!allowBrowser) return finish(new AntigravityLoginRequired());
+    if (!allowBrowser) {
+      stepDiagnostic('query-login-prompt');
+      return finish('官方 CLI 请求重新登录，未确认本次续期结果');
+    }
     resolveLink(value);
     clearTimeout(timer);
     timer = setTimeout(loginTimedOut, 15 * 60000);
@@ -84,9 +112,16 @@ export function startAcpLogin(directory: string, allowBrowser = true) {
     clearTimeout(timer); clearInterval(poll);
     if (reason) { failure = typeof reason === 'string' ? new Error(reason) : reason; rejectLink(failure); }
     child.stdin.end();
-    if (reason) stopTemporaryProcess(child);
-    else terminate = setTimeout(() => stopTemporaryProcess(child), 150);
-    kill = setTimeout(() => stopTemporaryProcess(child, 'SIGKILL'), 1500);
+    if (windows) {
+      // Normal ACP completion lets the official client flush on EOF. A cancellation asks its supervisor to drain the Job.
+      if (reason) stopWindowsQuota(directory, child);
+      else terminate = setTimeout(() => stopWindowsQuota(directory, child), 8000);
+      kill = setTimeout(() => stopTemporaryProcess(child, 'SIGKILL'), reason ? 8000 : 16000);
+    } else {
+      if (reason) stopTemporaryProcess(child);
+      else terminate = setTimeout(() => stopTemporaryProcess(child), 150);
+      kill = setTimeout(() => stopTemporaryProcess(child, 'SIGKILL'), 1500);
+    }
   }
   const send = (message: object) => { if (child.stdin.writable) child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n'); };
   child.on('error', () => finish('无法启动官方 Antigravity CLI'));
@@ -97,11 +132,12 @@ export function startAcpLogin(directory: string, allowBrowser = true) {
     try { message = JSON.parse(line); } catch { return; }
     if (message.id === 1) {
       if (!message.result) return finish('此版本的 agy 不支持 ACP 登录，请更新官方 CLI');
+      if (child.stdin.writable) onAuthenticate?.();
       send({ id: 2, method: 'authenticate', params: { methodId: 'oauth-personal' } });
     } else if (message.id === 2) {
       if (message.error) return finish(/invalid_grant|refresh token.*(?:expired|revoked|invalid)/i.test(message.error.message || '')
         ? new AntigravityLoginRequired() : '官方 Antigravity 认证失败，请重试或更新凭据');
-      result = { plan: message.result?._meta?.antigravity?.tier?.name };
+      result = { plan: antigravityPlan(message.result?._meta?.antigravity?.tier) };
       finish();
     }
   });
@@ -110,32 +146,60 @@ export function startAcpLogin(directory: string, allowBrowser = true) {
   return { link, complete, stop: () => { finish('登录已取消'); return stopped; } };
 }
 
-function runUsage(directory: string, launch: ReturnType<typeof isolatedCli>): Promise<string> {
-  const child = withTemporaryProcess(directory, () => spawn(launch.command, launch.args, {
-    ...launch.options, detached: true, stdio: ['ignore', 'pipe', 'ignore'],
-  }));
-  if (child.pid) { isolatedCliPids.add(child.pid); stepDiagnostic('query-start'); }
+type UsageLaunch = { command: string; args: string[]; options: { cwd: string; env: NodeJS.ProcessEnv } };
+
+function runUsage(launch: UsageLaunch, isolatedDirectory?: string): Promise<{ stdout: string; code: number | null }> {
+  const start = () => spawn(launch.command, launch.args, {
+    ...launch.options, detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const child = isolatedDirectory ? withTemporaryProcess(isolatedDirectory, start) : start();
+  if (child.pid && isolatedDirectory) isolatedCliPids.add(child.pid);
+  if (child.pid) stepDiagnostic('query-start');
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    let size = 0, failed = false, kill: NodeJS.Timeout | undefined;
-    const stop = () => {
-      if (failed) return;
-      failed = true; stopTemporaryProcess(child);
-      kill = setTimeout(() => stopTemporaryProcess(child, 'SIGKILL'), 1500);
+    let size = 0, failure: Error | undefined, kill: NodeJS.Timeout | undefined;
+    const stop = (message: string) => {
+      if (failure) return;
+      failure = new Error(message);
+      const windows = process.platform === 'win32';
+      if (windows) stopWindowsQuota(launch.options.cwd, child);
+      else stopTemporaryProcess(child);
+      kill = setTimeout(() => stopTemporaryProcess(child, 'SIGKILL'), windows ? 8000 : 1500);
     };
-    const timeout = setTimeout(() => { if (!failed) resultDiagnostic('timeout'); stop(); }, 45000);
-    child.on('error', () => { failed = true; });
-    child.stdout.on('data', (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > 2 * 1024 * 1024) stop();
-      else if (!failed) chunks.push(chunk);
-    });
+    const timeout = setTimeout(() => {
+      if (!failure) resultDiagnostic('timeout');
+      stop('Antigravity 额度查询超时，请稍后重试');
+    }, 45000);
+    child.on('error', () => { failure ??= new Error('无法启动官方 Antigravity CLI'); });
+    // Headless CLI can start an OAuth flow after a network failure. Match its prompt
+    // at a line boundary so quoted text inside a successful JSON response is harmless.
+    const loginPrompt = '\nAuthentication required. Please visit the URL to log in:';
+    for (const stream of [child.stdout, child.stderr]) {
+      let tail = '\n';
+      stream.on('data', (chunk: Buffer) => {
+        if (failure) return;
+        size += chunk.length;
+        if (size > 2 * 1024 * 1024) return stop('官方 Antigravity CLI 返回的数据过大');
+        const text = tail + chunk.toString('utf8');
+        if (text.includes(loginPrompt)) {
+          stepDiagnostic('query-login-prompt');
+          return stop('额度查询未完成，请在 Antigravity 中确认登录状态后重试');
+        }
+        tail = text.slice(1 - loginPrompt.length);
+        if (stream === child.stdout) chunks.push(chunk);
+      });
+    }
     child.once('close', code => {
       clearTimeout(timeout); clearTimeout(kill);
-      if (child.pid) { isolatedCliPids.delete(child.pid); stepDiagnostic('query-end'); }
+      if (child.pid && isolatedDirectory) isolatedCliPids.delete(child.pid);
+      if (child.pid) stepDiagnostic('query-end');
       void drainTemporaryProcessGroup(child, 150).finally(() => {
-        if (failed || code !== 0) reject(new Error('官方 Antigravity CLI 额度查询失败或超时'));
-        else resolve(Buffer.concat(chunks).toString('utf8'));
+        if (process.platform === 'win32' && isolatedDirectory) {
+          if (!confirmWindowsQuotaExit(isolatedDirectory, child, code)) failure ??= new Error('无法确认 Windows 额度子进程已退出');
+          else if (code === 124) failure = isolatedLaunchFailed();
+        }
+        if (failure) reject(failure);
+        else resolve({ stdout: Buffer.concat(chunks).toString('utf8'), code });
       });
     });
   });
@@ -143,12 +207,54 @@ function runUsage(directory: string, launch: ReturnType<typeof isolatedCli>): Pr
 
 const usageArgs = ['-p', '/usage', '--output-format', 'json'];
 
-async function readUsage(directory: string, launch: ReturnType<typeof isolatedCli>): Promise<UsageData> {
-  const stdout = await runUsage(directory, launch);
+async function readUsage(launch: UsageLaunch, isolatedDirectory?: string): Promise<UsageData> {
+  const { stdout, code } = await runUsage(launch, isolatedDirectory);
   let response;
-  try { response = JSON.parse(stdout); } catch { throw new Error('官方 CLI 额度格式无法识别'); }
+  try { response = JSON.parse(stdout); }
+  catch { throw new Error(code === 0 ? '官方 CLI 额度格式无法识别' : '官方 Antigravity CLI 额度查询失败'); }
+  if (code !== 0 || response?.status === 'ERROR') {
+    // CLI diagnostics can contain identifiers and URLs. Return only recognized categories.
+    const reason = typeof response?.error === 'string' ? response.error.replace(/https?:\/\/[^\s"'<>]+/gi, '') : '';
+    if (/\b(?:429|RESOURCE_EXHAUSTED|too many requests|rate limit(?:ed| exceeded)?)\b/i.test(reason)) {
+      stepDiagnostic('query-limited');
+      throw new Error('Antigravity 暂时限制了额度查询，请稍后重试');
+    }
+    if (/\b(?:50[0234]|service unavailable|bad gateway)\b/i.test(reason)) {
+      stepDiagnostic('query-unavailable');
+      throw new Error('Antigravity 额度服务暂不可用，请稍后重试');
+    }
+    if (/\b(?:connection refused|connection reset|no such host|network is unreachable|i\/o timeout|deadline exceeded)\b/i.test(reason)) {
+      stepDiagnostic('query-network');
+      throw new Error('无法连接 Antigravity 额度服务，请检查网络后重试');
+    }
+    if (response?.status === 'ERROR' && /\b(?:401|unauthenticated|invalid_token)\b/i.test(reason)) {
+      stepDiagnostic('query-access-rejected');
+      throw new AntigravityAccessRejected();
+    }
+    throw new Error('官方 Antigravity CLI 额度查询失败');
+  }
   if (response?.status !== 'SUCCESS' || response.command?.name !== 'usage') throw new Error('官方 CLI 未返回额度');
   return response.command.data || {};
+}
+
+function networkEnvironment(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    /^(?:https?_proxy|all_proxy|no_proxy|ssl_cert_file|ssl_cert_dir)$/i.test(name)));
+}
+
+/** The official CLI uses its own login. The caller must bind quota to the selected account separately. */
+export async function querySharedUsage(): Promise<UsageData> {
+  const binary = officialCli();
+  const windows = process.platform === 'win32';
+  const cwd = windows ? createTemporaryCredentials('agy-quota') : fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ags-shared-usage-'));
+  try {
+    const args = [...usageArgs, '--settings', '{"disableSlashCommands":false}', '--log-file', windows ? 'NUL' : '/dev/null'];
+    const launch = windows ? windowsUsageLaunch : macUsageLaunch;
+    return await readUsage(launch(binary, args, cwd, false, networkEnvironment()));
+  } finally {
+    if (windows) releaseTemporaryCredentials(cwd);
+    else fs.rmSync(cwd, { recursive: true, force: true });
+  }
 }
 
 export async function queryAccessTokenUsage(email: string, accessToken: string, expiry?: string): Promise<UsageData> {
@@ -157,37 +263,52 @@ export async function queryAccessTokenUsage(email: string, accessToken: string, 
     const token = { auth_method: 'consumer', id_token_email: email,
       token: { access_token: accessToken, token_type: 'Bearer', expiry } };
     // Keep network configuration while excluding alternate logins and client overrides.
-    const networkEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
-      /^(?:https?_proxy|all_proxy|no_proxy|ssl_cert_file|ssl_cert_dir)$/i.test(name)));
-    const launch = isolatedCli(directory, usageArgs, Buffer.from(JSON.stringify(token)), networkEnv);
-    return await readUsage(directory, launch);
+    const launch = isolatedCli(directory, usageArgs, Buffer.from(JSON.stringify(token)), networkEnvironment());
+    return await readUsage(launch, directory);
   } finally { releaseTemporaryCredentials(directory); }
 }
 
 export async function queryIsolatedUsage(original: Buffer, identity: string, refreshToken?: string) {
   const directory = createTemporaryCredentials('agy-quota');
   try {
-    markTemporaryCredentialsPending(directory, identity, refreshToken);
+    markTemporaryCredentialsPending(directory, identity, refreshToken, original);
   } catch (error) {
     releaseTemporaryCredentials(directory);
     throw error;
   }
   try {
     let data: UsageData | undefined, plan: string | undefined, error: Error | undefined;
+    let requestStarted = false;
     try {
-      const launch = isolatedCli(directory, usageArgs, original);
-      const auth = startAcpLogin(directory, false);
+      atomicWrite(cliTokenPath(directory), original);
+      const auth = startAcpLogin(directory, false, () => { requestStarted = true; });
       ({ plan } = await auth.complete);
-      data = await readUsage(directory, launch);
     } catch (failure) { error = failure as Error; }
     const file = cliTokenPath(directory);
     // OAuth may rotate before /usage fails. Do not discard the new refresh token.
-    const rotated = fs.existsSync(file) ? fs.readFileSync(file) : original;
+    const output = fs.existsSync(file) ? fs.readFileSync(file) : null;
+    const rotated = output ?? original;
     const changed = !original.equals(rotated);
+    if (!changed && requestStarted && error && !(error instanceof AntigravityLoginRequired)) {
+      // A lost reply is not proof the server left the input refresh token untouched.
+      throw new PendingQuotaConflict();
+    }
+    recordAntigravityQuotaOutput(directory, identity, output);
     if (!changed) releaseTemporaryCredentials(directory);
+    if (!error) {
+      try {
+        const credential = parseNativeToken(rotated), email = tokenEmail(credential);
+        if (email?.toLowerCase() !== identity) throw new Error('官方 CLI 返回的账号与查询目标不一致');
+        const bearer = findQuotaBearer(credential);
+        if (!bearer) throw new Error('官方 CLI 完成认证后未提供可用的访问令牌');
+        // /usage cannot rotate again, even if the bearer expires or its response is lost.
+        data = await queryAccessTokenUsage(identity, bearer.accessToken, bearer.expiry);
+      } catch (failure) { error = failure as Error; }
+    }
     return { data, plan, error, rotated, temporaryDirectory: changed ? directory : undefined };
   } catch (error) {
     const failure = error instanceof Error ? error : new Error('额度查询未完成');
+    if (error instanceof PendingQuotaConflict) stepDiagnostic(error.diagnostic);
     failure.message += `；临时凭据已保留在 ${directory}`;
     throw failure;
   }

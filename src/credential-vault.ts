@@ -1,115 +1,27 @@
+import { withKeyCreationLock } from './file-lock';
+import { hasUnsafeParent, readRegularFile, replacePrivateFile } from './private-files';
+import { agentMetadata } from './agents/metadata';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'crypto';
+import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { Worker, isMainThread } from 'worker_threads';
 
 const MAGIC = Buffer.from('AGS-CREDENTIALS-1\n');
 const PREFIX = Buffer.from('AGS-CREDENTIALS-');
 export const STAGED_CREDENTIAL_SUFFIX = '.pending';
 export const ANTIGRAVITY_SWITCH_FILE = '.antigravity-switch.pending';
-const credentialNames: Record<string, string> = { codex: 'auth.json', claude: '.credentials.json', agy: 'jetski-standalone-oauth-token' };
+const quotaRecoveryFile = /^\.antigravity-quota-[0-9a-f]{64}-[0-9a-f]{64}$/;
+const credentialNames: Record<string, string> = Object.fromEntries(Object.entries(agentMetadata).map(([id, meta]) => [id, meta.credential]));
 const service = 'com.agent-switcher.credentials.v1';
 const account = 'master-key';
 const poolRoot = () => path.join(os.homedir(), '.agent-switcher');
 
-function processReusedPid(pid: number, stat: fs.Stats, permissionDenied = false): boolean {
-  if (process.platform === 'win32' || (!permissionDenied && Date.now() - stat.mtimeMs <= 2000)) return false;
-  try {
-    const out = execFileSync('/bin/ps', ['-o', 'uid=', '-o', 'lstart=', '-p', String(pid)], {
-      encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    const processInfo = /^(\d+)\s+(.+)$/.exec(out);
-    if (!processInfo) return false;
-    if (permissionDenied && Number(processInfo[1]) !== stat.uid) return true;
-    const startedAt = Date.parse(processInfo[2]);
-    return Number.isFinite(startedAt) && startedAt > stat.mtimeMs + 2000;
-  } catch { return false; }
-}
-
-export function lockIsDead(stat: fs.Stats, raw: string): boolean {
-  const pid = Number(raw.trim().split(/\s+/)[0]);
-  if (!Number.isSafeInteger(pid) || pid <= 0) return Date.now() - stat.mtimeMs > 5000;
-  try {
-    process.kill(pid, 0);
-    return processReusedPid(pid, stat);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ESRCH') return true;
-    return code === 'EPERM' && typeof process.getuid === 'function' && stat.uid === process.getuid() &&
-      processReusedPid(pid, stat, true);
-  }
-}
-
-export function tryAcquireAtomicLock(lock: string, payload: string): string | null {
-  const ownerId = `${process.pid}-${randomUUID()}`;
-  const stage = `${lock}.stage-${ownerId}`;
-  try {
-    fs.mkdirSync(stage, { mode: 0o700 });
-    fs.writeFileSync(path.join(stage, ownerId), payload, { flag: 'wx', mode: 0o600 });
-    fs.renameSync(stage, lock);
-    return ownerId;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code && ['EEXIST', 'ENOTEMPTY', 'EPERM', 'EBUSY', 'ENOTDIR', 'EACCES'].includes(code)) return null;
-    throw error;
-  } finally { fs.rmSync(stage, { recursive: true, force: true }); }
-}
-
-export function releaseAtomicLock(lock: string, ownerId: string): boolean {
-  if (!ownerId) return false;
-  try { fs.unlinkSync(path.join(lock, ownerId)); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
-  }
-  try { fs.rmdirSync(lock); return true; }
-  catch { return false; }
-}
-
-export function evictDeadLock(lock: string): boolean {
-  let stat: fs.Stats;
-  try { stat = fs.lstatSync(lock); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
-    throw error;
-  }
-  if (stat.isDirectory()) {
-    let entries: string[];
-    try { entries = fs.readdirSync(lock); }
-    catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT'; }
-    if (!entries.length) {
-      try { fs.rmdirSync(lock); return true; }
-      catch { return false; }
-    }
-    for (const entry of entries) {
-      const entryPath = path.join(lock, entry);
-      try {
-        const entryStat = fs.lstatSync(entryPath);
-        const raw = fs.readFileSync(entryPath, 'utf8');
-        if (!lockIsDead(entryStat, raw)) return false;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
-      }
-    }
-    for (const entry of entries) {
-      try { fs.unlinkSync(path.join(lock, entry)); } catch {}
-    }
-    try { fs.rmdirSync(lock); return true; }
-    catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT'; }
-  }
-  let raw: string;
-  try { raw = fs.readFileSync(lock, 'utf8'); }
-  catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT'; }
-  if (!lockIsDead(stat, raw)) return false;
-  // Renaming onto an existing regular file atomically rejects directory locks (ENOTDIR/EISDIR).
-  const trash = `${lock}.trash-${process.pid}-${randomUUID()}`;
-  try {
-    fs.writeFileSync(trash, '', { flag: 'wx', mode: 0o600 });
-    fs.renameSync(lock, trash);
-    return true;
-  } catch { return false; }
-  finally { fs.rmSync(trash, { force: true }); }
+/** The temporary rotation output may be removed immediately after a pool credential is replaced. */
+export function commitsAntigravityQuota(file: string): boolean {
+  const name = path.basename(file);
+  return name === credentialNames.agy || name === credentialNames.agy + STAGED_CREDENTIAL_SUFFIX || quotaRecoveryFile.test(name);
 }
 
 export interface CredentialKeyProvider {
@@ -117,29 +29,17 @@ export interface CredentialKeyProvider {
   create(key: Buffer): void;
 }
 
-function regularFile(file: string): Buffer | null {
-  try {
-    if (!fs.lstatSync(file).isFile()) throw new Error('凭据必须是普通文件');
-    return fs.readFileSync(file);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
-  }
-}
-
 function checkDirectories(file: string) {
-  const root = poolRoot();
-  let current = path.dirname(file);
-  while (current === root || current.startsWith(root + path.sep)) {
-    if (fs.existsSync(current) && !fs.lstatSync(current).isDirectory()) throw new Error('账号目录必须是普通目录，不能是符号链接');
-    if (current === root) break;
-    current = path.dirname(current);
-  }
+  if (hasUnsafeParent(file, poolRoot())) throw new Error('账号目录必须是普通目录，不能是符号链接');
 }
 
 /** Only AGS-owned credential files are encrypted; clients and temporary official homes use their native format. */
 export function managedCredentialKind(file: string): string | undefined {
   const relative = path.relative(poolRoot(), path.resolve(file));
+  if (quotaRecoveryFile.test(relative)) {
+    checkDirectories(path.resolve(file));
+    return relative;
+  }
   if (isSwitchRecord(relative)) {
     checkDirectories(path.resolve(file));
     return ANTIGRAVITY_SWITCH_FILE;
@@ -179,14 +79,18 @@ const systemProvider: CredentialKeyProvider = {
         catch (error) { if ((error as { status?: number }).status === 44) return null; throw error; }
       }
       if (process.platform === 'win32') {
-        const bytes = regularFile(path.join(poolRoot(), '.vault-key.dpapi'));
+        const bytes = readRegularFile(path.join(poolRoot(), '.vault-key.dpapi'));
         return bytes ? decodeKey(dpapi(bytes.toString('base64'), false)) : null;
       }
       if (process.platform === 'linux') {
         try {
           const value = systemCommand('secret-tool', ['lookup', 'application', service, 'account', account]);
           return value ? decodeKey(value) : null;
-        } catch (error) { if ((error as { status?: number }).status === 1) return null; throw error; }
+        } catch (error) {
+          const failure = error as { status?: number; stderr?: string };
+          if (failure.status === 1 && !String(failure.stderr || '').trim()) return null;
+          throw error;
+        }
       }
       throw new Error('unsupported');
     } catch { throw new Error('无法读取系统安全存储中的账号池密钥；请解锁系统密钥存储后重试，原凭据未修改'); }
@@ -230,8 +134,10 @@ function poolFiles(includeStaging = false, corrupted?: string[]): string[] {
     }
   }
   const files: string[] = [];
+  // Retired ciphertext still needs the original vault key. Only inspect it when checking for key loss.
+  const names = includeStaging ? { ...credentialNames, claude: '.credentials.json' } : credentialNames;
   for (const base of roots) {
-    for (const [agent, name] of Object.entries(credentialNames)) {
+    for (const [agent, name] of Object.entries(names)) {
       const directory = path.join(base, agent);
       if (!fs.existsSync(directory)) continue;
       checkDirectories(path.join(directory, '_'));
@@ -242,7 +148,16 @@ function poolFiles(includeStaging = false, corrupted?: string[]): string[] {
           continue;
         }
         if (!entry.isDirectory()) continue;
-        for (const candidate of [name, name + STAGED_CREDENTIAL_SUFFIX]) {
+        const candidates = [name, name + STAGED_CREDENTIAL_SUFFIX];
+        if (includeStaging) {
+          // Even an unrecognized encrypted sidecar belongs to the previous master key.
+          // Look for private regular files only; never adopt them as managed credentials.
+          const profile = path.join(directory, entry.name);
+          checkDirectories(path.join(profile, '_'));
+          candidates.push(...fs.readdirSync(profile, { withFileTypes: true })
+            .filter(file => file.isFile() && file.name.startsWith('.') && !candidates.includes(file.name)).map(file => file.name));
+        }
+        for (const candidate of candidates) {
           const file = path.join(directory, entry.name, candidate);
           checkDirectories(file);
           const stat = fs.lstatSync(file, { throwIfNoEntry: false });
@@ -259,6 +174,16 @@ function poolFiles(includeStaging = false, corrupted?: string[]): string[] {
 
 function sealed(bytes: Buffer): boolean { return bytes.subarray(0, PREFIX.length).equals(PREFIX); }
 
+/** Key creation only needs the envelope marker, including for retired profiles. */
+function hasCredentialEnvelope(file: string): boolean {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw new Error('凭据必须是普通文件');
+    const prefix = Buffer.alloc(PREFIX.length);
+    return fs.readSync(fd, prefix, 0, prefix.length, 0) === prefix.length && prefix.equals(PREFIX);
+  } finally { fs.closeSync(fd); }
+}
+
 function isSwitchRecord(name: string): boolean {
   return name === ANTIGRAVITY_SWITCH_FILE || /^\.antigravity-switch\.retained-[a-f0-9-]{36}$/.test(name);
 }
@@ -272,8 +197,8 @@ function loadKey(create: boolean, fresh = false): Buffer {
     if (cached && !key.equals(cached)) throw new Error('系统账号池密钥已变化，已停止写入；请先导出仍可读取的账号并恢复原密钥');
     return key;
   }
-  if (cached || !create || poolFiles(true).some(file => sealed(regularFile(file)!)) ||
-      (fs.existsSync(root) && fs.readdirSync(root).some(isSwitchRecord))) {
+  if (cached || !create || poolFiles(true).some(hasCredentialEnvelope) ||
+      (fs.existsSync(root) && fs.readdirSync(root).some(name => isSwitchRecord(name) || quotaRecoveryFile.test(name)))) {
     throw new Error(cached
       ? '账号池密钥不存在，已停止写入；当前会话仍可导出已解锁账号，请先导出备份并恢复密钥'
       : '账号池密钥不存在，无法读取已有加密凭据；请恢复系统密钥或导入备份，原文件已保留');
@@ -281,18 +206,7 @@ function loadKey(create: boolean, fresh = false): Buffer {
   const lock = path.join(root, '.vault-key.lock');
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   checkDirectories(path.join(root, '_'));
-  const payload = `${process.pid}\n${randomUUID()}`;
-  const deadline = Date.now() + 300;
-  const wait = new Int32Array(new SharedArrayBuffer(4));
-  let ownerId: string | null = null;
-  while (true) {
-    ownerId = tryAcquireAtomicLock(lock, payload);
-    if (ownerId !== null) break;
-    const evicted = evictDeadLock(lock);
-    if (Date.now() > deadline) throw new Error('账号池密钥正在初始化，请稍后重试；无法确认锁归属时不会覆盖它');
-    if (!evicted) Atomics.wait(wait, 0, 0, 50);
-  }
-  try {
+  return withKeyCreationLock(lock, () => {
     key = keyProvider.read();
     if (!key) {
       const proposed = randomBytes(32);
@@ -302,7 +216,7 @@ function loadKey(create: boolean, fresh = false): Buffer {
     }
     if (key.length !== 32) throw new Error('账号池密钥无效，已保留原凭据');
     return key;
-  } finally { releaseAtomicLock(lock, ownerId); }
+  });
 }
 
 /** The worker uses the same system provider, cross-process creation lock and read-back as ordinary writes. */
@@ -354,6 +268,7 @@ export function decodeCredentialFile(file: string, bytes: Buffer, freshKey = fal
   const kind = managedCredentialKind(file);
   if (!kind) return bytes;
   if (sealed(bytes)) return decryptForRead(bytes, kind, loadKey(false, freshKey));
+  if (quotaRecoveryFile.test(kind)) throw new Error('额度恢复记录未通过加密校验，已保留现场');
   if (kind === ANTIGRAVITY_SWITCH_FILE) throw new Error('切换恢复记录未通过加密校验，已保留现场');
   try { JSON.parse(bytes.toString()); }
   catch { throw new Error('账号池凭据格式异常，原文件已保留；请检查文件或从备份恢复'); }
@@ -361,7 +276,7 @@ export function decodeCredentialFile(file: string, bytes: Buffer, freshKey = fal
 }
 
 function writeKey(file: string, kind: string, key = loadKey(true, true)): Buffer {
-  const previous = regularFile(file);
+  const previous = readRegularFile(file);
   // A replaced/lost key or damaged envelope must not destroy the previous generation.
   if (previous) {
     if (sealed(previous)) decrypt(previous, kind, key);
@@ -451,30 +366,24 @@ export function migrateCredentialPool(options: { isolateFileErrors?: boolean } =
   let scanKey: Buffer | undefined;
   const corrupted: string[] = [];
   for (const file of poolFiles(false, options.isolateFileErrors ? corrupted : undefined)) {
-    const original = regularFile(file)!;
-    if (sealed(original)) {
-      scanKey ??= loadKey(false, true);
-      try { decryptForRead(original, managedCredentialKind(file)!, scanKey); }
-      catch (error) {
-        if (!options.isolateFileErrors || !isPerFileCorruption(error)) throw error;
-        corrupted.push(file);
+    const original = readRegularFile(file)!;
+    if (sealed(original)) scanKey ??= loadKey(false, true);
+    try {
+      if (sealed(original)) {
+        decryptForRead(original, managedCredentialKind(file)!, scanKey!);
+        continue;
       }
-      continue;
-    }
-    try { decodeCredentialFile(file, original); }
-    catch (error) {
+      decodeCredentialFile(file, original);
+    } catch (error) {
       if (!options.isolateFileErrors || !isPerFileCorruption(error)) throw error;
       corrupted.push(file);
       continue;
     }
-    const temp = `${file}.${randomUUID()}.tmp`;
-    try {
-      fs.writeFileSync(temp, encodeCredentialFile(file, original), { flag: 'wx', mode: 0o600 });
-      verifyCredentialWrite(file, regularFile(temp)!, original);
-      if (!regularFile(file)?.equals(original)) throw new Error('迁移期间凭据发生变化，已保留现有文件，请重试');
-      fs.renameSync(temp, file);
-      migrated++;
-    } finally { fs.rmSync(temp, { force: true }); }
+    replacePrivateFile(file, encodeCredentialFile(file, original), temp => {
+      verifyCredentialWrite(file, readRegularFile(temp)!, original);
+      if (!readRegularFile(file)?.equals(original)) throw new Error('迁移期间凭据发生变化，已保留现有文件，请重试');
+    });
+    migrated++;
   }
   return options.isolateFileErrors ? { migrated, corrupted } : { migrated };
 }

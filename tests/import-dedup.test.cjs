@@ -1,17 +1,15 @@
-const {test,beforeEach,after}=require('node:test');
+const { createTestHome, readCredentialFile, jwt } = require('./helpers/test-env.cjs');
+const {test,beforeEach}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const os=require('node:os');
 const path=require('node:path');
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'ags-import-dedup-'));
-os.homedir=()=>root;
-const { readCredentialFile } = require('./vault-fixture.cjs');
+const root = createTestHome('ags-import-dedup-');
 const store=require('../dist/store');
 const backup=require('../dist/backup');
 const {atomicWrite}=require('../dist/utils');
 const auth=(workspace,subject='person',refresh='original')=>Buffer.from(JSON.stringify({tokens:{
   access_token:'fixture-access',refresh_token:refresh,account_id:workspace,
-  id_token:`header.${Buffer.from(JSON.stringify({sub:subject,email:'same@example.test'})).toString('base64url')}.signature`,
+  id_token:jwt({sub:subject,email:'same@example.test'}),
 }}));
 const put=(name,bytes)=>atomicWrite(path.join(store.profileDir('codex',name),'auth.json'),bytes);
 const combine=async entries=>{
@@ -20,7 +18,6 @@ const combine=async entries=>{
 };
 const install=parsed=>backup.installBackup(parsed,parsed.items.map(i=>i.key));
 beforeEach(()=>fs.rmSync(store.STORE_DIR,{recursive:true,force:true}));
-after(()=>fs.rmSync(root,{recursive:true,force:true}));
 
 test('mixed imports skip existing and within-backup identities without touching existing credentials',async()=>{
   const existing=auth('personal','person','live-rotated');put('已保存',existing);
@@ -48,8 +45,8 @@ test('API keys deduplicate by key identity and remain separate across providers'
   const api=Buffer.from(JSON.stringify({OPENAI_API_KEY:'fixture-key'}));put('API',api);
   // Force equal identity strings across providers to check namespace isolation.
   const keyIdentity=require('../dist/agents/codex').codexAgent.identity(store.profileDir('codex','API')).id;
-  const claude=Buffer.from(JSON.stringify({claudeAiOauth:{refreshToken:'fixture-refresh'},email:keyIdentity}));
-  const result=await install(await combine([['重复Key',api],['不同Key',Buffer.from(JSON.stringify({OPENAI_API_KEY:'another-key'}))],['另一平台',claude,'claude']]));
+  const agy=Buffer.from(JSON.stringify({auth_method:'consumer',id_token_email:keyIdentity,token:{refresh_token:'fixture-refresh'}}));
+  const result=await install(await combine([['重复Key',api],['不同Key',Buffer.from(JSON.stringify({OPENAI_API_KEY:'another-key'}))],['另一平台',agy,'agy']]));
   assert.equal(result.imported.length,2);assert.deepEqual(result.skipped,[{key:'codex/重复Key',existing:'codex/API'}]);
 });
 test('case-colliding backup profile names stage separately without overwriting credentials on case-insensitive disks', async () => {

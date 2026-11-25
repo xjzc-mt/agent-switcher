@@ -1,12 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { TrayCommand, TraySnapshot } from './tray-menu';
+import type { WindowCommand, TraySnapshot } from './tray-menu';
 contextBridge.exposeInMainWorld('api', {
   ...(process.platform === 'darwin' && {
     updateTray: (snapshot: TraySnapshot) => ipcRenderer.invoke('tray-state', snapshot),
     trayReady: () => ipcRenderer.invoke('tray-ready'),
     revealTrayMain: () => ipcRenderer.invoke('tray-reveal-main'),
-    onTrayCommand: (callback: (command: TrayCommand) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, command: TrayCommand) => callback(command);
+    onTrayCommand: (callback: (command: WindowCommand) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, command: WindowCommand) => callback(command);
       ipcRenderer.on('tray-command', listener);
       return () => ipcRenderer.removeListener('tray-command', listener);
     },
@@ -15,9 +15,8 @@ contextBridge.exposeInMainWorld('api', {
   checkAppUpdates: () => ipcRenderer.invoke('check-app-updates'),
   downloadAppUpdate: () => ipcRenderer.invoke('download-app-update'),
   cancelAppUpdate: () => ipcRenderer.invoke('cancel-app-update'),
-  openAppUpdate: () => ipcRenderer.invoke('open-app-update'),
+  installAppUpdate: () => ipcRenderer.invoke('install-app-update'),
   setAutoUpdateCheck: (enabled: boolean) => ipcRenderer.invoke('set-auto-update-check', enabled),
-  quitForAppUpdate: () => ipcRenderer.invoke('quit-for-app-update'),
   openProjectPage: () => ipcRenderer.invoke('open-project-page'),
   exportDiagnostics: () => ipcRenderer.invoke('export-diagnostics'),
   onAppUpdateState: (callback: (state: unknown) => void) => {
@@ -30,7 +29,7 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('app-quit-state', listener);
     return () => ipcRenderer.removeListener('app-quit-state', listener);
   },
-  getStatus: (refresh = false, selectedAgent = 'codex') => ipcRenderer.invoke('get-status', refresh, selectedAgent),
+  getStatus: () => ipcRenderer.invoke('get-status'),
   setSidebarLayout: (collapsed: boolean, width: number) => ipcRenderer.invoke('set-sidebar-layout', collapsed, width),
   refreshAccount: (id: string, name?: string, force = false, source?: string) => ipcRenderer.invoke('refresh-account', id, name, force, source),
   loginStatus: (id: string) => ipcRenderer.invoke('login-status', id),

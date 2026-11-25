@@ -1,3 +1,4 @@
+const { mockKeychainCommands, createTestHome, installMockKeychain, jwt } = require('./helpers/test-env.cjs');
 const { test, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -6,8 +7,7 @@ const path = require('node:path');
 const cp = require('node:child_process');
 const { promisify } = require('node:util');
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-client-logout-'));
-os.homedir = () => root;
+const root = createTestHome('ags-client-logout-', { mockKeychain: false });
 process.env.CODEX_HOME = path.join(root, 'codex');
 const authEnvironment = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'];
 const priorEnvironment = Object.fromEntries(authEnvironment.map(key => [key, process.env[key]]));
@@ -33,7 +33,7 @@ fs.existsSync = file => ['/etc/codex/requirements.toml', '/etc/codex/managed_con
   ? managedConfig : originalExists(file);
 const native = require('../dist/antigravity-native');
 const { readNativeToken: realReadNative, writeNativeToken: realWriteNative } = native;
-require('./vault-fixture.cjs');
+installMockKeychain();
 const clients = require('../dist/clients');
 clients.runningClients = async () => desktops;
 native.readNativeToken = () => keychain;
@@ -47,7 +47,7 @@ const codex = new CodexAgent();
 const nativeAgent = new AntigravityAgent(() => 'unified', true);
 const auth = (account = 'A', generation = 1) => JSON.stringify({ auth_mode: 'chatgpt', tokens: {
   account_id: account, access_token: `access-${account}-${generation}`, refresh_token: `refresh-${account}-${generation}`,
-  id_token: 'h.' + Buffer.from(JSON.stringify({ sub: 'user-' + account, email: `${account}@example.test` })).toString('base64url') + '.s',
+  id_token: jwt({ sub: 'user-' + account, email: `${account}@example.test` }),
 } });
 const nativeAuth = (account = 'A') => Buffer.from(JSON.stringify({ auth_method: 'consumer', id_token_email: `${account}@example.test`,
   token: { access_token: 'native-access-' + account, refresh_token: 'native-refresh-' + account } }));
@@ -202,33 +202,20 @@ macTest('native Antigravity logout uses its Keychain adapter and waits for share
   assert.deepEqual(keychainWrites, [null]);
 });
 
-macTest('legacy Antigravity and Claude credentials remain unsupported for automatic logout', async () => {
+macTest('legacy Antigravity credentials remain unsupported for automatic logout', async () => {
   const legacy = new AntigravityAgent(() => 'legacy', false);
   assert.equal(typeof logoutSupport(legacy), 'string');
   await assert.rejects(assertLogoutReady(legacy));
-  assert.equal(typeof logoutSupport({ id: 'claude' }), 'string');
   assert.equal(keychainWrites.length, 0);
 });
 
 macTest('native Antigravity logout cleans compatible fallbacks and refuses other-account or blocked fallbacks', () => {
-  const realExecSync = cp.execFileSync;
   const gemini = path.join(root, '.gemini');
   const cliFile = path.join(gemini, 'antigravity-cli/antigravity-oauth-token');
   const cliMarker = path.join(gemini, 'antigravity-cli/cache/antigravity-keyring-unavailable');
   const desktopFile = path.join(gemini, native.NATIVE_TOKEN_FILE);
-  let stored = 'go-keyring-base64:' + nativeAuth('A').toString('base64');
+  const keychainFixture = mockKeychainCommands(nativeAuth('A'));
   const writeFile = (file, content) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, content); };
-  cp.execFileSync = (cmd, args, opts) => {
-    if (cmd === '/usr/bin/osascript') throw Object.assign(new Error('official item'), { status: 77 });
-    assert.equal(cmd, '/usr/bin/security');
-    if (args[0] === 'find-generic-password') {
-      if (stored === null) throw Object.assign(new Error('missing'), { status: 44 });
-      return stored;
-    }
-    if (args[0] === 'delete-generic-password') { stored = null; return ''; }
-    stored = args[0] === '-i' ? opts.input.match(/-w "([^"]+)"/)[1] : args[args.indexOf('-w') + 1];
-    return '';
-  };
   native.readNativeToken = realReadNative;
   native.writeNativeToken = realWriteNative;
   try {
@@ -242,7 +229,7 @@ macTest('native Antigravity logout cleans compatible fallbacks and refuses other
       const reason = logoutSupport(nativeAgent);
       assert.match(reason || '', pattern);
       assert.throws(() => clearClientCredentials(nativeAgent, nativeAgent.identity().id, credentialState(nativeAgent).revision), pattern);
-      assert.ok(stored);
+      assert.ok(keychainFixture.state.stored);
       assert.equal(fs.existsSync(cliFile), true);
     }
 
@@ -252,7 +239,7 @@ macTest('native Antigravity logout cleans compatible fallbacks and refuses other
     writeFile(cliMarker, '1');
     assert.equal(logoutSupport(nativeAgent), undefined);
     clearClientCredentials(nativeAgent, nativeAgent.identity().id, credentialState(nativeAgent).revision);
-    assert.equal(stored, null);
+    assert.equal(keychainFixture.state.stored, null);
     assert.equal(fs.existsSync(cliFile), false);
     assert.equal(fs.existsSync(desktopFile), false);
     assert.equal(fs.existsSync(cliMarker), false);
@@ -270,7 +257,7 @@ macTest('native Antigravity logout cleans compatible fallbacks and refuses other
     fs.mkdirSync(externalDir, { recursive: true });
     const externalToken = path.join(externalDir, 'antigravity-oauth-token');
     fs.writeFileSync(externalToken, nativeAuth('A'));
-    stored = 'go-keyring-base64:' + nativeAuth('A').toString('base64');
+    keychainFixture.state.stored = keychainFixture.encode(nativeAuth('A'));
     fs.rmSync(path.join(gemini, 'antigravity-cli'), { recursive: true, force: true });
     fs.mkdirSync(gemini, { recursive: true });
     fs.symlinkSync(externalDir, path.join(gemini, 'antigravity-cli'));
@@ -279,7 +266,7 @@ macTest('native Antigravity logout cleans compatible fallbacks and refuses other
     assert.equal(fs.existsSync(externalToken), true);
   } finally {
     fs.rmSync(gemini, { recursive: true, force: true });
-    cp.execFileSync = realExecSync;
+    keychainFixture.restore();
     native.readNativeToken = () => keychain;
     native.writeNativeToken = value => { keychainWrites.push(value); keychain = value; };
   }

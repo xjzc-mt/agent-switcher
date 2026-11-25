@@ -8,7 +8,7 @@
     put them in one desktop window: see who still has quota left at a glance, switch in one click without breaking flow or overwriting your unsaved primary login.
   </p>
   <p>
-    <a href="docs/release-1.0.1.md"><img src="https://img.shields.io/badge/release-1.0.1-4F46E5?style=flat-square" alt="1.0.1 release" /></a>
+    <a href="docs/release-0.1.0.md"><img src="https://img.shields.io/badge/release-0.1.0-4F46E5?style=flat-square" alt="0.1.0 release" /></a>
     <img src="https://img.shields.io/badge/desktop-macOS_%C2%B7_Windows_x64-172033?style=flat-square" alt="macOS Apple Silicon, macOS Intel, Windows x64" />
     <img src="https://img.shields.io/badge/agents-Codex_%C2%B7_Antigravity-6366F1?style=flat-square" alt="Codex and Antigravity" />
     <img src="https://img.shields.io/badge/privacy-Zero_Backend_%C2%B7_AES--256--GCM-0D9488?style=flat-square" alt="Zero Backend · AES-256-GCM" />
@@ -19,7 +19,7 @@
     <a href="#visual-tour">Visual Tour</a> ·
     <a href="#security--platform-support">Security &amp; Support</a> ·
     <a href="#quick-install">Quick Install</a> ·
-    <a href="docs/release-1.0.1.md">1.0.1 Release Notes</a> ·
+    <a href="docs/release-0.1.0.md">0.1.0 Release Notes</a> ·
     <a href="#beyond-the-gate">✦ Beyond the Gate</a>
   </p>
 </div>
@@ -36,7 +36,7 @@
 
 Your active account stays pinned at the top while backup accounts are grouped by plan and sorted by remaining availability in **Card** or **Row** view. Codex separates `5h / 7d` windows and Credits; Antigravity leads with `Gemini` and shows `Claude / GPT` model groups independently, rendering missing values honestly as `—` without blending totals.
 
-On macOS, click the AGS menu bar icon to check the current account’s quota. Hover over **Switch account** and select a backup account. The menu stays on the display where you opened it when you switch platforms or expand the account list.
+On macOS, click the AGS menu bar icon to immediately see your active quota and backup accounts in aligned two-column pills. Switching platforms keeps the menu on the same display.
 
 | Codex Row View · Compact aligned comparison | Antigravity · Primary & secondary model groups |
 | --- | --- |
@@ -71,37 +71,47 @@ Select accounts and set a dedicated password of at least 6 characters to export 
 | --- | :---: | --- |
 | **Codex** (`codex`) | ✅ Supported | Isolated sign-in, `auth.json` switching, `5h / 7d` quota & Credits (uses the Codex CLI bundled with the desktop app or installed separately; Keychain-only storage is unsupported; API keys have no subscription quota) |
 | **Antigravity** (`agy`) | ✅ Supported | Isolated sign-in for personal Google accounts in Antigravity 2.x, switching via Keychain or official credential files, and quotas by model group (requires the official `agy` CLI; enterprise authentication is unverified) |
-| **Claude Code** (`claude`) | 🚧 Planned | Core compatibility code retained; GUI entry disabled in v1.0 until activation and quota capabilities are ready |
 
-The Windows x64 release has passed install, launch, and uninstall checks on Windows. Codex sign-in, account switching, and quota checks still await verification with real accounts on Windows. Antigravity native switching and quota checks are available on macOS only.
+**0.1.0 Cross-Platform Status**: Passed installation, launch, and uninstall checks on Windows x64. On Windows, AGS can sign in and check quota using either a standalone Codex CLI or the runtime installed by the Microsoft Store version of Codex on first launch, and can close and reopen the Codex desktop app during a switch with your confirmation. Personal Antigravity 2.x accounts require the official `agy` CLI. Two-account round trips on Mac and real-device end-to-end checks on Windows still await independent verification.
 
 ---
 
 ## Quick Install
 
-Choose the 1.0.1 installer for your computer. The Mac version requires macOS 13 or later. To check your chip, open the Apple menu and choose **About This Mac**.
+Use a one-line command to auto-detect your architecture, verify the signed release manifest, and install AGS (if you previously installed an early `1.0.x` test build, running the command replaces the app cleanly at `0.1.0` while keeping all saved accounts):
 
-[macOS · Apple Silicon (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-arm64.dmg) · [macOS · Intel (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-1.0.1-x64.dmg) · [Windows · x64 (EXE)](https://github.com/xjzc-mt/agent-switcher/releases/download/v1.0.1/AgentSwitcher-Setup-1.0.1-x64.exe)
+```bash
+# macOS (requires macOS 13+, auto-detects Apple Silicon / Intel and installs into /Applications)
+curl -fsSL https://xjzc-mt.github.io/agent-switcher/install.sh | bash
+```
+
+```powershell
+# Windows x64 (PowerShell)
+irm https://xjzc-mt.github.io/agent-switcher/install.ps1 | iex
+```
+
+Or download a `0.1.0` installer directly:
+[macOS · Apple Silicon (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-0.1.0-arm64.dmg) · [macOS · Intel (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-0.1.0-x64.dmg) · [Windows · x64 (EXE)](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-Setup-0.1.0-x64.exe)
 
 - **macOS** — Open the DMG and drag AGS into **Applications**. Finish active tasks in the official client before switching. With your confirmation, AGS quits and reopens the desktop client if it was running. For Antigravity, first close any `agy` or IDE sessions that share the login.
-- **Windows** — Run the EXE installer. Before switching Codex accounts, quit the Codex desktop app if it is running and close any CLI or IDE sessions that share its login. Reopen them as needed after the switch.
+- **Windows** — Run the EXE installer. Finish any CLI or IDE sessions that share the login before switching; if the Codex desktop app is running, AGS can close and reopen it after your confirmation.
 
 ```bash
 shasum -a 256 AgentSwitcher-*.dmg   # macOS. Compare the result with SHA256SUMS from the same release.
-# Windows PowerShell: Get-FileHash .\AgentSwitcher-Setup-1.0.1-x64.exe
+# Windows PowerShell: Get-FileHash .\AgentSwitcher-Setup-0.1.0-x64.exe
 ```
 
 > [!IMPORTANT]
-> macOS builds use **ad-hoc signing** (not yet Apple notarized). If macOS reports that the developer cannot be verified on first launch, verify the download source, then open **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway**.
+> macOS builds use **ad-hoc signing** (not yet Apple notarized). Installing via `install.sh` above verifies the signed manifest automatically; if you drag a DMG manually and macOS says the developer cannot be verified on first launch, check `SHA256SUMS`, then open **System Settings → Privacy & Security** and click **Open Anyway**.
 
 If something goes wrong, open **Settings → App & Updates → Export diagnostic report** to save a redacted record of recent operations. You can share it privately with a maintainer. You can also check [Known Issues](issues/README.md) or file a report on [GitHub Issues](https://github.com/xjzc-mt/agent-switcher/issues). **Never upload real credential JSON, tokens, or backup passwords.**
 
 <details>
 <summary><strong>Preferences & In-App Updates</strong></summary>
 
-In Settings, you can change the quota reset time display (countdown or date and time), choose how private sign-in works, and copy the Codex cleanup helper prompt.
+In Settings, you can change the quota reset time display (countdown or date and time), configure separate auto-refresh intervals for active and backup accounts, choose how private sign-in works, and copy the Codex cleanup helper prompt.
 
-On macOS, you can download the DMG for your Mac directly in AGS. The app verifies the release manifest with its bundled Ed25519 public key and checks the installer’s SHA-256. On Windows, download the latest x64 installer from the releases page. [In-App Updates](docs/app-updates.md) · [GitHub Releases](https://github.com/xjzc-mt/agent-switcher/releases)
+Both macOS and Windows x64 can download the matching installer directly in AGS. The app verifies the release manifest with its bundled Ed25519 public key and checks SHA-256, then offers one-click **Install & Restart** to safely exit, update, and relaunch. [In-App Updates](docs/app-updates.md) · [GitHub Releases](https://github.com/xjzc-mt/agent-switcher/releases)
 
 ![Settings: compact preferences, cleanup helper, and app updates](docs/images/08-settings.png)
 
@@ -141,7 +151,7 @@ Documentation index (Chinese): [Account Management](docs/account-management.md) 
 
 <p>
   <img src="assets/gate-mark.png" width="24" align="absmiddle" alt="AGS Gate Mark" />
-  <strong>Beneath that "AGI Gate", humans walk with agents and lift each other up — AgentSwitcher v1.0 is only the prologue.</strong>
+  <strong>Beneath that "AGI Gate", humans walk with agents and lift each other up — AgentSwitcher is only the prologue.</strong>
 </p>
 
 A **next-generation personal micro-relay** built around **private trust circles · zero wasted quota · mutual help** is counting down to launch.

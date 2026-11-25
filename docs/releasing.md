@@ -1,10 +1,10 @@
 # 构建与发布
 
-[1.0.1](release-1.0.1.md) 分发 macOS Apple Silicon、Intel 两种 DMG 及 Windows x64 安装程序。版本基线、源码验收和待测环境见[当前待办](当前待办.md)。初始 1.0.0 测试版资料保留在[历史说明](release-1.0.0.md)。
+[0.1.0](release-0.1.0.md) 分发 macOS Apple Silicon、Intel 两种 DMG 及 Windows x64 安装程序，并在官网托管 `install.sh` / `install.ps1` 一键安装脚本。版本基线、源码验收和待测环境见[当前待办](当前待办.md)。早期测试版资料保留在 [1.0.1](release-1.0.1.md) 与 [1.0.0](release-1.0.0.md)。
 
 ## 版本与提交
 
-1. 保留 `358eb6d` 和已有 1.0.0 测试包作为升级基线。正式标签 `v1.0.1` 指向 `1be1dc0`。后续版本在包清单和锁文件中使用同一版本号。应用按三段数字比较版本。[更新器](../src/app-updates.ts)
+1. 自 `v0.1.0` 起公开版本号统一采用 `0.1.x` 系列；早期 `v1.0.0`、`v1.0.1` 在 GitHub Releases 标记为预发布（Pre-release）归档，新版本发布时必须显式勾选 `Set as the latest release`（`gh release edit v0.1.0 --latest`）。后续版本在包清单和锁文件中使用同一版本号。应用按三段数字比较版本并排除已退役的 `1.0.0`、`1.0.1`。[更新器](../src/app-updates.ts)
 2. 固定候选提交前核对 `git status --short --untracked-files=all`，特别检查新主进程模块、小菜单页面与预加载、公钥、官网和验收用例。用该提交的干净检出构建，避免现有工作区或陈旧 `dist/` 掩盖漏交的文件。体验记录留存源码构建标识、平台及对应提交。
 3. 确定发布范围时，在候选提交同步应用版本、锁文件根版本、发布说明和下载入口。每个对外版本的标签、平台产物及校验文件对应同一提交。若 Windows 修复晚于已发 macOS 版本且需要改源码，给后续发布分配下一个版本号。
 4. 保留旧版支持的 `SHA256SUMS`，同时为新版更新器提供 `.signed.json` 发布清单。旧版固定查询当前仓库。若发布入口迁移，需在官网提供首次手动升级路径，并将新版更新器指向公开发布入口。
@@ -18,10 +18,12 @@ npm ci
 npm run lint
 npm test
 npm run test:ui
-npm run release:checksums -- --sign-key /path/to/offline-private.pem release/AgentSwitcher-1.0.1-arm64.dmg release/AgentSwitcher-1.0.1-x64.dmg release/AgentSwitcher-Setup-1.0.1-x64.exe
+npm run release:checksums -- --sign-key /path/to/offline-private.pem release/AgentSwitcher-0.1.0-arm64.dmg release/AgentSwitcher-0.1.0-x64.dmg release/AgentSwitcher-Setup-0.1.0-x64.exe
 (cd release && shasum -a 256 -c SHA256SUMS)
-hdiutil verify release/AgentSwitcher-1.0.1-arm64.dmg
+hdiutil verify release/AgentSwitcher-0.1.0-arm64.dmg
 ```
+
+Windows 源码开发运行 `npm run build` 时会调用系统 .NET Framework C# 编译器生成桌面和凭据辅助程序。构建 Windows 安装包时，electron-builder 从当前源码重新编译，按已配置的 Windows 签名选项处理文件，再将 SHA-256 写入应用归档。macOS 或 Linux 交叉构建 Windows 目标需在构建机上提供 Mono 的 `mcs`。
 
 UI 回归使用演示账号。界面发生变化时，先用 `npm run screenshots` 更新[截图](images/README.md)，再固定构建提交。
 

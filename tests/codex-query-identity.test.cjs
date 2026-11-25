@@ -1,18 +1,14 @@
-const {test, after} = require('node:test');
+const { mockIdleClients, createTestHome, readCredentialFile, accessToken } = require('./helpers/test-env.cjs');
+const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-codex-query-identity-'));
-os.homedir = () => root;
-const {readCredentialFile} = require('./vault-fixture.cjs');
-const {accessToken} = require('./codex-token-fixture.cjs');
-const {CodexAgent} = require('../dist/agents/codex');
+const fs = require('node:fs'), path = require('node:path');
+const root = createTestHome('ags-codex-query-identity-');
+const {CodexAgent, CodexQueryError} = require('../dist/agents/codex');
+const {CredentialChangedError} = require('../dist/credential-state');
 const {releaseTemporaryCredentials} = require('../dist/temporary-credentials');
 const {atomicWrite} = require('../dist/utils');
 const accounts = require('../dist/accounts'), store = require('../dist/store');
-const clients = require('../dist/clients'), logout = require('../dist/client-logout');
-clients.runningClients = async () => [];
-logout.runningCodexSessions = async () => [];
-after(() => fs.rmSync(root, {recursive:true,force:true}));
+const clients = mockIdleClients();
 
 const workspace = 'team', sub = 'member', email = 'member@example.test';
 const auth = (tokens) => Buffer.from(JSON.stringify({auth_mode:'chatgpt', tokens}));
@@ -26,6 +22,81 @@ function fixtureAgent(name) {
   Object.defineProperty(agent,'homeDir',{value:path.join(root,name+'-current')});
   return agent;
 }
+
+test('only rejection of a real renewal expires the Codex login', async t => {
+  const agent = fixtureAgent('rpc-grant'), original = signed('saved-grant');
+  t.mock.method(agent,'findCodexBinary',() => 'fixture');
+  let scenario, requests, grant;
+  const denied = 'Your access token could not be refreshed. Please log out and sign in again.';
+  t.mock.method(require('../dist/codex-process'),'startCodexProcess',(_bin,home,handlers) => {
+    grant = JSON.parse(fs.readFileSync(path.join(home,'auth.json'))).tokens.refresh_token;
+    return {
+      send({id}) {
+        if (id === undefined) return;
+        requests.push(id);
+        let response = { result:{} };
+        if (id === 1) response = { error:{code:-32603,message:denied} };
+        if (id === 3) response = scenario === 'quota-401' ? { result:{account:{type:'chatgpt',email}} }
+          : scenario === 'stderr' ? { result:{account:null} } : { error:{message:'Encountered invalidated oauth token for user'} };
+        if (id === 2) response = { error:{status:401} };
+        if (id === 3 && scenario === 'disconnected') return queueMicrotask(() => handlers.onError('connection'));
+        queueMicrotask(() => handlers.onMessage({id,...response}));
+      },
+      stop() {
+        if (['stderr','disconnected','quota-401'].includes(scenario)) {
+          handlers.onStderr(Buffer.from('Failed to refresh token sta'));
+          handlers.onStderr(Buffer.from('tus=401 private-response'));
+        }
+        queueMicrotask(handlers.onClose);
+      },
+    };
+  });
+  for (scenario of ['held','internal','explicit','stderr','disconnected','quota-401']) {
+    requests = [];
+    const force = !['held','internal'].includes(scenario);
+    const {status} = await agent.queryCredential(original,{allowRefresh:scenario !== 'held',renewRejectedBearer:force});
+    const expired = scenario !== 'held' && scenario !== 'quota-401';
+    assert.equal(grant, scenario === 'held' ? 'ags-refresh-disabled' : 'saved-grant');
+    assert.deepEqual(requests, scenario === 'quota-401' ? [0,3,2] : [0,force ? 3 : 1]);
+    assert.equal(status.authExpired,expired); assert.equal(status.state,expired ? 'expired' : 'error');
+    assert.equal(require('../renderer/account-policy.js').needsCredentialUpdate(status),expired);
+    if (expired) assert.equal(status.extra,'登录凭据已失效，请点击「更新凭据」重新登录');
+    if (scenario === 'held') assert.match(status.extra,/客户端.*续期/);
+  }
+});
+
+test('fresh access uses a read-only nonpending copy and rechecks the login before retrying a rejection', async t => {
+  let busy = false;
+  t.mock.method(clients, 'runningClients', async () => busy ? ['Codex'] : []);
+  for (const outcome of ['ok', 'outage', 'client-started', 'pool-changed']) {
+    busy = false;
+    const agent = fixtureAgent(outcome), file = profile(outcome), user = JSON.parse(signed(outcome));
+    user.tokens.access_token = accessToken(workspace,sub,email,outcome,Math.floor(Date.now()/1000)+3600);
+    const input = Buffer.from(JSON.stringify(user)), successor = signed(outcome+'-new');
+    atomicWrite(file, input);
+    if (outcome === 'client-started') atomicWrite(path.join(agent.homeDir,'auth.json'), input);
+    const homes = [];
+    agent.queryLiveRpc = async (dir, allow) => {
+      homes.push(dir);
+      const authFile = path.join(dir,'auth.json');
+      assert.equal(allow, false);
+      assert.equal(JSON.parse(fs.readFileSync(authFile)).tokens.refresh_token,'ags-refresh-disabled');
+      assert.ok(!JSON.parse(fs.readFileSync(path.join(dir,'.ags-temporary-owner.json'))).pendingCommit);
+      if (process.platform !== 'win32') assert.equal(fs.statSync(authFile).mode & 0o777,0o400);
+      if (outcome === 'ok') return live();
+      if (outcome === 'outage') throw new Error('fixture rate service unavailable');
+      if (outcome === 'pool-changed') atomicWrite(file, successor);
+      busy = outcome === 'client-started';
+      throw new CodexQueryError('fixture bearer rejected', 'authentication-rejected');
+    };
+    const result = accounts.refreshAccount(agent,outcome,true);
+    if (outcome === 'pool-changed') await assert.rejects(result, CredentialChangedError);
+    else assert.equal((await result).state, outcome === 'ok' ? 'ok' : 'error');
+    assert.equal(homes.length,1);
+    assert.equal(fs.existsSync(homes[0]),false);
+    assert.deepEqual(readCredentialFile(file), outcome === 'pool-changed' ? successor : input);
+  }
+});
 
 test('Windows file login honors effective storage and keeps unidentified live credentials separate from saved accounts', async t => {
   const {windowsCodexFileIssue} = require('../dist/codex-file-auth');

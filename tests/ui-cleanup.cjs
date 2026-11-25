@@ -1,28 +1,16 @@
-const outputPath = require('./ui-support.cjs');
-const { app, BrowserWindow } = require('electron');
+const suite = require('./ui-support.cjs');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-app.whenReady().then(async () => {
-  const window = new BrowserWindow({ width: 880, height: 740, show: false,
-    webPreferences: { preload: path.join(__dirname, 'fixture-preload.cjs'), contextIsolation: true } });
-  const run = source => window.webContents.executeJavaScript(source);
-  const click = selector => run(`document.querySelector(${JSON.stringify(selector)}).click()`);
-  const capture = async name => { await pause(180); fs.writeFileSync(outputPath(name), (await window.webContents.capturePage()).toPNG()); };
-  const until = async expression => {
-    for (let i = 0; i < 80; i++) { if (await run(expression)) return; await pause(20); }
-    throw new Error('Timed out: ' + expression);
-  };
-  const preview = async name => {
-    await run(`openAccountDetails('codex',${JSON.stringify(name)})`);
-    await click('[data-action="handleDeleteProfile"]');
-    await until(`!!document.querySelector('dialog[data-account-details]').deletePreview`);
-  };
-  try {
-    await window.loadFile(path.join(__dirname, '../renderer/index.html'));
-    await until(`agentsData.length>0`);
+module.exports = suite(
+  { width: 880, height: 740 },
+  async ({ run, load, pause, until, click, capture }) => {
+    const preview = async name => {
+      await run(`openAccountDetails('codex',${JSON.stringify(name)})`);
+      await click('[data-action="handleDeleteProfile"]');
+      await until(`!!document.querySelector('dialog[data-account-details]').deletePreview`);
+    };
+
+    await load();
     await run(`window.accountTestApi.alias('工作账号','备份<&>');loadStatus()`);
     await preview('工作账号');
     assert.deepEqual(await run(`[...document.querySelectorAll('.delete-profile-list li')].map(e=>e.textContent)`), ['工作账号', '备份<&>']);
@@ -84,11 +72,5 @@ app.whenReady().then(async () => {
     assert.match(await run(`document.querySelector('#toastBox').textContent`), /尚未执行清理/);
     await run(`document.querySelector('#toastBox').hidePopover()`);
     await capture('cleanup-settings.png');
-    console.log(JSON.stringify({ passed: true, deletionScopePreview: true, previewFailureAndCancel: true, explicitLogout: true, aliasBatchDeduplicated: true, genericCopyOnlyPrompt: true }));
-    app.exit(0);
-  } catch (error) {
-    console.error(error);
-    fs.writeFileSync(outputPath('cleanup-ui-failure.png'), (await window.webContents.capturePage()).toPNG());
-    app.exit(1);
-  }
-});
+  },
+);

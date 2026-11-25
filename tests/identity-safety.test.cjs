@@ -1,17 +1,11 @@
-const { accessToken } = require('./codex-token-fixture.cjs');
-const { test, after, beforeEach } = require('node:test');
+const { mockIdleClients, createTestHome, readCredentialFile, jwt, accessToken } = require('./helpers/test-env.cjs');
+const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-identity-tests-'));
-os.homedir = () => root;
-const { readCredentialFile } = require('./vault-fixture.cjs');
-const clients = require('../dist/clients');
-clients.runningClients = async () => [];
-const logout = require('../dist/client-logout');
-logout.runningCodexSessions = async () => [];
+const root = createTestHome('ags-identity-tests-');
+mockIdleClients();
 const store = require('../dist/store');
 const { codexAgent: agent } = require('../dist/agents/codex');
 Object.defineProperty(agent, 'homeDir', { value: path.join(root, 'live'), configurable: true });
@@ -21,7 +15,7 @@ const auth = (workspace, refresh = `refresh-${workspace}`) => JSON.stringify({ l
   account_id: workspace,
   access_token: accessToken(workspace, 'same-person', 'person@example.test', refresh),
   refresh_token: refresh,
-  id_token: `header.${Buffer.from(JSON.stringify({ sub: 'same-person', email: 'person@example.test' })).toString('base64url')}.signature`,
+  id_token: jwt({ sub: 'same-person', email: 'person@example.test' }),
 } });
 const putLive = (workspace, refresh) => atomicWrite(path.join(agent.homeDir, 'auth.json'), auth(workspace, refresh));
 const profileAuth = name => JSON.parse(readCredentialFile(path.join(store.profileDir('codex', name), 'auth.json'), 'utf8'));
@@ -29,7 +23,6 @@ const profileAuth = name => JSON.parse(readCredentialFile(path.join(store.profil
 beforeEach(() => {
   for (const dir of [store.STORE_DIR, agent.homeDir]) fs.rmSync(dir, { recursive: true, force: true });
 });
-after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 test('stable identity takes precedence over matching or changed email', () => {
   assert.equal(accounts.isSameIdentity({ id: 'personal:user', email: 'person@example.test' }, { id: 'org:user', email: 'person@example.test' }), false);

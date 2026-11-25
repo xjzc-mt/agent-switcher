@@ -1,53 +1,50 @@
-const outputPath = require('./ui-support.cjs');
-const {app,BrowserWindow,ipcMain}=require('electron');
+const suite = require('./ui-support.cjs');
+const assert = require('node:assert/strict');
 const {defaultWidth,minimumWidth,updateWindowSidebarLayout}=require('../dist/window-layout');
-const assert=require('node:assert/strict');
-const fs=require('node:fs');
-const path=require('node:path');
-const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-app.whenReady().then(async()=>{
-  const window=new BrowserWindow({width:defaultWidth,height:700,minWidth:minimumWidth(152),minHeight:620,show:false,titleBarStyle:'hiddenInset',webPreferences:{preload:path.join(__dirname,'fixture-preload.cjs'),contextIsolation:true,backgroundThrottling:false,additionalArguments:['--test-window-layout']}});
-  ipcMain.handle('test-window-layout',(event,collapsed,width)=>{
-    assert.equal(event.sender,window.webContents);
-    return updateWindowSidebarLayout(window,collapsed,width);
-  });
-  const run=script=>window.webContents.executeJavaScript(script);
-  const errors=[];window.webContents.on('console-message',event=>{if(event.level==='error')errors.push(event.message);});
-  const until=async script=>{for(let i=0;i<100;i++){if(await run(script))return;await pause(20);}throw new Error(`Timed out: ${script}`);};
-  const rightClick=selector=>run(`document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2}))`);
-  const click=async(selector,edge=false)=>{
-    const point=await run(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});element.scrollIntoView({block:'nearest'});const r=element.getBoundingClientRect(),x=Math.round(r.x+(${edge}?2:r.width/2)),y=Math.round(r.y+r.height/2);return {x,y,hit:element.contains(document.elementFromPoint(x,y))};})()`);
-    assert.equal(point.hit,true,`${selector} must receive pointer hits`);
-    const {x,y}=point;
-    window.webContents.sendInputEvent({type:'mouseMove',x,y});
-    window.webContents.sendInputEvent({type:'mouseDown',x,y,button:'left',clickCount:1});
-    window.webContents.sendInputEvent({type:'mouseUp',x,y,button:'left',clickCount:1});
-  };
-  const close=()=>run(`{const dialog=document.querySelector('.account-modal[open]');dialog.querySelector('[data-close-dialog]').click();dialog.dismissAccountDialog();}`);
-  const minimum=async width=>{for(let i=0;i<100;i++){if(window.getMinimumSize()[0]===width)return;await pause(20);}throw new Error(`Window minimum did not become ${width}`);};
-  const checkDrag=async(enabled=true)=>{
-    const state=await run(`(()=>{
-      const header=document.querySelector('.workspace-topbar'),h=header.getBoundingClientRect();
-      const overlaps=[...document.querySelectorAll('body *')].filter(e=>{
-        if(header.contains(e)||e.contains(header)||getComputedStyle(e).getPropertyValue('-webkit-app-region')!=='no-drag')return false;
-        const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.left<h.right&&r.right>h.left&&r.top<h.bottom&&r.bottom>h.top;
-      }).map(e=>e.tagName+'.'+(e.getAttribute('class')||''));
-      return {region:getComputedStyle(header).getPropertyValue('-webkit-app-region'),top:h.top,height:h.height,overlaps};
-    })()`);
-    assert.equal(state.region,enabled?'drag':'no-drag');assert.equal(state.top,0);assert.equal(state.height,52);
-    if(enabled)assert.deepEqual(state.overlaps,[],'Clipped content must not subtract native titlebar drag regions');
-  };
-  const threeCards=async()=>{
-    const cards=await run(`[...document.querySelectorAll('.accounts-grid .account-card')].map(card=>{const r=card.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,right:r.right};})`);
-    assert.equal(cards.length,3,'The fixture must expose three backup cards');
-    cards.forEach((card,index)=>{
-      assert.ok(Math.abs(card.width-180)<0.5,'Native minimum must retain minimum-width cards');
-      assert.ok(Math.abs(card.y-cards[0].y)<0.5,'All three cards must remain on one row');
-      if(index)assert.ok(Math.abs(card.x-cards[index-1].right-8)<0.5,'Card gaps must stay visible');
+const { ipcMain } = require('electron');
+
+module.exports = suite(
+  { width: defaultWidth, height: 700, minWidth: minimumWidth(152), minHeight: 620, titleBarStyle: 'hiddenInset', additionalArguments: ['--test-window-layout'] },
+  async ({ window, run, load, pause, until, capture }) => {
+    window.once('closed', () => ipcMain.removeHandler('test-window-layout'));
+    ipcMain.handle('test-window-layout',(event,collapsed,width)=>{
+      assert.equal(event.sender,window.webContents);
+      return updateWindowSidebarLayout(window,collapsed,width);
     });
-  };
-  try{
-    await window.loadFile(path.join(process.env.AGS_UI_RENDERER_ROOT||path.join(__dirname,'../renderer'),'index.html'));await pause(200);
+    const rightClick=selector=>run(`document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2}))`);
+    const click=async(selector,edge=false)=>{
+      const point=await run(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});element.scrollIntoView({block:'nearest'});const r=element.getBoundingClientRect(),x=Math.round(r.x+(${edge}?2:r.width/2)),y=Math.round(r.y+r.height/2);return {x,y,hit:element.contains(document.elementFromPoint(x,y))};})()`);
+      assert.equal(point.hit,true,`${selector} must receive pointer hits`);
+      const {x,y}=point;
+      window.webContents.sendInputEvent({type:'mouseMove',x,y});
+      window.webContents.sendInputEvent({type:'mouseDown',x,y,button:'left',clickCount:1});
+      window.webContents.sendInputEvent({type:'mouseUp',x,y,button:'left',clickCount:1});
+    };
+    const close=()=>run(`{const dialog=document.querySelector('.account-modal[open]');dialog.querySelector('[data-close-dialog]').click();dialog.dismissAccountDialog();}`);
+    const minimum=async width=>{for(let i=0;i<100;i++){if(window.getMinimumSize()[0]===width)return;await pause(20);}throw new Error(`Window minimum did not become ${width}`);};
+    const checkDrag=async(enabled=true)=>{
+      const state=await run(`(()=>{
+        const header=document.querySelector('.workspace-topbar'),h=header.getBoundingClientRect();
+        const overlaps=[...document.querySelectorAll('body *')].filter(e=>{
+          if(header.contains(e)||e.contains(header)||getComputedStyle(e).getPropertyValue('-webkit-app-region')!=='no-drag')return false;
+          const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.left<h.right&&r.right>h.left&&r.top<h.bottom&&r.bottom>h.top;
+        }).map(e=>e.tagName+'.'+(e.getAttribute('class')||''));
+        return {region:getComputedStyle(header).getPropertyValue('-webkit-app-region'),top:h.top,height:h.height,overlaps};
+      })()`);
+      assert.equal(state.region,enabled?'drag':'no-drag');assert.equal(state.top,0);assert.equal(state.height,52);
+      if(enabled)assert.deepEqual(state.overlaps,[],'Clipped content must not subtract native titlebar drag regions');
+    };
+    const threeCards=async()=>{
+      const cards=await run(`[...document.querySelectorAll('.accounts-grid .account-card')].map(card=>{const r=card.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,right:r.right};})`);
+      assert.equal(cards.length,3,'The fixture must expose three backup cards');
+      cards.forEach((card,index)=>{
+        assert.ok(Math.abs(card.width-180)<0.5,'Native minimum must retain minimum-width cards');
+        assert.ok(Math.abs(card.y-cards[0].y)<0.5,'All three cards must remain on one row');
+        if(index)assert.ok(Math.abs(card.x-cards[index-1].right-8)<0.5,'Card gaps must stay visible');
+      });
+    };
+
+    await load();
     window.webContents.debugger.attach('1.3');
     await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled',{enabled:true});
     await run(`localStorage.clear();accountLayout='cards';applySidebar();renderWorkbench()`);await minimum(748);
@@ -63,7 +60,7 @@ app.whenReady().then(async()=>{
       assert.ok(geometry.cards.every(card=>Math.abs(card.width-width)<0.5&&Math.abs(card.y-geometry.cards[0].y)<0.5),JSON.stringify(geometry));
       assert.ok(Math.abs(geometry.remaining-(collapsed?0:8))<0.5,JSON.stringify(geometry));assert.equal(geometry.overflow,false);
       assert.deepEqual(window.getSize(),[840,700],'Sidebar changes must retain the default window size');
-      fs.writeFileSync(outputPath(`accounts-default-${collapsed?'collapsed':'expanded'}.png`),(await window.webContents.capturePage()).toPNG());
+      await capture(`accounts-default-${collapsed?'collapsed':'expanded'}.png`);
     }
     assert.equal(await run(`window.testApi.calls().length`),initialCalls,'Default layout checks must not operate on accounts');
     await run(`writeLayout('sidebarCollapsed','false');applySidebar()`);await minimum(748);
@@ -125,6 +122,7 @@ app.whenReady().then(async()=>{
     await run(`window.appUpdateTestApi.setState({status:'available',release:{version:'1.1.0',downloadable:true,notes:'更新说明\\n'.repeat(40)}});selectTab('settings')`);
     await until(`!!document.querySelector('[data-update-action="notes"]:not([hidden])')`);
     await click('[data-update-action="notes"]');
+    await until(`!$('appUpdateNotes').hidden`);
     await run(`$('workspaceContent').scrollTop=100000`);await checkDrag();
     assert.ok(await run(`$('workspaceContent').scrollTop>0`),'Expanded update notes must exercise settings scrolling');
     await run(`agentsData=window.beforeScrollAgents;delete window.beforeScrollAgents;selectTab('codex')`);
@@ -150,7 +148,7 @@ app.whenReady().then(async()=>{
     await click('.credential-card .account-main-name');
     await until(`document.querySelector('.credential-card .account-select').checked`);
     await run(`endSelection()`);
-    await run(`selectTab('codex');setAccountLayout(null,null,{dataset:{layout:'rows'}})`);
+    await run(`selectTab('codex');setAccountLayout('rows')`);
 
     const row='[data-profile="工作账号"].account-card';
     await run(`document.querySelector('${row}').focus()`);await rightClick(row);
@@ -161,7 +159,7 @@ app.whenReady().then(async()=>{
     assert.equal(closeStyle.width,26);assert.equal(closeStyle.height,26);assert.equal(closeStyle.centered,true);assert.equal(closeStyle.label,'关闭');
     window.webContents.sendInputEvent({type:'mouseMove',x:Math.round(closeStyle.x),y:Math.round(closeStyle.y)});await pause(170);
     assert.equal(await run(`getComputedStyle(document.querySelector('[data-close-dialog]')).borderTopColor`),'rgba(0, 0, 0, 0)');
-    fs.writeFileSync(outputPath('account-detail-close-hover.png'),(await window.webContents.capturePage()).toPNG());
+    await capture('account-detail-close-hover.png');
     await run(`document.querySelector('.account-modal [data-close-dialog]').click()`);
     assert.equal(await run(`document.querySelector('.account-modal').hasAttribute('data-closing')`),true);
     await until(`!document.querySelector('.account-modal')`);
@@ -199,8 +197,6 @@ app.whenReady().then(async()=>{
     await rightClick(row);
     assert.equal(await run(`getComputedStyle(document.querySelector('.account-modal')).animationName`),'none');
     await close();window.webContents.debugger.detach();
-    await run(`localStorage.clear()`);assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({passed:true,cardDomPreserved:true,queriesDuringResize:0,nativeMinimumWidths:[636,740,748,780],threeMinimumCards:true,sidebarCoordinateClicks:true,collapsedReloadReopened:true,pointerFocusReleased:true,keyboardFocusRestored:true,reducedMotion:true}));
-    app.exit(0);
-  }catch(error){console.error(error);fs.writeFileSync(outputPath('agent-switcher-interactions-error.png'),(await window.webContents.capturePage()).toPNG());app.exit(1);}
-});
+    await run(`localStorage.clear()`);
+  },
+);

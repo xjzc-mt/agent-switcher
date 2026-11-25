@@ -36,7 +36,7 @@ app.whenReady().then(async () => {
   };
   const reset = async () => {
     await window.loadFile(path.join(__dirname, '../renderer/index.html'));
-    await until('agentsData.length === 3 && !loading');
+    await until('agentsData.some(a => a.id === "codex") && agentsData.some(a => a.id === "agy") && !loading');
     await run(`localStorage.clear(); applySidebar(); window.providerTestApi.native()`);
     await run(`(async () => {
       const names = ['我的日常账号', '同事小林 · 长任务', '小组代码审查', '朋友小周 · 备用'];
@@ -128,7 +128,7 @@ app.whenReady().then(async () => {
     await reset();
     await run(`openSaveModal('codex'); handleLaunchLogin('codex', 'private')`);
     await run(`window.loginTestApi.complete('colleague-demo@example.test'); handleModalDetect()`);
-    await until('localAccountReady');
+    await until('activeDialog.login.ready');
     await click('#keepAdding');
     await run(`$('modalProfileInput').value = '同事授权备用'; $('modalProfileInput').dispatchEvent(new Event('input', { bubbles: true }))`);
     assert.equal(await run(`$('modalProfileInput').value`), '同事授权备用');
@@ -138,9 +138,9 @@ app.whenReady().then(async () => {
     await run(`openSaveModal('codex'); selectAddTab('session'); window.testApi.setImportMode('batch')`);
     await click('#btnChooseSessionFile');
     await until(`document.querySelectorAll('.credential-import-row').length === 4`);
-    await run(`addPreview.items.find(item => item.state === 'duplicate').duplicate = {
+    await run(`activeDialog.preview.items.find(item => item.state === 'duplicate').duplicate = {
       key: 'codex/我的日常账号', profile: '我的日常账号', source: 'pool'
-    }; showAddPreview(addPreview);
+    }; showAddPreview(activeDialog.preview);
     [...document.querySelectorAll('[name="import-name"]')].forEach((input, index) => {
       input.value = ['同事小林', '朋友小周'][index]; input.dispatchEvent(new Event('input', { bubbles: true }));
     })`);

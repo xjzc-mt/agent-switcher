@@ -1,16 +1,20 @@
+import { replacePrivateFile } from './private-files';
 import fs from 'fs';
 import path from 'path';
-import { createHash, KeyObject, randomUUID } from 'crypto';
-import { session, shell, DownloadItem, Session } from 'electron';
+import { createHash, KeyObject } from 'crypto';
+import { session, DownloadItem, Session } from 'electron';
+import { pipeline } from 'node:stream/promises';
+import { installMode, InvalidMacBundle, prepareHandoff, privateInstallStage, type InstallEnvironment, type UpdateHandoff } from './update-handoff';
 import { manifestName, releaseAssetName, ReleaseManifest, trustedReleaseKey, verifyReleaseManifest } from './release-manifest';
 
 const REPO = 'https://github.com/xjzc-mt/agent-switcher';
 const API = 'https://api.github.com/repos/xjzc-mt/agent-switcher/releases/latest';
 const DAY = 24 * 60 * 60 * 1000;
 const DIRECTORY_PREFIX = 'AgentSwitcher-update-';
+const RETIRED_VERSIONS = new Set(['1.0.0', '1.0.1']);
 const stableVersion = (value: unknown): value is string => typeof value === 'string' && value.length < 80 && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value);
 export function newerVersion(version: string, current: string): boolean {
-  if (!stableVersion(version) || !stableVersion(current)) return false;
+  if (!stableVersion(version) || !stableVersion(current) || RETIRED_VERSIONS.has(version)) return false;
   const a = version.split('.').map(BigInt), b = current.split('.').map(BigInt);
   for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
   return false;
@@ -24,13 +28,14 @@ export interface UpdateState {
   currentVersion: string;
   status: 'idle' | 'checking' | 'available' | 'current' | 'unavailable' | 'error' | 'downloading' | 'verifying' | 'downloaded';
   errorStage?: 'check' | 'download';
+  installMode: 'restart' | 'open';
   autoCheck: boolean; lastCheckedAt?: number;
   message?: string; progress?: number; release?: UpdateRelease;
 }
-interface ReleaseRecord { info: UpdateRelease; assetUrl: string; manifest?: ReleaseManifest }
-interface Options {
+interface ReleaseRecord { info: UpdateRelease; assetUrl: string; manifest?: ReleaseManifest; invalidBundle?: boolean }
+interface Options extends InstallEnvironment {
   currentVersion: string; userDataDir: string; downloadsDir: string;
-  platform: string; arch: string; onChange: (state: UpdateState) => void;
+  arch: string; onChange: (state: UpdateState) => void;
 }
 interface ActiveDownload {
   record: ReleaseRecord; directory: string; partial: string; destination: string;
@@ -67,7 +72,7 @@ export class AppUpdates {
 
   constructor(private readonly options: Options, private readonly releaseKey: KeyObject | undefined = trustedReleaseKey()) {
     this.file = path.join(options.userDataDir, 'app-updates.json');
-    this.state = { currentVersion: options.currentVersion, status: 'idle', autoCheck: true };
+    this.state = { currentVersion: options.currentVersion, status: 'idle', autoCheck: true, installMode: installMode(options) };
     this.readCache();
     this.network = session.fromPartition('ags-app-updates');
     this.network.on('will-download', (event, item) => this.acceptDownload(event, item));
@@ -82,13 +87,9 @@ export class AppUpdates {
   }
   private save() {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    const temporary = `${this.file}.${randomUUID()}.tmp`;
-    try {
-      fs.writeFileSync(temporary, JSON.stringify({ autoCheck: this.state.autoCheck,
-        lastCheckedAt: this.state.lastCheckedAt, nextAutomaticCheck: this.nextAutomaticCheck,
-        retryAt: this.retryAt, record: this.record, downloadedPath: this.downloadedPath }), { mode: 0o600, flag: 'wx' });
-      fs.renameSync(temporary, this.file);
-    } finally { fs.rmSync(temporary, { force: true }); }
+    replacePrivateFile(this.file, JSON.stringify({ autoCheck: this.state.autoCheck,
+      lastCheckedAt: this.state.lastCheckedAt, nextAutomaticCheck: this.nextAutomaticCheck,
+      retryAt: this.retryAt, record: this.record, downloadedPath: this.downloadedPath }));
   }
   private ownedFile(file: unknown, name: string): file is string {
     if (typeof file !== 'string' || path.basename(file) !== name) return false;
@@ -114,15 +115,17 @@ export class AppUpdates {
         typeof info.name !== 'string' || !Number.isSafeInteger(info.size) || info.size <= 0 ||
         typeof info.notes !== 'string' || typeof info.publishedAt !== 'string') return;
       if (!verifyReleaseManifest(record.manifest, info, this.releaseKey)) record.manifest = undefined;
-      info.downloadable = !!record.manifest && this.supported();
+      info.downloadable = !!record.manifest && !record.invalidBundle;
       this.record = record;
       if (info.downloadable && this.ownedFile(cached.downloadedPath, info.name)) {
         this.downloadedPath = cached.downloadedPath;
         this.state.status = 'downloaded';
-      } else this.state.status = 'available';
+      } else {
+        this.state.status = 'available';
+        if (record.invalidBundle) this.state.message = InvalidMacBundle.messageForUser;
+      }
     } catch { /* An absent or stale cache must not block the application. */ }
   }
-  private supported() { return this.options.platform === 'darwin' && ['arm64', 'x64'].includes(this.options.arch); }
   start() {
     if (this.timer || this.stopped) return;
     void this.check(false);
@@ -192,7 +195,7 @@ export class AppUpdates {
     try {
       const release = JSON.parse(await this.fetchText(API, 1024 * 1024));
       const tag = release.tag_name, version = typeof tag === 'string' ? tag.replace(/^v/, '') : '';
-      if (release.draft || release.prerelease || !stableVersion(version) || release.html_url !== releaseUrl(tag)) throw new Error('暂未取得可用的正式版本');
+      if (release.draft || release.prerelease || !stableVersion(version) || RETIRED_VERSIONS.has(version) || release.html_url !== releaseUrl(tag)) throw new Error('暂未取得可用的正式版本');
       this.state.lastCheckedAt = Date.now();
       if (!newerVersion(version, this.options.currentVersion)) {
         this.record = undefined; this.downloadedPath = undefined;
@@ -204,7 +207,7 @@ export class AppUpdates {
         const asset = matches.length === 1 ? matches[0] : undefined;
         const manifests = assets.filter((entry: any) => entry.name === manifestName(name));
         let manifest: ReleaseManifest | undefined;
-        if (asset && this.supported() && this.releaseKey && manifests.length === 1 && manifests[0].size <= 4096) {
+        if (name && asset && this.releaseKey && manifests.length === 1 && manifests[0].size <= 4096) {
           const text = await this.fetchText(manifests[0].browser_download_url, 4096);
           let parsed: unknown;
           try { parsed = JSON.parse(text); } catch { /* A malformed manifest cannot authorize a download. */ }
@@ -212,12 +215,13 @@ export class AppUpdates {
               (asset.digest == null || (typeof asset.digest === 'string' && asset.digest.toLowerCase() === `sha256:${parsed.sha256}`))) manifest = parsed;
         }
         if (!manifest || this.record?.info.version !== version || this.record.manifest?.sha256 !== manifest.sha256) this.downloadedPath = undefined;
+        const invalidBundle = this.record?.invalidBundle && !!manifest && this.record.manifest?.sha256 === manifest.sha256;
         this.record = { info: { version, name, size: asset?.size || 0, url: releaseUrl(tag),
           notes: typeof release.body === 'string' ? release.body.slice(0, 8000) : '',
           publishedAt: typeof release.published_at === 'string' ? release.published_at : '',
-          downloadable: !!manifest && this.supported() }, assetUrl: asset?.browser_download_url || '', manifest };
-        const message = !this.supported() ? '请前往 GitHub 发布页下载适用于此系统的安装包' :
-          !asset ? '此版本没有适用于此 Mac 的安装包，可在 GitHub 项目页查看发布信息' :
+          downloadable: !!manifest && !invalidBundle }, assetUrl: asset?.browser_download_url || '', manifest, invalidBundle };
+        const message = invalidBundle ? InvalidMacBundle.messageForUser : !name ? '请前往 GitHub 发布页查看适用于此系统的安装包' :
+          !asset ? '此版本没有适用于当前系统和架构的安装包，可在 GitHub 项目页查看发布信息' :
           !manifest ? '此版本缺少有效的发布者签名，可在 GitHub 项目页查看发布信息' : undefined;
         this.changed({ status: this.downloadedPath ? 'downloaded' : 'available', message });
       }
@@ -315,20 +319,49 @@ export class AppUpdates {
     this.failDownload(active, '已取消下载');
     this.changed({ status: 'available', message: undefined, errorStage: undefined });
   }
-  async openDownloaded() {
+  async prepareInstall(): Promise<UpdateHandoff> {
     const file = this.downloadedPath, record = this.record;
-    let message: string | undefined;
-    try {
-      if (!record?.manifest || !this.ownedFile(file, record.info.name)) message = '安装包不存在，请重新下载';
-      else if (fs.statSync(file).size !== record.info.size || await sha256(file) !== record.manifest.sha256) message = '安装包已改变，请重新下载';
-    } catch { message = '安装包无法读取，请重新下载'; }
-    if (message || !file) {
-      this.downloadedPath = undefined;
-      this.changed({ status: 'available', message, errorStage: undefined });
-      try { this.save(); } catch { /* The invalid in-memory path is already cleared. */ }
+    const invalidate = (message: string): never => {
+      if (this.record === record && this.downloadedPath === file) {
+        this.downloadedPath = undefined;
+        this.changed({ status: 'available', message, errorStage: undefined });
+        try { this.save(); } catch { /* The invalid in-memory path is already cleared. */ }
+      }
       throw new Error(message);
+    };
+    if (!record || !this.ownedFile(file, record.info.name)) return invalidate('安装包不存在，请重新下载');
+    const manifest = record.manifest;
+    if (!verifyReleaseManifest(manifest, record.info, this.releaseKey)) return invalidate('安装包签名无效，请重新下载');
+    const stage = privateInstallStage(), image = path.join(stage, record.info.name);
+    try {
+      // Bind the download to one regular file; only the copy inside the private directory is ever handed off.
+      const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
+      const input = await fs.promises.open(file, flags).catch(() => invalidate('安装包无法读取，请重新下载'));
+      try {
+        const stat = await input.stat();
+        if (!stat.isFile() || stat.size !== manifest.size) return invalidate('安装包已改变，请重新下载');
+        await pipeline(input.createReadStream({ end: manifest.size - 1 }),
+          fs.createWriteStream(image, { flags: 'wx', mode: 0o600 }));
+      } finally { await input.close(); }
+      if (await sha256(image) !== manifest.sha256) return invalidate('安装包已改变，请重新下载');
+    } catch (error) { await fs.promises.rm(stage, { recursive: true, force: true }); throw error; }
+    const handoff = await prepareHandoff(image, this.options).catch(error => {
+      if (error instanceof InvalidMacBundle && this.record === record) {
+        record.invalidBundle = true;
+        record.info.downloadable = false;
+        return invalidate(error.message);
+      }
+      throw error;
+    });
+    if (this.record !== record || this.downloadedPath !== file) {
+      await handoff.dispose();
+      throw new Error('更新版本已变化，请重试');
     }
-    const error = await shell.openPath(file);
-    if (error) throw new Error('无法打开安装包，请在下载目录中手动打开');
+    if (this.state.installMode !== handoff.mode) {
+      await handoff.dispose();
+      this.changed({ installMode: handoff.mode });
+      throw new Error('安装位置的权限已改变，请确认当前安装方式后重试');
+    }
+    return handoff;
   }
 }

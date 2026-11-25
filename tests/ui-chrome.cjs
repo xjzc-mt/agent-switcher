@@ -1,24 +1,46 @@
-const outputPath = require('./ui-support.cjs');
-const {app,BrowserWindow,ipcMain}=require('electron');
+const suite = require('./ui-support.cjs');
+const assert = require('node:assert/strict');
 const {EventEmitter}=require('node:events');
 const {createTrayPanel}=require('../dist/tray-menu.js');
-const assert=require('node:assert/strict');
-const fs=require('node:fs');
-const path=require('node:path');
-const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-app.whenReady().then(async()=>{
-  const window=new BrowserWindow({width:880,height:700,show:false,titleBarStyle:'hiddenInset',trafficLightPosition:{x:18,y:18},webPreferences:{preload:path.join(__dirname,'fixture-preload.cjs'),contextIsolation:true,backgroundThrottling:false,additionalArguments:['--test-tray-menu']}});
-  const tray = new EventEmitter();
-  tray.setIgnoreDoubleClickEvents = () => {};
-  tray.getBounds = () => ({ x:320, y:0, width:20, height:24 });
-  let snapshot;
-  const host = createTrayPanel(tray, () => snapshot, command => window.webContents.send('tray-command', command));
-  ipcMain.on('fixture-tray-state', (_event, next) => { snapshot = next; host.update(); });
-  const run=s=>window.webContents.executeJavaScript(s);
-  const errors=[];window.webContents.on('console-message',e=>{if(e.level==='error')errors.push(e.message);});
-  const capture=async name=>fs.writeFileSync(outputPath(`${name}.png`),(await window.webContents.capturePage()).toPNG());
-  try{
-    await window.loadFile(path.join(__dirname,'../renderer/index.html'));await pause(200);
+const { BrowserWindow, ipcMain } = require('electron');
+
+module.exports = suite(
+  { width: 880, height: 700, titleBarStyle: 'hiddenInset', trafficLightPosition: {x: 18, y: 18}, additionalArguments: ['--test-tray-menu'] },
+  async ({ window, run, load, pause, capture }) => {
+    const tray = new EventEmitter();
+    tray.setIgnoreDoubleClickEvents = () => {};
+    tray.getBounds = () => ({ x:320, y:0, width:20, height:24 });
+    let snapshot;
+    const host = createTrayPanel(tray, () => snapshot, command => window.webContents.send('tray-command', command));
+    const onSnapshot = (_event, next) => { snapshot = next; host.update(); };
+    ipcMain.on('fixture-tray-state', onSnapshot);
+    window.once('closed', () => ipcMain.off('fixture-tray-state', onSnapshot));
+
+    await load();
+    if (process.platform === 'darwin') {
+      const { Menu } = require('electron');
+      const previous = Menu.getApplicationMenu();
+      try {
+        const send = operation => window.webContents.send('tray-command', {action:'menu', operation});
+        require('../dist/application-menu').installApplicationMenu(send, () => {}, () => {}, true);
+        const menu = Menu.getApplicationMenu();
+        assert.equal(menu.getMenuItemById('refresh').accelerator,'Cmd+R');
+        const roles = menu.items.flatMap(item => item.submenu?.items.map(entry => entry.role?.toLowerCase()) || []);
+        assert.ok(roles.includes('copy') && roles.includes('paste') && !roles.includes('reload') && !roles.includes('toggledevtools'));
+        await run('window.menuDocument = document; true');
+        menu.getMenuItemById('refresh').click();
+        const refreshed = "window.testApi.calls().some(c=>c.method==='refresh' && c.force)";
+        for (let i=0; i<50 && !await run(refreshed); i++) await pause(20);
+        assert.ok(await run('window.menuDocument === document && ' + refreshed));
+        menu.getMenuItemById('settings').click();
+        for (let i=0; i<50 && await run('currentTab') !== 'settings'; i++) await pause(20);
+        assert.equal(await run('currentTab'),'settings');
+        await run("selectTab('codex');openSaveModal('codex')");
+        menu.getMenuItemById('agy').click(); await pause(50);
+        assert.equal(await run('currentTab'),'codex');
+        await run('closeSaveModal()');
+      } finally { Menu.setApplicationMenu(previous); }
+    }
     window.webContents.debugger.attach('1.3');
     await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled',{enabled:true});
     await run(`localStorage.clear();accountLayout='cards';applySidebar();renderWorkbench();window.originalCurrentHeight=document.querySelector('.active-session-card').offsetHeight;`);
@@ -61,68 +83,93 @@ app.whenReady().then(async()=>{
     await run(`showToast('连接失败，请稍后再试','error')`);assert.equal(await run(`document.querySelector('.toast-item').getAttribute('role')`),'alert');
     await run(`document.querySelector('.toast-close').click()`);await pause(180);
     await run(`window.providerTestApi.native(); window.accountTestApi.alias('个人主力','私人-demo@example.test');
-      for(let i=0;i<3;i++) window.accountTestApi.alias('团队账号','团队联合测试账号'.repeat(4)+i); loadStatus()`);
+      for(let i=0;i<16;i++) window.accountTestApi.alias('团队账号','团队联合测试账号'.repeat(4)+i); loadStatus()`);
+    await run(`{
+      const a=agentsData[0], sign=a.profiles[1].meta.snapshot=structuredClone(a.profiles[1].meta.snapshot);
+      a.status=structuredClone(a.status);
+      for(const status of [a.status,sign]) {status.plan='pro';delete status.quota.primaryWindow;status.quota.secondaryWindow.usedPercent=91;}
+      const statuses=a.profiles.slice(2,7).map(p=>p.meta.snapshot=structuredClone(p.meta.snapshot));
+      [0,13,91,100].forEach((used,i)=>statuses[i].quota.primaryWindow.usedPercent=used);
+      delete statuses[0].quota.secondaryWindow;
+      statuses[2].fetchedAt=new Date(0).toISOString();statuses[4].quota.secondaryWindow.windowMins=43200;
+      syncTray(true);
+    }`);
     let panel;
     const panelRun = code => panel.webContents.executeJavaScript(code);
-    async function pointAt(selector) {
-      const point = await panelRun(`(() => {
-        const el = document.querySelector(${JSON.stringify(selector)});
-        if (el.parentElement.id === 'choices') el.parentElement.scrollTop = el.offsetTop - el.parentElement.offsetTop;
-        const r = el.getBoundingClientRect();
-        return {x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2)};
-      })()`);
-      panel.webContents.sendInputEvent({type:'mouseMove', ...point});
-      return point;
+    const key = name => {
+      panel.webContents.sendInputEvent({type:'keyDown',keyCode:name});
+      panel.webContents.sendInputEvent({type:'keyUp',keyCode:name});
+    };
+    async function panelUntil(expression) {
+      for(let i=0;i<80;i++) { if(await panelRun(expression)) return; await pause(25); }
+      assert.fail('Panel did not reach ' + expression);
     }
-    async function hoverSwitch() {
+    async function openPanel() {
       if (!panel?.isVisible()) tray.emit('click', {}, tray.getBounds());
       for (let i=0; i<80; i++) {
         panel = BrowserWindow.getAllWindows().find(w => w.webContents.getURL().endsWith('/tray.html'));
-        if (panel?.isVisible() && await panelRun('!!document.querySelector(".nickname")')) break;
+        if (panel?.isVisible()) break;
         await pause(25);
       }
-      assert.ok(panel?.isVisible(), 'Tray panel did not open');
-      await pointAt('#switch');
-      for (let i=0; i<40 && !await panelRun('!!document.querySelector(".alternative")?.offsetHeight');i++) await pause(25);
-      assert.ok(await panelRun('document.querySelector("#content").offsetHeight && document.querySelector("#choices").offsetHeight'), 'Hover should keep the account overview visible');
-      for (let i=0; i<40 && !await panelRun('innerHeight >= Math.ceil(document.querySelector("#panel").getBoundingClientRect().height)');i++) await pause(25);
-      assert.ok(await panelRun('innerHeight >= document.querySelector("#choices").getBoundingClientRect().bottom && scrollY === 0'), 'The native window must expose the expanded list');
+      assert.ok(panel?.isVisible());
+      await panelUntil("!!document.querySelector('.alternative') && innerHeight===document.querySelector('#panel').offsetHeight");
     }
-    await hoverSwitch();
-    const choices = await panelRun('Array.from(document.querySelectorAll(".alternative"), el=>el.textContent)');
-    assert.equal(choices.length,7); assert.match(choices[0],/82%/);
-    assert.doesNotMatch(choices.join(' '), /@example\.test/);
-    const narrow = await panelRun(`(() => {
-      const row = [...document.querySelectorAll('.alternative')].find(el=>el.textContent.includes('团队联合测试账号'));
-      const name = row.querySelector('.alt-name'), quota = row.querySelector('.alt-detail');
-      return {width:innerWidth, scroll:document.documentElement.scrollWidth, clipped:name.scrollWidth>name.clientWidth && name.clientWidth>0,
-        quotaVisible:quota.scrollWidth<=quota.clientWidth && quota.getBoundingClientRect().right<=innerWidth, quota:quota.textContent};
+    await openPanel();
+    const geometry = await panelRun(`(() => {
+      const box = selector=>document.querySelector(selector).getBoundingClientRect();
+      const rows=[...document.querySelectorAll('.alternative')], headers=[...document.querySelectorAll('.choice-heading span')].slice(1);
+      const pro=rows.find(row=>row.querySelector('.unlimited')), name=rows.find(el=>el.textContent.includes('团队联合测试账号')).querySelector('.alt-name');
+      const chips=[...document.querySelectorAll('.chip[data-tone]')];
+      return {count:rows.length,width:document.documentElement.scrollWidth,height:innerHeight,visibleRows:box('#choices').height/box('.alternative').height,
+        aligned:rows.every(row=>[...row.querySelectorAll('.chip')].every((chip,i)=>chip.offsetLeft===headers[i].offsetLeft)),
+        chipSize:chips.every(chip=>chip.offsetWidth===44&&chip.offsetHeight===19), tones:[...new Set(chips.map(chip=>chip.dataset.tone))].sort(),
+        nameClipped:name.scrollWidth>name.clientWidth, pro:[pro.querySelector('.alt-identity .plan').textContent,pro.children[1].textContent,pro.children[2].textContent],
+        limit:[box('.unlimited').width,box('.unlimited').height,getComputedStyle(pro.children[1]).borderStyle],
+        missing:rows.some(row=>row.lastChild.textContent==='—'), boundary:!!document.querySelector('.alternative.boundary'),
+        unusual:document.querySelector('.unusual').textContent, private:!document.body.innerText.includes('@'),
+        hero:box('#current').height, amount:getComputedStyle(document.querySelector('.amount')).fontSize, meter:box('.meter').height,
+        reset:document.querySelector('.period-reset').textContent};
     })()`);
-    assert.deepEqual(narrow, {width:260,scroll:260,clipped:true,quotaVisible:true,quota:'5h 10% · 7d 40%'});
+    assert.equal(geometry.count,20);assert.equal(geometry.height,312);assert.equal(geometry.width,260);assert.equal(geometry.visibleRows,5.5);
+    assert.ok(geometry.aligned && geometry.chipSize && geometry.nameClipped && geometry.private);
+    assert.deepEqual(geometry.tones,['ample','cached','empty','low','normal']);
+    assert.deepEqual(geometry.pro,['PRO','不限','9%']);assert.deepEqual(geometry.limit,[44,18,'dashed']);
+    assert.ok(geometry.missing && geometry.boundary);assert.match(geometry.unusual,/30d 40%/);
+    assert.equal(geometry.amount,'17px');assert.equal(geometry.meter,4);assert.match(geometry.reset,/天/);
+    await run(`selectTab('settings');document.querySelector('[name=showResetTimes][value=false]').click()`);
+    await panelUntil("document.querySelector('.period-reset').textContent.includes(':')");
+    snapshot.windowClosed=true;host.update();
+    await panelUntil("!!document.querySelector('.identity .cached') && !document.querySelector('[data-tone]:not([data-tone=cached])')");
+    delete snapshot.windowClosed;host.update();await run(`selectTab('codex')`);
+    await panelRun("document.querySelector('#codex').focus()");key('End');
+    await panelUntil("document.querySelector('#agy').getAttribute('aria-selected')==='true' && document.querySelectorAll('.period').length===2");
+    assert.equal(await panelRun("document.querySelector('#current').offsetHeight"),geometry.hero);
+    key('Home');await panelUntil("document.querySelector('#codex').getAttribute('aria-selected')==='true'");
+    key('Escape');
+    for(let i=0;i<40 && panel.isVisible();i++)await pause(25);
+    assert.equal(panel.isVisible(),false);
+    await openPanel();
     const chosen = snapshot.groups.find(g=>g.id==='codex').alternates.at(-1).name;
     async function chooseLast() {
-      const point = await pointAt('.alternative:last-of-type');
-      await pause(150);
-      assert.ok(await panelRun('document.querySelector(".alternative:last-of-type").matches(":hover")'), 'Moving into the list must keep it open');
-      const previous = await panelRun('document.querySelector(".alternative:last-of-type").focus(); document.querySelector("#choices").scrollTop');
-      assert.ok(previous > 0, 'The last profile should be below the scroll fold');
-      host.update();
-      await pause(50);
-      assert.equal(await panelRun('document.activeElement.matches(".alternative:last-of-type") && document.querySelector("#choices").scrollTop'), previous);
-      panel.webContents.sendInputEvent({type:'mouseDown', button:'left', clickCount:1, ...point});
-      panel.webContents.sendInputEvent({type:'mouseUp', button:'left', clickCount:1, ...point});
+      await panelRun("document.querySelector('#codex').focus()");
+      key('Down');await panelUntil("document.activeElement.matches('.alternative:first-child')");
+      key('Up');await panelUntil("document.activeElement.matches('.alternative:last-child') && document.querySelector('#choices').scrollTop>0");
+      const previous = await panelRun("document.querySelector('#choices').scrollTop");
+      host.update(); await pause(50);
+      assert.equal(await panelRun("document.activeElement.matches('.alternative:last-child') && document.querySelector('#choices').scrollTop"),previous);
+      const point=await panelRun(`(()=>{const r=document.activeElement.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);
+      for (const type of ['mouseDown','mouseUp']) panel.webContents.sendInputEvent({type,button:'left',clickCount:1,...point});
     }
     await run(`openAccountDetails('codex','个人主力')`);
-    await chooseLast();
+    await chooseLast(); await pause(50);
     assert.equal(await run(`!!document.querySelector('dialog[open]') && !window.testApi.calls().some(c=>c.method==='switch')`), true);
     await run(`document.querySelector('.account-modal[open]').dismissAccountDialog()`);
     await run(`selectTab('agy')`);
-    await hoverSwitch(); await chooseLast();
+    await chooseLast();
     for (let i=0;i<50 && snapshot.groups[0].current?.name !== chosen;i++) await pause(20);
     assert.equal(snapshot.groups[0].current?.name, chosen);
     assert.deepEqual(await run(`window.testApi.calls().filter(c=>c.method==='switch')`), [{method:'switch',id:'codex',name:chosen}]);
     assert.equal(await run('currentTab'), 'agy', 'A tray switch must preserve the main window platform');
-    await run(`localStorage.clear()`);assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({passed:true,sidebarStates:2,longCreditFits:true,topFeedback:true,modalFeedback:true,noFocusSteal:true,autoDismiss:true,trafficLightClearance:true}));app.exit(0);
-  }catch(error){console.error(error);fs.writeFileSync(outputPath('agent-switcher-chrome-error.png'),(await window.webContents.capturePage()).toPNG());app.exit(1);}
-});
+    await run(`localStorage.clear()`);
+  },
+);

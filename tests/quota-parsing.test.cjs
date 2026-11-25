@@ -5,6 +5,18 @@ const { parseQuota } = require('../dist/agents/codex');
 const short = { usedPercent: 60, windowDurationMins: 300, resetsAt: 2000000000 };
 const weekly = { usedPercent: 33, windowDurationMins: 10080, resetsAt: 2000400000 };
 
+test('Antigravity shows an Ultra multiplier only for a matching paid tier ID and name', () => {
+  const { antigravityPlan } = require('../dist/antigravity-cli');
+  const { planInfo } = require('../renderer/account-policy');
+  const name = 'Google AI Ultra';
+  assert.equal(antigravityPlan({ name, id: 'g1-ultra-lite-tier' }), 'Google AI Ultra 5×');
+  assert.equal(antigravityPlan({ name, id: 'g1-ultra-tier' }), 'Google AI Ultra 20×');
+  assert.equal(planInfo({ plan: antigravityPlan({ name, id: 'g1-ultra-tier' }) }, 'agy').label, 'Ultra 20×');
+  assert.equal(antigravityPlan({ name, id: 'future-ultra-tier' }), name);
+  assert.equal(antigravityPlan({ name }), name);
+  assert.equal(antigravityPlan({ name: 'Enterprise', id: 'g1-ultra-tier' }), 'Enterprise');
+});
+
 test('CLI status reports a failed platform independently and shows Antigravity quota per model group', async t => {
   const accounts = require('../dist/accounts');
   const { runStatus } = require('../dist/commands/status');

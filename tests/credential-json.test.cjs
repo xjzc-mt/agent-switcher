@@ -5,15 +5,17 @@ const {parseCredentialDocument:document}=require('../dist/credential-document');
 const native=name=>({name,auth_mode:'chatgpt',OPENAI_API_KEY:null,tokens:{access_token:'access-'+name,refresh_token:'refresh-'+name,account_id:name}});
 const a=native('A'),b=native('B'),ja=JSON.stringify(a),jb=JSON.stringify(b);
 const extract=text=>document(Buffer.from(text),'codex').entries;
-const two=text=>assert.deepEqual(extract(text).map(e=>JSON.parse(e.data).tokens.account_id),['A','B']);
+const two=(text,format)=>assert.deepEqual(extract(text).map(e=>JSON.parse(e.data).tokens.account_id),['A','B'],format);
 
-for(const [name,text] of [
- ['comma-separated objects',ja+',\n'+jb],
- ['JSON text sequence','\x1e'+ja+'\n\x1e'+jb],
- ['multiple JSON blocks','```json\n'+ja+'\n```\n\n```json\n'+jb+'\n```'],
- ['tilde-fenced JSONL','~~~jsonl\n'+ja+'\n'+jb+'\n~~~'],
- ['wrapped JSON Lines string',JSON.stringify({payload:ja+'\n'+jb})],
-]) test('account boundaries: '+name,()=>two(text));
+test('record delimiters preserve the two account boundaries', () => {
+  for (const [format, text] of [
+    ['comma-separated objects',ja+',\n'+jb],
+    ['JSON text sequence','\x1e'+ja+'\n\x1e'+jb],
+    ['multiple JSON blocks','```json\n'+ja+'\n```\n\n```json\n'+jb+'\n```'],
+    ['tilde-fenced JSONL','~~~jsonl\n'+ja+'\n'+jb+'\n~~~'],
+    ['wrapped JSON Lines string',JSON.stringify({payload:ja+'\n'+jb})],
+  ]) two(text, format);
+});
 
 test('valid JSON always retains its original structure, even with delimiter-like string contents',()=>{
  const special='string }{ , // /* */ ] [ \\" \\\\ ```json\n';

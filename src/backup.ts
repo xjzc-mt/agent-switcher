@@ -1,3 +1,4 @@
+import { importPool } from './import-pool';
 import fs from 'fs';
 import path from 'path';
 import { randomBytes, scrypt, createCipheriv, createDecipheriv } from 'crypto';
@@ -5,9 +6,9 @@ import { buffer } from 'stream/consumers';
 import { promisify, isDeepStrictEqual } from 'util';
 import { ZipFile } from 'yazl';
 import unzipper from 'unzipper';
-import { isSameIdentity, resolveAgent, credentialUpdateTarget, availableCredentialUpdateTarget, replaceAccountCredentialsLocked, updateAccountCredentials, CredentialUpdateTarget } from './accounts';
-import type { Identity } from './agents/base';
-import { STORE_DIR, listProfiles, profileDir, profileExists, profileNameKey, readProfileMeta, withStoreLock, validateName } from './store';
+import { isSameIdentity, resolveAgent, credentialUpdateTarget, availableCredentialUpdateTarget, replaceAccountCredentialsLocked, updateAccountCredentials, CredentialUpdateTarget, withProfileCredentialLocks, preparedProfileCredentials } from './accounts';
+import type { BaseAgent, Identity } from './agents/base';
+import { STORE_DIR, profileDir, profileExists, profileNameKey, readProfileMeta, validateName, validatePoolName } from './store';
 import { atomicWrite, ensureDir } from './utils';
 import { createTemporaryCredentials, removeTemporaryCredentials } from './temporary-credentials';
 import { parseCredentialDocument, type CredentialEntry } from './credential-document';
@@ -73,10 +74,25 @@ export async function decryptBackup(data: Buffer, password?: string): Promise<Bu
   throw new Error('密码不正确或备份文件已损坏');
 }
 export async function exportBackup(items: BackupItem[], password: string): Promise<Buffer> {
-  const files = await withStoreLock(async () => {
-    if (!Array.isArray(items) || !items.length) throw new Error('没有可导出的账号');
+  if (!Array.isArray(items) || !items.length) throw new Error('没有可导出的账号');
+  const profiles = items.map(({ agent, profile }) => ({ agent: resolveAgent(agent), profile }));
+  const files = await withProfileCredentialLocks(profiles, async () => {
     let size = 0;
     const selected = new Set<string>();
+    // The official client may have changed accounts since AGS last switched.
+    // All selected profiles compare with the same live observation.
+    const liveCredentials = new Map<BaseAgent, { bytes: Buffer | null } | { error: unknown }>();
+    const readCurrent = (agent: BaseAgent) => {
+      let observed = liveCredentials.get(agent);
+      if (!observed) {
+        try {
+          observed = { bytes: agent.readSwitchableCredentials().files[agent.authFiles[0]] };
+        } catch (error) { observed = { error }; }
+        liveCredentials.set(agent, observed);
+      }
+      if ('error' in observed) throw observed.error;
+      return observed.bytes;
+    };
     // Collect first, so a validation failure never leaves a live archive stream behind.
     const files: Array<{ name: string; data: Buffer }> = [];
     const collect = (name: string, data: Buffer) => {
@@ -86,24 +102,23 @@ export async function exportBackup(items: BackupItem[], password: string): Promi
       if (size > MAX_BACKUP) throw new Error('备份数据过大');
       files.push({ name, data });
     };
-    for (const item of items) {
-      const agent = resolveAgent(item.agent);
-      const dir = profileDir(agent.id, item.profile);
+    for (const { agent, profile } of profiles) {
+      const dir = profileDir(agent.id, profile);
       const stat = fs.statSync(dir, { bigint: true });
       const selectionKey = stat.ino ? `${stat.dev}:${stat.ino}` : fs.realpathSync(dir);
       if (selected.has(selectionKey)) throw new Error('重复选择了同一个导出账号');
       selected.add(selectionKey);
-      const credentials = agent.credentials(dir);
+      const credentials = preparedProfileCredentials(agent, profile, readCurrent);
       for (const [name, data] of Object.entries(credentials)) {
         if (data) {
-          collect(`${agent.id}/${item.profile}/${name}`, data);
+          collect(`${agent.id}/${profile}/${name}`, data);
           if (name === agent.authFiles[0]) parseCredentialJson(data.toString());
         }
       }
-      const meta = readProfileMeta(agent.id, item.profile);
+      const meta = readProfileMeta(agent.id, profile);
       const email = meta.email || agent.identity(dir, credentials)?.email;
       const metaBytes = Buffer.from(JSON.stringify({ label: meta.label, email, savedAt: meta.savedAt }));
-      collect(`${agent.id}/${item.profile}/_meta.json`, metaBytes);
+      collect(`${agent.id}/${profile}/_meta.json`, metaBytes);
     }
     return files;
   });
@@ -118,7 +133,8 @@ export async function exportBackup(items: BackupItem[], password: string): Promi
 export interface ParsedBackup {
   groups: Map<string, Map<string, Buffer>>;
   items: Array<BackupItem & { key: string; email?: string }>;
-  identities?: Map<string, Identity>;
+  identities: Map<string, Identity>;
+  skippedProfiles?: number;
 }
 export const isEncryptedBackup = (data: Buffer) => data.subarray(0, 4).equals(MAGIC_V1) || data.subarray(0, 4).equals(MAGIC_V2);
 
@@ -127,33 +143,38 @@ export async function parseCredentials(data: Buffer, agentId?: string, name?: st
   if (data.length > MAX_FILE) throw new Error('凭据文件过大');
   const doc = parseCredentialDocument(data, agentId);
   if (doc.collection || doc.entries.length !== 1) throw new Error('请选择单个账号的客户端凭据 JSON');
-  return parsedCredentialEntry(doc.entries[0], agentId, name, data);
+  const parsed = emptyCredentialBackup();
+  appendCredentialEntry(parsed, doc.entries[0], { name, original: data });
+  return parsed;
+}
+
+export function emptyCredentialBackup(): ParsedBackup {
+  return { groups: new Map(), items: [], identities: new Map() };
 }
 
 /** The document parser has already validated field names, aliases and per-account limits. */
-export function parsedCredentialEntry(entry: CredentialEntry, agentId?: string, name?: string, original?: Buffer): ParsedBackup {
-  if (entry.error || !entry.data) throw new Error(entry.error || '请提供完整的客户端凭据 JSON；单段 Session / Cookie 暂不支持');
+export function appendCredentialEntry(parsed: ParsedBackup, entry: CredentialEntry, options: { name?: string; original?: Buffer; key?: string }) {
+  const { name, original } = options;
+  if (entry.error || !entry.data || !entry.agent) throw new Error(entry.error || '请提供完整的客户端凭据 JSON；单段 Session / Cookie 暂不支持');
   const normalized = JSON.parse(entry.data.toString());
   let direct: unknown;
   if (original) {
     try { direct = JSON.parse(original.toString()); } catch { /* Wrapped or nonstandard input uses the normalized bytes. */ }
   }
   const stored = original && isDeepStrictEqual(direct, normalized) ? original : entry.data;
-  const detected = normalized.OPENAI_API_KEY || normalized.tokens ? 'codex' : normalized.claudeAiOauth ? 'claude' : normalized.token || normalized.refresh_token || normalized.access_token ? 'agy' : undefined;
-  if (!detected || (agentId && agentId !== detected)) throw new Error('无法识别该平台的客户端凭据；浏览器 Session / Cookie 不能直接作为 Agent 登录凭据');
-  const agent = resolveAgent(detected);
+  const agent = resolveAgent(entry.agent);
   const identity = agent.identityFromAuth(normalized);
   if (!identity) throw new Error(`${agent.label} 没有可用的认证凭据`);
   const profile = name?.trim() || entry.name || identity.email?.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 70) || `${agent.id}-import-${Date.now()}`;
   // This key stays in memory. New destinations are checked by installBackup; updates keep their existing name.
   validateName(profile, false);
-  const key = `${agent.id}/${profile}`;
+  const key = `${agent.id}/${options.key ?? profile}`;
   const files = new Map([[agent.authFiles[0], stored], ['_meta.json', Buffer.from(JSON.stringify({email:identity.email,savedAt:new Date().toISOString()}))]]);
-  return { groups: new Map([[key, files]]), items: [{key,agent:agent.id,profile,email:identity.email}], identities: new Map([[key, identity]]) };
-}
-
-export async function parseImport(data: Buffer): Promise<ParsedBackup> {
-  return data.subarray(0, 2).toString() === 'PK' ? parseBackup(data) : parseCredentials(data);
+  const item = { key, agent: agent.id, profile, email: identity.email };
+  parsed.groups.set(key, files);
+  parsed.identities.set(key, identity);
+  parsed.items.push(item);
+  return item;
 }
 
 const EOCD_SIGNATURE = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
@@ -235,19 +256,26 @@ export async function parseBackup(data: Buffer, password?: string): Promise<Pars
   const zip = await openZip.buffer(plainZip, { tailSize });
   if (zip.files.length > MAX_ENTRIES) throw new Error('备份文件包含过多条目');
   const groups = new Map<string, Map<string, Buffer>>();
+  const skippedProfiles = new Set<string>();
+  const legacyConfig = ['config.toml', 'settings.json', 'settings.local.json'];
   let size = 0;
   for (const entry of zip.files) {
     if (entry.type === 'Directory') continue;
     const parts = entry.path.split('/');
     if (parts.length !== 3) throw new Error('备份中存在非法路径');
     const [id, name, file] = parts;
-    const agent = resolveAgent(id);
     // Archive keys are inspected in memory. Legacy names can be corrected in the preview.
     validateName(name, false);
     const mode = entry.externalFileAttributes >>> 16;
     if ((mode & 0o170000) === 0o120000) throw new Error('备份不能包含符号链接');
+    // Skip archived accounts of the retired provider without opening their credential streams.
+    if (id === 'claude') {
+      if (file !== '.credentials.json' && file !== '_meta.json' && !legacyConfig.includes(file)) throw new Error('备份包含不支持的文件');
+      skippedProfiles.add(name);
+      continue;
+    }
+    const agent = resolveAgent(id);
     // Old configuration snapshots are intentionally not restored into working environments.
-    const legacyConfig = ['config.toml', 'settings.json', 'settings.local.json'];
     if (!agent.authFiles.includes(file) && file !== '_meta.json' && !legacyConfig.includes(file)) throw new Error('备份包含不支持的文件');
     if (entry.uncompressedSize > MAX_FILE) throw new Error('备份中的文件过大');
     const chunks: Buffer[] = [];
@@ -263,7 +291,7 @@ export async function parseBackup(data: Buffer, password?: string): Promise<Pars
     if (files.has(file)) throw new Error('备份包含重复文件');
     files.set(file, Buffer.concat(chunks)); groups.set(key, files);
   }
-  if (!groups.size) throw new Error('备份中没有账号');
+  if (!groups.size) throw new Error(skippedProfiles.size ? '备份中没有受支持的平台账号' : '备份中没有账号');
   const items: ParsedBackup['items'] = [];
   const identities = new Map<string, Identity>();
   for (const [key, files] of groups) {
@@ -283,7 +311,7 @@ export async function parseBackup(data: Buffer, password?: string): Promise<Pars
     identities.set(key, identity);
     items.push({ key, agent: id, profile: name, email: identity.email });
   }
-  return { groups, items, identities };
+  return { groups, items, identities, skippedProfiles: skippedProfiles.size };
 }
 
 export async function installBackup(parsed: ParsedBackup, keys: string[], names?: ReadonlyMap<string, string>, updates?: ReadonlyMap<string, CredentialUpdateTarget>): Promise<ImportResult> {
@@ -294,68 +322,54 @@ export async function installBackup(parsed: ParsedBackup, keys: string[], names?
   for (const key of keys) {
     const name = destinationNames.get(key)!;
     const update = updates?.get(key);
-    validateName(name, process.platform === 'win32' || !update || update.profile !== name);
+    validatePoolName(name, update?.profile === name);
     if (names) {
       const destination = `${key.split('/')[0]}/${profileNameKey(name)}`;
       if (destinations.has(destination)) throw new Error(`账号名称「${name}」重复，请修改后导入`);
       destinations.add(destination);
     }
   }
-  const groups = new Map(keys.map(key => [key, parsed.groups.get(key)!]));
-  return withStoreLock(async () => {
+  const entries = keys.map(key => {
+    const agent = resolveAgent(key.split('/')[0]), files = parsed.groups.get(key)!;
+    const id = agent.identityFromBytes(files.get(agent.authFiles[0]) ?? null)?.id;
+    if (!id) throw new Error(`${agent.label} 没有可用的认证凭据`);
+    return { key, agent, files, id };
+  });
+  return withProfileCredentialLocks([], async lockedIds => {
     ensureDir(STORE_DIR);
     const staging = createTemporaryCredentials('import', { store: true });
     const installed: string[] = [];
     const updated: string[] = [];
     const rollbackUpdates: Array<() => void> = [];
     const skipped: ImportResult['skipped'] = [];
-    const identities = new Map<string, Array<{ key: string; identity: Identity }>>();
-    const takenNames = new Map<string, Set<string>>();
+    const pool = importPool();
     let writer: Awaited<ReturnType<typeof createImportCredentialWriter>> | undefined;
     try {
       writer = await createImportCredentialWriter(staging);
-      const entries = [...groups.entries()];
-      for (const [index, [key, files]] of entries.entries()) {
-        const id = key.split('/')[0];
-        for (const [file, bytes] of files) {
-          atomicWrite(path.join(staging, id, String(index), file), bytes, writer);
-        }
+      for (const [index, { agent, files }] of entries.entries()) {
+        for (const [file, bytes] of files) atomicWrite(path.join(staging, agent.id, String(index), file), bytes, writer);
       }
       await writer.verifySystemKey();
-      for (const [index, [key]] of entries.entries()) {
-        const id = key.split('/')[0];
-        const original = destinationNames.get(key)!;
-        const agent = resolveAgent(id);
+      for (const [index, { key, agent }] of entries.entries()) {
+        const { id } = agent, original = destinationNames.get(key)!;
         const source = path.join(staging, id, String(index));
         const files = agent.readCredentials(source);
         const identity = agent.identity(source, files);
         if (!identity) throw new Error(`${agent.label} 没有可用的认证凭据`);
+        if (!lockedIds.has(identity.id)) throw new Error('待导入账号身份已变化，请重新解析凭据');
         const expected = updates?.get(key);
         if (expected && (expected.agent !== id || !isSameIdentity(agent.identity(profileDir(id, expected.profile)), expected.identity))) {
           throw new Error('待更新账号已变化，请重新解析凭据');
         }
-        if (!identities.has(id)) {
-          const profiles = listProfiles(id);
-          takenNames.set(id, new Set(profiles.map(profileNameKey)));
-          const saved = profiles.flatMap(name => {
-            try {
-              const identity = agent.identity(profileDir(id, name));
-              return identity ? [{ key: `${id}/${name}`, identity }] : [];
-            } catch { return []; }
-          });
-          identities.set(id, saved);
-        }
-        const saved = identities.get(id)!, taken = takenNames.get(id)!;
-        const duplicate = expected
-          ? saved.find(item => item.key === `${id}/${expected.profile}`)
-          : saved.find(item => isSameIdentity(item.identity, identity));
+        const { byIdentity, byProfile, names: taken } = pool(agent);
+        const duplicate = expected ? byProfile.get(expected.profile) : byIdentity.get(identity.id);
         if (duplicate) {
-          const profile = duplicate.key.slice(id.length + 1);
+          const profile = duplicate.profile;
           const target = (!updates || expected) && availableCredentialUpdateTarget(agent, profile);
           if (target) {
             const importWriter = writer.forReplacement(profileDir(id, profile));
-            const replacement = replaceAccountCredentialsLocked(expected || target, files, { importWriter });
-            rollbackUpdates.push(replacement.rollback);
+            const replacement = await replaceAccountCredentialsLocked(expected || target, files, { importWriter });
+            if (replacement.rollback) rollbackUpdates.push(replacement.rollback);
             updated.push(`${id}/${replacement.result.profile}`);
           } else skipped.push({ key, existing: duplicate.key });
           continue;
@@ -369,7 +383,9 @@ export async function installBackup(parsed: ParsedBackup, keys: string[], names?
         taken.add(profileNameKey(name));
         installed.push(`${id}/${name}`);
         // Include earlier imports in this batch, not only the initial pool.
-        saved.push({ key: `${id}/${name}`, identity });
+        const entry = { key: `${id}/${name}`, profile: name, source: 'batch' as const };
+        byIdentity.set(identity.id, entry);
+        byProfile.set(name, entry);
       }
       // A key can be revoked during installation too. Roll back while the store lock is held.
       await writer.verifySystemKey();
@@ -382,7 +398,7 @@ export async function installBackup(parsed: ParsedBackup, keys: string[], names?
       writer?.close();
       removeTemporaryCredentials(staging);
     }
-  });
+  }, entries.map(entry => entry.id));
 }
 
 export async function previewCredentialUpdate(data: Buffer, id: string, name: string) {
