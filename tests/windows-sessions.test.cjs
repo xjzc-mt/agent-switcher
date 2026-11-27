@@ -224,9 +224,11 @@ test('Windows native inventory reports disposable Codex and Antigravity CLI proc
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-session-test-'));
   t.after(() => fs.rmSync(directory, { recursive:true, force:true }));
   const system = path.join(process.env.SystemRoot,'System32');
+  const psEnv = { ...process.env, AGS_TEST_SIGNED_EXE: process.execPath };
+  delete psEnv.PSModulePath;
   const expected = cp.execFileSync(path.join(system,'WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-Command',
     '$sig = Get-AuthenticodeSignature -LiteralPath $env:AGS_TEST_SIGNED_EXE; if ($sig.Status -ne "Valid") { exit 1 }; $sig.SignerCertificate.GetNameInfo("SimpleName",$false)'],
-    {encoding:'utf8',timeout:20000,env:{...process.env,AGS_TEST_SIGNED_EXE:process.execPath}}).trim();
+    {encoding:'utf8',timeout:20000,env:psEnv}).trim();
   assert.ok(expected);
   assert.equal(await windows.desktopCommand(['publisher', process.execPath],10000),expected);
   const unsigned = require('../dist/windows-helper').windowsHelper('DesktopWindows');
