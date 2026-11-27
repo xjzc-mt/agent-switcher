@@ -500,7 +500,7 @@ test('zero-download GitHub release signing verifies commit, build workflow, and 
       return JSON.stringify([{ tag_name: `v${version}`, draft: true, target_commitish: target, assets }]);
     }
     if (cmd === 'gh' && args[0] === 'api' && args[1].includes('release-build.yml/runs')) {
-      return JSON.stringify({ workflow_runs: [{ head_sha: sha, conclusion }] });
+      return JSON.stringify({ workflow_runs: [{ head_sha: sha, status: 'completed', conclusion }] });
     }
     if (cmd === 'gh' && args[0] === 'release' && args[1] === 'upload') {
       for (const file of args.slice(args.indexOf('--clobber') + 1)) {

@@ -57,9 +57,9 @@ function signGithubRelease({ releaseTag, keyFile, commit, repo = 'xjzc-mt/agent-
     throw new Error(`Release ${tag} 构建提交 (${release.target_commitish}) 与预期提交 (${expectedSha}) 不一致`);
   }
 
-  const runsDoc = JSON.parse(exec('gh', ['api', `repos/${repo}/actions/workflows/release-build.yml/runs?head_sha=${expectedSha}&status=completed`], { encoding: 'utf8' }));
+  const runsDoc = JSON.parse(exec('gh', ['api', `repos/${repo}/actions/workflows/release-build.yml/runs?per_page=20`], { encoding: 'utf8' }));
   const runs = Array.isArray(runsDoc?.workflow_runs) ? runsDoc.workflow_runs : [];
-  if (!runs.some(r => String(r.head_sha || '').toLowerCase() === expectedSha && r.conclusion === 'success')) {
+  if (!runs.some(r => String(r.head_sha || '').toLowerCase() === expectedSha && r.status === 'completed' && r.conclusion === 'success')) {
     throw new Error(`未找到提交 ${expectedSha} 已成功的 release-build.yml 打包记录`);
   }
 
