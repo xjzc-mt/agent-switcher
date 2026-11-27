@@ -58,10 +58,18 @@
     if (agent !== 'codex' || planInfo(status, agent).key !== 'plus' || !ws.length) return ws;
     return columns(status).map((w, i) => w || { windowMins: i ? 10080 : 300 });
   }
+  const queryInvalidated = status => !!status?.authExpired || status?.state !== 'ok' || !Number.isFinite(Date.parse(status?.fetchedAt));
+  const resetPassed = (w, now) => Number.isFinite(w?.resetsAt) && w.resetsAt * 1000 <= now;
   function invalidated(status, now = Date.now(), agent = 'codex', samples = windows(status, agent)) {
-    const fetched = Date.parse(status?.fetchedAt);
-    return !!status?.authExpired || status?.state !== 'ok' || !Number.isFinite(fetched) ||
-      samples.some(w => Number.isFinite(w.resetsAt) && w.resetsAt * 1000 <= now);
+    return queryInvalidated(status) || samples.some(w => resetPassed(w, now));
+  }
+  function quotaWindowView(w, previouslyInvalidated = false, now = Date.now()) {
+    const invalidated = previouslyInvalidated || resetPassed(w, now);
+    if (!Number.isFinite(w?.usedPercent)) return { remaining: undefined, text: '—', invalidated, tone: undefined };
+    const value = remaining(w), percent = Math.round(value);
+    const text = value > 0 && percent === 0 ? '<1%' : percent + '%';
+    const tone = invalidated ? 'cached' : value === 0 ? 'zero' : percent <= 30 ? 'low' : percent >= 80 ? 'ample' : 'normal';
+    return { remaining: value, text, invalidated, tone };
   }
   function stale(status, now = Date.now(), agent = 'codex', interval = '5m') {
     const minutes = { '15m': 16, '30m': 31, manual: 30 }[interval] ?? 5;
@@ -111,7 +119,7 @@
     }
     return headroom(right) - headroom(left) || byName();
   }
-  const policy = { windows, remaining, resetText, modelBucket, plan, planInfo, columns, quotaSlots, invalidated, stale, resetExpiryDays, needsCredentialUpdate, quotaConfirmed, compare };
+  const policy = { windows, resetText, modelBucket, plan, planInfo, columns, quotaSlots, queryInvalidated, quotaWindowView, invalidated, stale, resetExpiryDays, needsCredentialUpdate, quotaConfirmed, compare };
   if (typeof module !== 'undefined' && module.exports) module.exports = policy;
   else root.AccountPolicy = policy;
 })(typeof globalThis === 'undefined' ? this : globalThis);

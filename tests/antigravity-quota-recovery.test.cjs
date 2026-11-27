@@ -15,7 +15,7 @@ const { profileDir, clearActiveProfile } = require('../dist/store');
 const { exportBackup, parseBackup, installBackup } = require('../dist/backup');
 const cli = require('../dist/antigravity-cli');
 const { recoverAntigravityQuota } = require('../dist/antigravity-quota-recovery');
-const agent = new AntigravityAgent(() => 'unified', true);
+const agent = new AntigravityAgent(() => 'unified', true, () => ({ state: 'ready' }));
 const macOS = { skip: process.platform !== 'darwin' };
 after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
@@ -58,7 +58,7 @@ test('a spare resumes a 1.0.1 rotation after restart, even if the first pool com
   assert.deepEqual(fs.readFileSync(cli.cliTokenPath(pending)), next);
   writer.mock.restore();
   fs.writeFileSync(cli.cliTokenPath(pending), credential(email,'unexpected',expires(90000)));
-  assert.throws(() => recoverAntigravityQuota(agent,email,original,{
+  assert.throws(() => recoverAntigravityQuota(email,original,{
     read: () => agent.readCredentials(dir)[file], write: () => assert.fail('stored a replaced output'),
   }), /无法确认/);
   fs.writeFileSync(cli.cliTokenPath(pending), next);
@@ -70,6 +70,29 @@ test('a spare resumes a 1.0.1 rotation after restart, even if the first pool com
   });
   assert.equal((await refreshAccount(agent,'spare',true)).state,'ok');
   assert.equal(fs.existsSync(pending),false);
+});
+
+test('a sealed email transition recovers after the pool write and loss of the CLI home', macOS, () => {
+  const lifecycle = require('../dist/temporary-credentials');
+  const { bindNativeTokenIdentity, nativeTokenIdentity, parseNativeToken } = require('../dist/antigravity-native');
+  for (const gained of [false, true]) {
+    const email = 'receipt@example.test', grant = 'receipt-' + gained;
+    const input = credential(gained ? undefined : email, grant, '2000-01-01T00:00:00Z');
+    const raw = credential(gained ? email : undefined, grant, '2030-01-01T00:00:00Z');
+    const before = parseNativeToken(input), id = nativeTokenIdentity(before);
+    const stored = bindNativeTokenIdentity(raw, before);
+    const directory = lifecycle.createTemporaryCredentials('agy-quota');
+    lifecycle.markTemporaryCredentialsPending(directory, id, grant, input);
+    lifecycle.withTemporaryProcess(directory, () => spawnSync(process.execPath, ['-e',''], { detached:true }));
+    lifecycle.recordAntigravityQuotaOutput(directory, id, raw, stored);
+    fs.rmSync(directory, { recursive:true });
+    const result = recoverAntigravityQuota(email, stored, {
+      read: () => stored, write: () => assert.fail('the pool already contains the confirmed output'),
+    });
+    assert.equal(result.pending, true);
+    assert.deepEqual(result.bytes, stored);
+    assert.equal(lifecycle.pendingAntigravityQuota(email, grant, stored), undefined);
+  }
 });
 
 test('a marker before launch is recoverable; a launched query with no provable output retains its input', macOS, async t => {
@@ -91,7 +114,7 @@ test('a marker before launch is recoverable; a launched query with no provable o
   const marker=path.join(unresolved,'.ags-temporary-owner.json'), owner=JSON.parse(fs.readFileSync(marker));
   for(const override of [{pid:process.pid},{launching:true}]) {
     fs.writeFileSync(marker,JSON.stringify({...owner,...override}));
-    assert.throws(()=>recoverAntigravityQuota(agent,email,original,{read:()=>original,write:()=>assert.fail()}),
+    assert.throws(()=>recoverAntigravityQuota(email,original,{read:()=>original,write:()=>assert.fail()}),
       error=>error.needsAuthorization===true);
   }
 });
@@ -141,6 +164,12 @@ test('switch and backup each recover the same successor on first use, including 
     const directory = interrupted(email, 'old', next);
     let archive;
     if (operation === 'switch') {
+      const checkMigration = t.mock.method(agent, 'needsFileMigration', bytes => bytes.equals(next));
+      assert.equal((await accounts.previewTraySwitch(agent, profile)).state.migration, true);
+      assert.deepEqual(agent.credentials(profileDir('agy', profile))[file], original);
+      assert.deepEqual(agent.credentials(profileDir('agy', profile + '-alias'))[file], alias);
+      assert.ok(fs.existsSync(directory));
+      checkMigration.mock.restore();
       await useAccount(agent, profile);
       assert.deepEqual(live, next);
     } else archive = await exportOne(profile);
@@ -175,9 +204,10 @@ test('switch and backup each recover the same successor on first use, including 
   });
   const query = refreshAccount(agent, profile, true);
   await started.promise;
-  const switching = useAccount(agent, profile);
+  const preview = accounts.previewTraySwitch(agent, profile);
   gate.resolve();
-  await Promise.all([query, switching]);
+  const [, { state, recheck }] = await Promise.all([query, preview]);
+  await useAccount(agent, profile, { recheckConfirmation: recheck, expectedCurrentRevision: state.currentRevision });
   assert.deepEqual(live, next);
   assert.equal(JSON.parse(agent.credentials(profileDir('agy', 'first-switch-other'))[file]).token.refresh_token, 'independent');
 

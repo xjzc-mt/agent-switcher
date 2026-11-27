@@ -19,7 +19,7 @@ module.exports = suite(
         return {expired:expired.querySelector('.auth-expired')?.textContent,expiredColor:getComputedStyle(expired.querySelector('.auth-expired')).color,
           expiredQuotas:expired.querySelectorAll('.quota-cell,.credit-corner,.credit-badge,.reset-ticket').length,
           action:expired.querySelector('.card-actions button').dataset.action,
-          warning:!!cached.querySelector('.account-query-warning'),cachedQuotas:cached.querySelectorAll('.quota-cell.cached').length,
+          warning:!!cached.querySelector('.account-query-warning'),cachedQuotas:cached.querySelectorAll('.quota-cell[data-tone="cached"]').length,
           missing:missing.querySelector('.query-failed')?.textContent,missingColor:getComputedStyle(missing.querySelector('.query-failed')).color,
           overflow:[expired,cached,missing].some(e=>e.scrollWidth>e.clientWidth+1)};
       })()`);

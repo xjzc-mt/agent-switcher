@@ -1,6 +1,7 @@
 import { withKeyCreationLock } from './file-lock';
 import { hasUnsafeParent, readRegularFile, replacePrivateFile } from './private-files';
 import { agentMetadata } from './agents/metadata';
+import { checkWindowsHelperError, windowsHelper, WindowsHelperError } from './windows-helper';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -62,13 +63,14 @@ function systemCommand(command: string, args: string[], input?: string): string 
   return execFileSync(command, args, { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000, maxBuffer: 65536 }).trim();
 }
 
-function dpapi(input: string, protect: boolean): string {
-  const method = protect ? 'Protect' : 'Unprotect';
-  const script = `Add-Type -AssemblyName System.Security; $ErrorActionPreference='Stop'; ` +
-    `$bytes=[Convert]::FromBase64String([Console]::In.ReadToEnd().Trim()); ` +
-    `$result=[Security.Cryptography.ProtectedData]::${method}($bytes,[Text.Encoding]::UTF8.GetBytes('${service}'),[Security.Cryptography.DataProtectionScope]::CurrentUser); ` +
-    `[Console]::Out.Write([Convert]::ToBase64String($result))`;
-  return systemCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], input);
+function dpapi(input: Buffer, protect: boolean): Buffer {
+  try {
+    return execFileSync(windowsHelper('AntigravityCredential'), [protect ? 'dpapi-protect' : 'dpapi-unprotect', service],
+      { input, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, timeout: 15000, maxBuffer: 65536 });
+  } catch (error) {
+    checkWindowsHelperError(error);
+    throw error;
+  }
 }
 
 const systemProvider: CredentialKeyProvider = {
@@ -80,7 +82,7 @@ const systemProvider: CredentialKeyProvider = {
       }
       if (process.platform === 'win32') {
         const bytes = readRegularFile(path.join(poolRoot(), '.vault-key.dpapi'));
-        return bytes ? decodeKey(dpapi(bytes.toString('base64'), false)) : null;
+        return bytes ? dpapi(bytes, false) : null;
       }
       if (process.platform === 'linux') {
         try {
@@ -93,7 +95,10 @@ const systemProvider: CredentialKeyProvider = {
         }
       }
       throw new Error('unsupported');
-    } catch { throw new Error('无法读取系统安全存储中的账号池密钥；请解锁系统密钥存储后重试，原凭据未修改'); }
+    } catch (error) {
+      if (error instanceof WindowsHelperError) throw error;
+      throw new Error('无法读取系统安全存储中的账号池密钥；请解锁系统密钥存储后重试，原凭据未修改');
+    }
   },
   create(key) {
     try {
@@ -101,13 +106,16 @@ const systemProvider: CredentialKeyProvider = {
         // No -U: never replace an existing key. stdin keeps key material out of process arguments.
         systemCommand('/usr/bin/security', ['-i'], `add-generic-password -s ${service} -a ${account} -w "${key.toString('base64')}"\n`);
       } else if (process.platform === 'win32') {
-        const bytes = Buffer.from(dpapi(key.toString('base64'), true), 'base64');
+        const bytes = dpapi(key, true);
         if (!bytes.length) throw new Error('empty');
         fs.writeFileSync(path.join(poolRoot(), '.vault-key.dpapi'), bytes, { flag: 'wx', mode: 0o600 });
       } else if (process.platform === 'linux') {
         systemCommand('secret-tool', ['store', '--label=AgentSwitcher credentials', 'application', service, 'account', account], key.toString('base64'));
       } else throw new Error('unsupported');
-    } catch { throw new Error('无法创建受系统保护的账号池密钥；请检查系统安全存储，未回退为明文保存'); }
+    } catch (error) {
+      if (error instanceof WindowsHelperError) throw error;
+      throw new Error('无法创建受系统保护的账号池密钥；请检查系统安全存储，未回退为明文保存');
+    }
   },
 };
 

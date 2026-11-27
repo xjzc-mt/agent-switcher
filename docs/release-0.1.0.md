@@ -19,4 +19,4 @@
 
 - **三平台构建与启动**：Apple Silicon DMG、Intel DMG 与 Windows x64 Setup EXE 均通过 GitHub Actions 原生构建、安装与启动校验，并由离线 Ed25519 私钥签发 `.signed.json` 清单。Mac 应用采用 ad-hoc 签名（未经 Apple 公证），Windows 安装程序未进行 Authenticode 签名。
 - **自动化与本机回归**：全套 TypeScript/脚本静态检查、Node 单元与集成测试、13 组 Electron 界面回归、官网构建及 `install.sh` 本地合成 DMG 安装替换验证全部通过。
-- **待独立真机补验边界**：macOS 独立用户下两个真实 Antigravity 账号往返切换（[AGS-0001](../issues/AGS-0001-antigravity-file-auth.md)），以及 Windows 10/11 真机上商店版 Codex 与 Antigravity 真实账号往返切换和 NSIS 跨版自升级（[AGS-0008](../issues/AGS-0008-windows-runtime-and-sandbox.md)、[AGS-0009](../issues/AGS-0009-windows-codex-desktop-support.md)）仍待实机签收。
+- **待独立真机补验边界**：macOS 独立用户下两个真实 Antigravity 账号往返切换（[AGS-0001](../issues/archive/AGS-0001-antigravity-file-auth.md)），以及 Windows 10/11 真机上商店版 Codex 与 Antigravity 真实账号往返切换和 NSIS 跨版自升级（[AGS-0008](../issues/AGS-0008-windows-runtime-and-sandbox.md)、[AGS-0009](../issues/AGS-0009-windows-codex-desktop-support.md)）仍待实机签收。

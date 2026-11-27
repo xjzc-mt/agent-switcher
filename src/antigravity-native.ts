@@ -10,7 +10,8 @@ import { KEYRING_PREFIX, type KeychainEntry, canWriteOfficialItem, keychainWrite
 import { canReadNormalQuotaLogin, keychainAccessBlocked, keychainAccessError, keychainWriteBlocked, readMacKeychainAsync } from './antigravity-mac';
 import { sharedCliSessions } from './temporary-credentials';
 import { windowsAntigravitySessions } from './windows-processes';
-import { fingerprint, jwtInfo } from './utils';
+import { differentEmail, fingerprint, jwtInfo, readBuffer } from './utils';
+import { listProfiles, profileDir } from './store';
 import { privateWindowsFile, writePrivateWindowsFile } from './antigravity-windows';
 import { beginSwitchRecovery, finishSwitchRecovery, hasPendingAntigravitySwitch, keepRecoveryForReview, recoverPendingSwitch, type RecoveryFile } from './antigravity-switch-recovery';
 import { credentialStateFromFiles, CredentialChangedError } from './credential-state';
@@ -23,7 +24,7 @@ const CLI_MARKER_FILE = 'antigravity-cli/cache/antigravity-keyring-unavailable';
 const MARKER_TTL_MS = 3600_000;
 export const NATIVE_TOKEN_FILE = agentMetadata.agy.credential;
 export interface NativeToken {
-  auth_method: string;
+  auth_method?: string;
   id_token?: string;
   id_token_email?: string;
   expiry?: string;
@@ -65,22 +66,45 @@ export function tokenEmail(token: NativeToken): string | undefined {
   return direct || fromJwt || undefined;
 }
 
+const personalFields = new Set(['auth_method', 'token', 'expiry', 'id_token', 'id_token_email']);
+
 export function parseNativeToken(bytes: Buffer): NativeToken {
   let value: NativeToken;
   try { value = JSON.parse(bytes.toString()); } catch { throw recoverableError('Antigravity 凭据格式无效'); }
   const refreshToken = value?.token?.refresh_token;
-  if (value?.auth_method !== 'consumer' || typeof refreshToken !== 'string' || !refreshToken.trim() || !tokenEmail(value)) {
+  if ((value?.auth_method !== undefined && value.auth_method !== '' && value.auth_method !== 'consumer') ||
+      typeof refreshToken !== 'string' || !refreshToken.trim() ||
+      (!value.auth_method && Object.keys(value).some(key => !personalFields.has(key))) ||
+      (!tokenEmail(value) && (value.id_token !== undefined || value.id_token_email !== undefined))) {
     throw new Error('仅支持包含身份和续期凭据的个人 Google 账号');
   }
   return value;
 }
 
+export function nativeTokenIdentity(token: NativeToken): string {
+  return tokenEmail(token)?.toLowerCase() ?? fingerprint(token.token.refresh_token);
+}
+
+/** A grant match can supply identity fields, never replace the bearer or its expiry. */
+export function bindNativeTokenIdentity(bytes: Buffer, known: NativeToken): Buffer {
+  const token = parseNativeToken(bytes), email = tokenEmail(known);
+  if (!email || tokenEmail(token) || token.token.refresh_token !== known.token.refresh_token) return bytes;
+  const jwtEmail = jwtInfo(known.id_token).email?.trim();
+  if (differentEmail(jwtEmail, email)) throw new Error('个人凭据的邮箱与身份声明不一致，无法确认归属');
+  return Buffer.from(JSON.stringify({ ...token, auth_method: 'consumer', id_token_email: email,
+    ...(jwtEmail ? { id_token: known.id_token } : {}) }));
+}
+
 function toConsumer(bytes: Buffer): ConsumerEntry {
   const token = parseNativeToken(bytes);
+  if (!token.auth_method) {
+    token.auth_method = 'consumer';
+    bytes = Buffer.from(JSON.stringify(token));
+  }
   const date = token.token.expiry ?? token.expiry;
   const expiry = typeof date === 'string' ? Date.parse(date) : NaN;
   const bearer = findQuotaBearer(token);
-  return { bytes, token, id: tokenEmail(token)!.toLowerCase(), expiry: Number.isFinite(expiry) ? expiry : undefined,
+  return { bytes, token, id: nativeTokenIdentity(token), expiry: Number.isFinite(expiry) ? expiry : undefined,
     bearerRank: bearer?.expiry ? 2 : bearer ? 1 : 0 };
 }
 
@@ -97,11 +121,10 @@ export function findQuotaBearer(primary: NativeToken, copies: Buffer[] = [], all
   }
   let selected = bearer(primary, false);
   if (selected?.expiry || !copies.length) return selected;
-  const email = tokenEmail(primary)!.toLowerCase();
   for (const bytes of copies) {
     let copy: NativeToken;
     try { copy = parseNativeToken(bytes); } catch { continue; }
-    if (copy.token.refresh_token !== primary.token.refresh_token || tokenEmail(copy)!.toLowerCase() !== email) continue;
+    if (!sameGrant(copy, primary)) continue;
     const candidate = bearer(copy, true);
     if (candidate?.expiry) return candidate;
     selected ??= candidate;
@@ -109,8 +132,12 @@ export function findQuotaBearer(primary: NativeToken, copies: Buffer[] = [], all
   return selected;
 }
 
+function sameGrant(a: NativeToken, b: NativeToken): boolean {
+  return a.token.refresh_token === b.token.refresh_token && !differentEmail(tokenEmail(a), tokenEmail(b));
+}
+
 function sameSession(a: ConsumerEntry, b: ConsumerEntry): boolean {
-  return a.id === b.id && a.token.token.refresh_token === b.token.token.refresh_token;
+  return sameGrant(a.token, b.token);
 }
 
 function compareCopies(a: ConsumerEntry, b: ConsumerEntry): number {
@@ -147,6 +174,16 @@ function nativePaths() {
     desktopMarker: path.join(gemini, DESKTOP_MARKER_FILE),
     cliMarker: path.join(gemini, CLI_MARKER_FILE),
   };
+}
+
+/** The CLI path is specific to unified auth. Older desktops used the same standalone filename. */
+export function hasUnifiedFileLogin(): boolean {
+  const { cli, desktop } = nativePaths();
+  try {
+    if (!hasUnsafeGeminiAncestor(cli) && fs.lstatSync(cli, { throwIfNoEntry: false })?.isFile()) return true;
+    if (hasUnsafeGeminiAncestor(desktop) || !fs.lstatSync(desktop).isFile()) return false;
+    return parseNativeToken(fs.readFileSync(desktop)).auth_method === 'consumer';
+  } catch { return false; }
 }
 
 function hasUnsafeGeminiAncestor(file: string, requireOwner = false): boolean {
@@ -188,6 +225,11 @@ function classifyFallback(file: string): FallbackEntry {
   }
   const nested = record.token && typeof record.token === 'object' && !Array.isArray(record.token)
     ? record.token as Record<string, unknown> : undefined;
+  if (typeof nested?.access_token === 'string' && nested.access_token.trim() && nested.refresh_token === undefined &&
+      Object.keys(record).every(key => personalFields.has(key)) &&
+      Object.keys(nested).every(key => ['access_token', 'token_type', 'expiry', 'expires_in', 'scope'].includes(key))) {
+    return { kind: 'stub', path: file, bytes };
+  }
   const hasToken = Boolean(nested?.refresh_token || nested?.access_token || record.refresh_token || record.access_token);
   if (!hasToken) {
     if (record.auth_method === undefined && Object.keys(record).some(k => k !== 'token')) {
@@ -197,6 +239,62 @@ function classifyFallback(file: string): FallbackEntry {
   }
   try { return { kind: 'consumer', path: file, ...toConsumer(bytes) }; }
   catch (error) { return { kind: 'blocked', path: file, reason: (error as Error).message }; }
+}
+
+function savedIdentityTokens(): NativeToken[] {
+  return listProfiles('agy').flatMap(name => {
+    try {
+      const bytes = readBuffer(path.join(profileDir('agy', name), NATIVE_TOKEN_FILE));
+      return bytes ? [parseNativeToken(bytes)] : [];
+    } catch { return []; }
+  });
+}
+
+function nativeIdentityResolver(tokens: NativeToken[]) {
+  const named = tokens.filter(tokenEmail);
+  let saved: NativeToken[] | undefined;
+  return (entry: ConsumerEntry) => {
+    if (tokenEmail(entry.token)) return;
+    const matches = (token: NativeToken) => token.token.refresh_token === entry.token.token.refresh_token && !!tokenEmail(token);
+    let donors = named.filter(matches);
+    if (!donors.length) {
+      saved ??= readSnapshot ? readSnapshot.saved ??= savedIdentityTokens() : savedIdentityTokens();
+      donors = saved.filter(matches);
+    }
+    if (!donors.length) return;
+    const email = tokenEmail(donors[0]);
+    if (donors.some(token => differentEmail(tokenEmail(token), email) || differentEmail(jwtInfo(token.id_token).email, email))) {
+      throw new Error('同一续期凭据对应多个账号身份，无法确认归属');
+    }
+    Object.assign(entry, toConsumer(bindNativeTokenIdentity(entry.bytes, donors[0])));
+  };
+}
+
+export function resolveSavedNativeIdentity(bytes: Buffer, current: Buffer | null): Buffer {
+  const entry = toConsumer(bytes);
+  if (tokenEmail(entry.token)) return bytes;
+  nativeIdentityResolver(current ? [parseNativeToken(current)] : [])(entry);
+  return tokenEmail(entry.token) ? entry.bytes : bytes;
+}
+
+/** Work on observations only. Raw files and keyring bytes remain the authority for writes and rollback. */
+function resolveFileIdentities(files: FallbackEntry[], keychain?: ConsumerEntry): FallbackEntry[] {
+  const tokens = files.flatMap(e => e.kind === 'consumer' ? [e.token] : []);
+  if (keychain) tokens.push(keychain.token);
+  const resolve = nativeIdentityResolver(tokens);
+  if (keychain) resolve(keychain);
+  return files.map(entry => {
+    if (entry.kind === 'consumer') {
+      try { resolve(entry); }
+      catch (error) { return { kind: 'blocked', path: entry.path, reason: (error as Error).message }; }
+    }
+    return entry;
+  });
+}
+
+function readFallbacks(paths: ReturnType<typeof nativePaths>, keychain?: KeychainState) {
+  return resolveFileIdentities([classifyFallback(paths.desktop), classifyFallback(paths.cli)],
+    keychain?.kind === 'consumer' ? keychain.consumer : undefined);
 }
 
 function decodeKeychain(encoded: string | null): KeychainState {
@@ -251,7 +349,7 @@ function resolvePrimary(
 const sharedObservations = new WeakMap<Buffer, { canonical: ConsumerEntry; revision: string }>();
 const observedFileLogins = new WeakSet<Buffer>();
 
-let readSnapshot: { entry?: KeychainEntry; failed?: boolean } | undefined;
+let readSnapshot: { entry?: KeychainEntry; failed?: boolean; saved?: NativeToken[] } | undefined;
 /** Only synchronous observations share a read. Revalidation after locks/awaits and all writes read afresh. */
 export function withNativeReadSnapshot<T>(observe: () => T): T {
   const previous = readSnapshot;
@@ -282,7 +380,7 @@ export function readNativeToken(quotaCopies?: Buffer[]): Buffer | null {
   const desktopMarker = inspectMarker(paths.desktopMarker);
   const entry = readKeychainEntry(quotaCopies !== undefined);
   const keychain = decodeKeychain(entry.raw);
-  const desktop = classifyFallback(paths.desktop), cli = classifyFallback(paths.cli);
+  const [desktop, cli] = readFallbacks(paths, keychain);
   const primary = resolvePrimary(keychain, desktop, cli, desktopMarker.active);
   if (primary && quotaCopies) {
     if (keychain.kind === 'absent' && cli.kind === 'consumer' && sameSession(primary, cli)) {
@@ -314,7 +412,7 @@ export function readSharedQuotaLogin(expected: Buffer): Buffer | undefined {
     if ([paths.desktopMarker, paths.cliMarker].map(inspectMarker).some(m => m.active || m.blocked)) return;
     if (!seen) {
       if (readKeychainEntry(true).raw !== null) return;
-      const cli = classifyFallback(paths.cli), desktop = classifyFallback(paths.desktop);
+      const [desktop, cli] = readFallbacks(paths);
       if (cli.kind !== 'consumer' || !sameSession(cli, toConsumer(expected)) || !privateLoginFile(paths.cli)) return;
       if ((process.platform === 'darwin' && desktop.kind !== 'consumer') || desktop.kind === 'blocked' ||
           (desktop.kind === 'consumer' && (!sameSession(cli, desktop) || !privateLoginFile(paths.desktop)))) return;
@@ -324,9 +422,9 @@ export function readSharedQuotaLogin(expected: Buffer): Buffer | undefined {
       const stat = fs.lstatSync(file, { throwIfNoEntry: false });
       if (stat && (!stat.isFile() || stat.nlink !== 1 || (process.platform === 'win32'
         ? !privateWindowsFile(file) : stat.uid !== process.getuid!() || (stat.mode & 0o022)))) return;
-      const copy = classifyFallback(file);
-      if (copy.kind === 'blocked' || (copy.kind === 'consumer' && !sameSession(copy, seen.canonical))) return;
     }
+    const copies = readFallbacks(paths, { kind: 'consumer', consumer: seen.canonical });
+    if (copies.some(copy => copy.kind === 'blocked' || (copy.kind === 'consumer' && !sameSession(copy, seen.canonical)))) return;
     if (sameSession(toConsumer(expected), seen.canonical) && sharedKeychainRevision() === seen.revision) return seen.canonical.bytes;
   } catch { /* A source disappeared or became unreadable; leave this lookup in read-only mode. */ }
 }
@@ -361,11 +459,15 @@ export function readActiveDesktopQuotaFile(quotaCopies?: Buffer[]): Buffer | und
     if (!trusted(marker) || Date.now() - marker.mtimeMs >= MARKER_TTL_MS) return;
     const primary = readFile(desktop);
     if (!primary) return;
-    const copy = quotaCopies && readFile(cli);
-    if (hasUnsafeGeminiAncestor(desktopMarker, true) || !unchanged(primary.stat, fs.lstatSync(desktop)) ||
+    const copy = (quotaCopies || !tokenEmail(primary.entry.token)) && readFile(cli);
+    const [current, alternate] = resolveFileIdentities([{kind:'consumer', path:desktop, ...primary.entry},
+      ...(copy ? [{kind:'consumer' as const, path:cli, ...copy.entry}] : [])]);
+    if (current.kind !== 'consumer') return;
+    if ((copy && (hasUnsafeGeminiAncestor(cli, true) || !unchanged(copy.stat, fs.lstatSync(cli)))) ||
+        hasUnsafeGeminiAncestor(desktopMarker, true) || !unchanged(primary.stat, fs.lstatSync(desktop)) ||
         !unchanged(marker, fs.lstatSync(desktopMarker)) || Date.now() - marker.mtimeMs >= MARKER_TTL_MS) return;
-    if (quotaCopies && copy && sameSession(primary.entry, copy.entry)) quotaCopies.push(copy.entry.bytes);
-    return primary.entry.bytes;
+    if (quotaCopies && alternate?.kind === 'consumer' && sameSession(current, alternate)) quotaCopies.push(alternate.bytes);
+    return current.bytes;
   } catch { return; }
 }
 
@@ -395,13 +497,11 @@ export function readAuxiliaryNativeTokens(primaryBytes?: Buffer | null, requireA
     }
     kept.push(entry);
   };
-  if (usingRealRead()) {
-    const kc = decodeKeychain(readRawKeychain());
-    if (kc.kind === 'protected' || (requireAllReadable && kc.kind === 'corrupt')) throw kc.error;
-    if (kc.kind === 'consumer') add(kc.consumer);
-  }
-  for (const file of [paths.desktop, paths.cli]) {
-    const entry = classifyFallback(file);
+  const kc = usingRealRead() ? decodeKeychain(readRawKeychain()) : undefined;
+  if (kc?.kind === 'protected' || (requireAllReadable && kc?.kind === 'corrupt')) throw kc.error;
+  const files = readFallbacks(paths, kc);
+  if (kc?.kind === 'consumer') add(kc.consumer);
+  for (const entry of files) {
     if (requireAllReadable && entry.kind === 'blocked') throw new Error(entry.reason);
     if (entry.kind === 'consumer') add(entry);
   }
@@ -412,7 +512,7 @@ export function hasPendingNativeCleanup(): boolean {
   if (!supportedNativePlatform() || !usingRealRead()) return false;
   const paths = nativePaths();
   if ([paths.desktopMarker, paths.cliMarker].some(file => inspectMarker(file).exists)) return true;
-  const desktop = classifyFallback(paths.desktop), cli = classifyFallback(paths.cli);
+  const [desktop, cli] = readFallbacks(paths);
   const keychain = readKeychainEntry();
   if (keychain.raw === null && desktop.kind === 'consumer' && cli.kind === 'consumer' &&
       sameSession(desktop, cli) && privateLoginFile(desktop.path) && privateLoginFile(cli.path)) return false;
@@ -453,21 +553,17 @@ function fallbackLogoutConflict(
   }
   for (const entry of [desktop, cli]) {
     if (entry.kind === 'blocked') return `${entry.reason}（${entry.path}）`;
-    if (entry.kind === 'consumer') {
+    if (entry.kind === 'consumer' && (!primary || !sameSession(entry, primary))) {
       if (!primary || entry.id !== primary.id) return `检测到认证回退文件包含其他账号（${entry.path}）`;
-      if (!sameSession(entry, primary)) {
-        return `检测到认证回退文件存在无法确认新旧的同账号凭据（${entry.path}）`;
-      }
+      return `检测到认证回退文件存在无法确认新旧的同账号凭据（${entry.path}）`;
     }
   }
   if (desktop.kind === 'consumer' && inspectMarker(desktopMarkerPath).active) {
     const keychain = decodeKeychain(rawKeychain !== undefined ? rawKeychain : readRawKeychain());
     if (keychain.kind === 'protected' || keychain.kind === 'corrupt') return keychain.error.message;
-    if (keychain.kind === 'consumer') {
+    if (keychain.kind === 'consumer' && (!primary || !sameSession(keychain.consumer, primary))) {
       if (!primary || keychain.consumer.id !== primary.id) return '检测到 Keychain 与桌面回退文件分别为不同账号';
-      if (!sameSession(keychain.consumer, primary)) {
-        return '检测到 Keychain 与桌面回退文件存在无法确认新旧的同账号凭据';
-      }
+      return '检测到 Keychain 与桌面回退文件存在无法确认新旧的同账号凭据';
     }
   }
   return undefined;
@@ -481,10 +577,9 @@ export function nativeLogoutSupport(primaryBytes?: Buffer | null): string | unde
     try { primary = toConsumer(primaryBytes); } catch {}
   }
   const previous = usingRealRead() ? readKeychainEntry() : undefined;
-  const conflict = fallbackLogoutConflict(
-    classifyFallback(paths.desktop), classifyFallback(paths.cli),
-    paths.desktopMarker, paths.cliMarker, primary, previous?.raw,
-  ) || (previous && keychainWriteIssue(null, previous));
+  const [desktop, cli] = readFallbacks(paths, previous && decodeKeychain(previous.raw));
+  const conflict = fallbackLogoutConflict(desktop, cli, paths.desktopMarker, paths.cliMarker, primary, previous?.raw)
+    || (previous && keychainWriteIssue(null, previous));
   return conflict ? `${conflict}，请在官方客户端退出` : undefined;
 }
 
@@ -520,7 +615,7 @@ export function assertNativeSwitchReady(bytes: Buffer | null): 'files' | undefin
   const keychain = decodeKeychain(previous.raw);
   if (keychain.kind === 'protected') throw keychain.error;
   const paths = nativePaths();
-  const fallbacks = [classifyFallback(paths.desktop), classifyFallback(paths.cli)];
+  const fallbacks = readFallbacks(paths, keychain);
   assertSwitchSources(fallbacks, [inspectMarker(paths.desktopMarker), inspectMarker(paths.cliMarker)]);
   return switchStorage(encoded, previous, fallbacks) === 'migrate' ? 'files' : undefined;
 }
@@ -812,11 +907,10 @@ export function writeNativeToken(
   const keychain = decodeKeychain(previous);
   if (keychain.kind === 'protected' && (bytes !== null || previous !== null)) throw keychain.error;
 
-  const desktop = classifyFallback(paths.desktop);
-  const cli = classifyFallback(paths.cli);
+  const fallbacks = readFallbacks(paths, keychain);
+  const [desktop, cli] = fallbacks;
   const desktopMarker = inspectMarker(paths.desktopMarker);
   const cliMarker = inspectMarker(paths.cliMarker);
-  const fallbacks = [desktop, cli];
   if (options.expectedFingerprint && fingerprintNativeSources(previous) !== options.expectedFingerprint) {
     throw new Error('确认期间当前凭据已变化，未执行切换，请重新核对');
   }
@@ -848,7 +942,7 @@ export function writeNativeToken(
       }
     }
   }
-  const encodedTarget = target ? KEYRING_PREFIX + bytes!.toString('base64') : null;
+  const encodedTarget = target ? KEYRING_PREFIX + target.bytes.toString('base64') : null;
   try {
     if (options.expectedRevision !== undefined) {
       if (!source || !target || source.id !== target.id ||
@@ -902,7 +996,7 @@ export function writeNativeToken(
       writeRawKeychain(encodedTarget, previousEntry);
       const written = readRawKeychain();
       if (!written || !written.startsWith(KEYRING_PREFIX) ||
-          !Buffer.from(written.slice(KEYRING_PREFIX.length), 'base64').equals(bytes!)) {
+          !Buffer.from(written.slice(KEYRING_PREFIX.length), 'base64').equals(target.bytes)) {
         throw new Error('Antigravity Keychain 写入未完成');
       }
     }
@@ -931,7 +1025,7 @@ export async function sharedAntigravitySessions(): Promise<number[]> {
 
 export interface UsageBucket { id: string; name: string; window?: string; remaining_fraction?: number; reset_time?: string; disabled?: boolean }
 export interface UsageData { groups?: Array<{ name: string; buckets: UsageBucket[] }> }
-export function quotaFromUsage(data: UsageData, email: string): StatusResult {
+export function quotaFromUsage(data: UsageData, email?: string): StatusResult {
   const buckets = (data.groups || []).map(group => ({
     id: group.name, label: group.name.replace(/ models$/i, '').replace(' and ', ' / '),
     windows: (group.buckets || []).filter(bucket => !bucket.disabled &&

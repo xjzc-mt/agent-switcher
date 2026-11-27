@@ -20,7 +20,7 @@ beforeEach(() => {
 });
 after(() => { restore?.(); fs.rmSync(root, { recursive: true, force: true }); });
 
-test('Windows DPAPI reopens the fixture account in a fresh process', {
+test('Windows reopens the encrypted fixture after its master key is rewrapped with legacy .NET DPAPI', {
   skip: process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true',
 }, () => {
   const script = `
@@ -39,7 +39,43 @@ test('Windows DPAPI reopens the fixture account in a fresh process', {
     childProcess.execFileSync(process.execPath, ['-e', script, action], {
       cwd: path.join(__dirname, '..'), env: { ...process.env, AGS_TEST_HOME: root },
     });
+    if (action === 'save') {
+      childProcess.execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+        $ErrorActionPreference = 'Stop'
+        Add-Type -AssemblyName System.Security
+        $salt = [Text.Encoding]::UTF8.GetBytes('com.agent-switcher.credentials.v1')
+        $key = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($env:AGS_TEST_KEY), $salt, 'CurrentUser')
+        try { [IO.File]::WriteAllBytes($env:AGS_TEST_KEY, [Security.Cryptography.ProtectedData]::Protect($key, $salt, 'CurrentUser')) }
+        finally { [Array]::Clear($key, 0, $key.Length) }
+      `], { env: { ...process.env, AGS_TEST_KEY: path.join(pool, '.vault-key.dpapi') }, windowsHide: true, timeout: 15000 });
+    }
   }
+});
+
+test('missing Windows helper and rejected DPAPI data preserve distinct errors and the original vault', t => {
+  const helpers = require('../dist/windows-helper');
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  restore(); restore = undefined;
+  const keyFile = path.join(pool, '.vault-key.dpapi'), original = Buffer.from('synthetic DPAPI blob');
+  rawWrite(keyFile, original);
+  t.mock.method(helpers, 'windowsHelper', name => { assert.equal(name, 'AntigravityCredential'); return 'fixture-helper'; });
+  let failure = { code: 'EACCES' }, operation = 'dpapi-unprotect';
+  t.mock.method(childProcess, 'execFileSync', (command, args, { input }) => {
+    assert.equal(command, 'fixture-helper');
+    assert.deepEqual(args, [operation, 'com.agent-switcher.credentials.v1']);
+    if (operation === 'dpapi-unprotect') assert.deepEqual(input, original);
+    throw Object.assign(new Error('fixture failure'), failure);
+  });
+  assert.throws(() => atomicWrite(file(), auth), helpers.WindowsHelperError);
+  failure = { status: 1 };
+  assert.throws(() => atomicWrite(file(), auth), /无法读取系统安全存储/);
+  assert.deepEqual(fs.readFileSync(keyFile), original);
+  fs.unlinkSync(keyFile);
+  failure = { code: 'ENOENT' }; operation = 'dpapi-protect';
+  assert.throws(() => atomicWrite(file(), auth), helpers.WindowsHelperError);
+  assert.equal(fs.existsSync(keyFile) || fs.existsSync(file()), false);
 });
 
 test('pool bytes are encrypted, native client files and metadata retain their formats', () => {

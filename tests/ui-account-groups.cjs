@@ -32,7 +32,7 @@ module.exports = suite(
       const cards=[...document.querySelectorAll('.account-card')],get=name=>cards.find(c=>c.dataset.profile===name);
       return {heights:Object.fromEntries(cards.map(c=>[c.dataset.profile,c.offsetHeight])),
         missing:['缺少5h','缺少7d'].map(name=>[...get(name).querySelectorAll('.quota-cell')].map(c=>[c.querySelector('.quota-label').textContent,c.querySelector('.quota-value').textContent,c.querySelector('.quota-reset').textContent])),
-        cached:get('缓存查询').querySelectorAll('.quota-cell.cached').length,
+        cached:get('缓存查询').querySelectorAll('.quota-cell[data-tone="cached"]').length,
         overflow:[...document.querySelectorAll('.account-plan-group,.account-group-head,.account-card,.card-resources,.quota-cell-line')].filter(e=>e.clientWidth&&e.scrollWidth>e.clientWidth+1).map(e=>e.className)};
     })()`);
 

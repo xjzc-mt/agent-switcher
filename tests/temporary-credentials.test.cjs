@@ -133,7 +133,6 @@ test('a new process cannot replay a lost agy request and can restore its sealed 
     require(${JSON.stringify(require.resolve('./helpers/test-env.cjs'))}).installMockKeychain();
     const api=require(${JSON.stringify(modulePath)}), credential=${credential.toString()};
     const {recoverAntigravityQuota}=require(${JSON.stringify(require.resolve('../dist/antigravity-quota-recovery'))});
-    const {antigravityAgent}=require(${JSON.stringify(require.resolve('../dist/agents/antigravity'))});
     const get=(id,token)=>api.pendingAntigravityQuota(id,token,credential(token));
     assert.throws(()=>get('crash@example.test','lost-request'),e=>e.diagnostic==='recovery-missing');
     const retry=api.createTemporaryCredentials('agy-quota');
@@ -142,7 +141,7 @@ test('a new process cannot replay a lost agy request and can restore its sealed 
     assert.equal(get('crash@example.test','fresh-login'),undefined);
     assert.equal(get('crash@example.test','successor-token').alreadyStored,true);
     let stored=credential('completed-request');
-    const recovered=recoverAntigravityQuota(antigravityAgent,'crash@example.test',stored,{
+    const recovered=recoverAntigravityQuota('crash@example.test',stored,{
       read:()=>stored,write:bytes=>{stored=bytes;},
     });
     assert.deepEqual(recovered.bytes,credential('successor-token'));

@@ -22,7 +22,7 @@ module.exports = suite(
     const quotaCases=await run(`(()=>{
       const status=structuredClone(agentsData[0].status),host=document.createElement('div');
       const cases=[[100,8],[0,80],[80,30],[79,31],[79.6,30.4],[0.2,100]];
-      const read=()=>{host.innerHTML=quotaCells(status);return [...host.querySelectorAll('.quota-cell')].map(cell=>({state:cell.dataset.valueState,value:cell.querySelector('.quota-value').textContent,label:cell.getAttribute('aria-label')}));};
+      const read=()=>{host.innerHTML=quotaCells(status);return [...host.querySelectorAll('.quota-cell')].map(cell=>({state:cell.dataset.tone,value:cell.querySelector('.quota-value').textContent,label:cell.getAttribute('aria-label')}));};
       const values=cases.map(([short,week])=>{status.quota.primaryWindow.usedPercent=100-short;status.quota.secondaryWindow.usedPercent=100-week;return read();});
       status.quota.primaryWindow.resetsAt=Date.now()/1000-1;
       const reset=read();status.fetchedAt=new Date(Date.now()-600000).toISOString();

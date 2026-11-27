@@ -133,11 +133,13 @@ test('Windows quota runner isolates credential files, carries ACP and usage resp
   fs.symlinkSync(roaming, path.join(home, '.gemini', 'conversations'), 'junction');
   execFileSync(fixture, ['create'], { input: Buffer.from(sentinel).toString('base64') + '\nZml4dHVyZQ==\n' });
   assert.equal(fs.readFileSync(sentinel, 'utf8'), 'fixture');
+  assert.equal(execFileSync(fixture, ['present'], { encoding: 'utf8' }), '0');
   execFileSync(fixture, ['write-canary']);
   removeCredential = () => {
     const [revision, value] = execFileSync(fixture, ['read'], { encoding: 'utf8' }).split(':');
     if (revision !== '-') execFileSync(fixture, ['replace'], { input: [value, revision, '-'].join('\n') + '\n' });
   };
+  assert.equal(execFileSync(fixture, ['present'], { encoding: 'utf8' }), '1');
   assert.match(execFileSync(fixture, ['read'], { encoding: 'utf8' }), /^[A-F0-9]{16}:Kg==$/);
   let requests = 0;
   const proxy = require('node:http').createServer((request, response) => {

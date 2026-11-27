@@ -520,15 +520,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
 .current-quota .quota-value::before { content:'剩余 '; font-size:11px; color:var(--text-muted); font-weight:400; }
 .quota-track { display:block; appearance:none; width:100%; height:5px; flex-shrink:0; border:0; border-radius:999px; overflow:hidden; }
 .quota-track::-webkit-progress-bar { background:#e6ebf2; }
-.quota-track::-webkit-progress-value { background:var(--success); border-radius:999px; }
-.quota-track[data-fill="zero"]::-webkit-progress-value { background:var(--danger); }
-.quota-track[data-fill="low"]::-webkit-progress-value { background:#d97706; }
-.quota-cell.cached .quota-track::-webkit-progress-value { background:var(--text-muted); }
+.quota-track::-webkit-progress-value { background:var(--tone-bar); border-radius:999px; }
 .quota-reset { margin-left:auto; display:inline-flex; align-items:baseline; gap:3px; font-size:11px; color:var(--text-muted); white-space:nowrap; line-height:16px; }
 .reset-symbol { font-size:13px; }
 .reset-countdown,.reset-date { display:inline; }
-.quota-cell.cached .quota-value,.credit-badge.cached b { color:var(--text-muted); }
-.quota-cell.cached .quota-track { opacity:.5; }
+.credit-badge.cached b { color:var(--text-muted); }
+.quota-number { color:var(--tone-text,var(--text-muted)); }
 .account-state { display:inline-flex; align-items:center; gap:5px; min-height:20px; font-size:12px; line-height:18px; white-space:nowrap; }
 .account-state.auth-expired { color:var(--quota-empty-text); }
 .account-state.query-failed,.account-query-warning { color:var(--quota-low-text); }
@@ -619,6 +616,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
 .account-card.is-selected { border-color:var(--brand); background:var(--brand-bg); box-shadow:none; }
 .provider-session-card .session-card-header { border:0; padding-bottom:0; }
 .provider-notice { margin:12px 0 0; max-width:65em; color:var(--text-muted); font-size:11px; line-height:1.6; }
+.cli-notice { display:flex; flex-wrap:wrap; align-items:baseline; gap:3px 10px; }
 .provider-detail-note { margin:0; }
 .credentials-section.empty-pool .pool-tools>input,.credentials-section.empty-pool .layout-toggle { display:none; }
 .credential-card { min-height:61px; }
@@ -691,19 +689,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
 .card-resources .quota-cell { gap:0; }
 .card-resources .quota-track { display:none; }
 .card-resources .quota-value { font-size:14px; line-height:18px; }
-.card-resources .quota-cell[data-value-state="low"] .quota-value { color:var(--pool-low); }
-.card-resources .quota-cell[data-value-state="zero"] .quota-value { color:var(--pool-empty); }
 [data-layout="cards"] .quota-cell+.quota-cell { border-left:1px solid var(--border); padding-left:7px; }
 [data-layout="cards"] .quota-cell-line { display:grid; grid-template-columns:auto minmax(0,1fr); gap:2px 5px; }
 [data-layout="cards"] .quota-value { justify-self:start; }
-[data-layout="cards"] .quota-number { position:relative; isolation:isolate; font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--quota-normal-text); --quota-number-bg:var(--quota-normal-bg); }
+[data-layout="cards"] .quota-number { position:relative; isolation:isolate; font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; }
 [data-layout="cards"] .quota-number small { font-size:11px; }
-[data-layout="cards"] .quota-number::before { content:''; position:absolute; z-index:-1; inset-inline:-3px; top:50%; transform:translateY(-50%); height:18px; border-radius:3px; background:var(--quota-number-bg); pointer-events:none; }
-[data-layout="cards"] [data-value-state="ample"] .quota-number { color:var(--quota-ample-text); --quota-number-bg:var(--quota-ample-bg); }
-[data-layout="cards"] [data-value-state="low"] .quota-number { color:var(--quota-low-text); --quota-number-bg:var(--quota-low-bg); }
-[data-layout="cards"] [data-value-state="zero"] .quota-number { color:var(--quota-empty-text); --quota-number-bg:var(--quota-empty-bg); }
-[data-layout="cards"] [data-value-state="cached"] .quota-number { color:var(--quota-cached-text); --quota-number-bg:var(--quota-cached-bg); }
-[data-layout="cards"] [data-value-state="missing"] .quota-number { color:var(--text-muted); --quota-number-bg:transparent; }
+[data-layout="cards"] .quota-number::before { content:''; position:absolute; z-index:-1; inset-inline:-3px; top:50%; transform:translateY(-50%); height:18px; border-radius:3px; background:var(--tone-bg,transparent); pointer-events:none; }
 [data-layout="cards"] .quota-reset { grid-column:1/-1; margin-left:0; justify-self:start; }
 [data-layout="cards"] .quota-cells[data-window-count="1"] .quota-cell-line { display:flex; gap:6px; }
 [data-layout="cards"] .quota-cells[data-window-count="1"] .quota-label { flex:0 1 auto; min-width:18px; overflow:hidden; text-overflow:ellipsis; }
@@ -855,15 +846,14 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
 [data-layout="rows"] .card-resources { grid-column:2; grid-row:1; border:0; margin:0; padding:0; }
 [data-layout="rows"] .row-windows>.quota-cells { grid-column:1 / span var(--window-count); }
 [data-layout="rows"] .row-windows>.quota-unavailable { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-[data-layout="rows"] .card-resources .quota-cell { min-width:0; }
+[data-layout="rows"] .card-resources .quota-cell { min-width:0; position:relative; }
 [data-layout="rows"] .card-resources .quota-cell-line { display:grid; grid-template-columns:40px var(--reset-width); gap:4px; line-height:18px; justify-content:end; }
 [data-layout="rows"] .shared-windows .quota-label { display:none; }
 [data-layout="rows"] .quota-label { overflow:hidden; text-overflow:ellipsis; }
 [data-layout="rows"] .quota-reset { margin:0; }
 [data-layout="rows"] .quota-value { position:relative; font-size:13px; text-align:right; }
-[data-layout="rows"] .quota-value::after { content:''; position:absolute; right:0; bottom:-3px; width:calc(var(--quota-pct)*.4px); height:2px; border-radius:2px; background:var(--quota-fill); }
-[data-layout="rows"] .quota-cell:is([data-value-state="normal"],[data-value-state="ample"]) .quota-value::after { background:#559783; }
-[data-layout="rows"] .quota-cell.cached .quota-value::after,[data-layout="rows"] [data-value-state="missing"] .quota-value::after { display:none; }
+[data-layout="rows"] .row-windows .quota-track { display:block; position:absolute; right:calc(var(--reset-width) + 4px); bottom:-2px; width:40px; height:2px; }
+[data-layout="rows"] .quota-track::-webkit-progress-bar { background:transparent; }
 [data-layout="rows"] .card-resources>.credit-badge { grid-column:3; width:var(--credit-width); margin-left:var(--resource-gap); border-left:1px solid var(--border); padding-left:8px; gap:4px; justify-content:flex-end; }
 [data-layout="rows"] .card-resources>.credit-badge b { min-width:0; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 [data-layout="rows"] .card-resources>.credit-badge small { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
@@ -921,11 +911,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-v
 .quota-summary .quota-cell+.quota-cell { border:0; padding:0; }
 .quota-summary .quota-cell .quota-cell-line { display:flex; gap:4px; line-height:16px; }
 .quota-summary .quota-cell .quota-label { display:inline; }
-.quota-summary .quota-cell .quota-value, .quota-summary .quota-cell .quota-number { font-size:11px; font-weight:500; line-height:16px; color:var(--text); }
+.quota-summary .quota-cell .quota-value, .quota-summary .quota-cell .quota-number { font-size:11px; font-weight:500; line-height:16px; color:var(--tone-text,var(--text-muted)); }
 .quota-summary .quota-number::before,.quota-summary .quota-value::before,.quota-summary .quota-value::after,.quota-summary .quota-track { display:none; }
-.quota-summary [data-value-state="low"] .quota-number { color:var(--quota-low-text); }
-.quota-summary [data-value-state="zero"] .quota-number { color:var(--quota-empty-text); }
-.quota-summary [data-value-state="cached"] .quota-number,.quota-summary [data-value-state="missing"] .quota-number { color:var(--text-muted); }
 .quota-summary .quota-number small {
   font-size:11px; font-weight:500; line-height:16px;
   color:inherit;

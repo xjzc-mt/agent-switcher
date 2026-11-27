@@ -10,7 +10,7 @@ test('tray panel stays on the opening display through content changes and follow
   }));
   const sideIcon = { x: -340, y: 0, width: 20, height: 24 };
   const mainIcon = { ...sideIcon, x: 1120 };
-  let icon = sideIcon, cursor = { x: -330, y: 12 }, bounds, visible, generation;
+  let icon = sideIcon, cursor = { x: -330, y: 12 }, bounds, visible, generation, panel;
   const handlers = new Map(), tray = new EventEmitter(), contents = new EventEmitter();
   contents.setWindowOpenHandler = () => {};
   contents.send = (_channel, _state, _reset, opening) => { generation = opening; };
@@ -18,6 +18,7 @@ test('tray panel stays on the opening display through content changes and follow
   tray.getBounds = () => icon;
   const displayAt = ({ x }) => displays[x < 0 ? 0 : 1];
   class Panel extends EventEmitter {
+    constructor() { super(); panel = this; }
     webContents = contents;
     setVisibleOnAllWorkspaces() {}
     async loadFile(file) { contents.mainFrame = { url: pathToFileURL(file).href }; }
@@ -61,4 +62,19 @@ test('tray panel stays on the opening display through content changes and follow
   tray.emit('right-click', {}, mainIcon);
   invoke('resize', 140, generation);
   assert.ok(bounds.x <= cursor.x && cursor.x < bounds.x + bounds.width && bounds.x + bounds.width <= 0);
+
+  const down = () => tray.emit('mouse-down', {});
+  const release = () => { tray.emit('click', {}, sideIcon); invoke('resize', 140, generation); };
+  down(); panel.emit('blur'); tray.emit('mouse-leave'); release();
+  assert.equal(visible, false, 'releasing the same press must not reopen the panel');
+  down(); release();
+  assert.equal(visible, true);
+  down(); panel.emit('blur'); // Drag off the icon and release without a tray click.
+  down(); release();
+  assert.equal(visible, true, 'a new press after a drag starts its own gesture');
+  panel.emit('blur'); // Keyboard focus changed while the pointer was still over the icon.
+  down(); release();
+  assert.equal(visible, true, 'reopening from an external app has no delay');
+  panel.emit('blur'); release();
+  assert.equal(visible, false, 'a bare release on the same icon must not pass through blur');
 });

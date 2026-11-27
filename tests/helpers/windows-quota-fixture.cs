@@ -34,7 +34,7 @@ public static class FixtureQuotaCli {
     }
     static int Run(string[] args) {
         string mode = args[0];
-        if (mode == "create" || mode == "read" || mode == "replace") return AntigravityCredential.FixtureCommand(args);
+        if (mode == "create" || mode == "present" || mode == "read" || mode == "replace") return AntigravityCredential.FixtureCommand(args);
         if (mode == "write-canary") return AntigravityCredential.WriteFixtureCredential() ? 0 : 1;
         if (mode == "image") {
             Console.WriteLine(System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName); return 0;

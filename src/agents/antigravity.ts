@@ -2,20 +2,22 @@ import { hasPendingAntigravitySwitch } from '../antigravity-switch-recovery';
 import { recoverAntigravityQuota } from '../antigravity-quota-recovery';
 import { agentMetadata } from './metadata';
 import os from 'os';
-import { queryAccessTokenUsage, queryIsolatedUsage, querySharedUsage, AntigravityAccessRejected, AntigravityLoginRequired, resolveAntigravityCli } from '../antigravity-cli';
+import { matchesQuotaIdentity, queryAccessTokenUsage, queryIsolatedUsage, querySharedUsage, AntigravityAccessRejected, AntigravityLoginRequired, antigravityCliStatus, resolveAntigravityCli } from '../antigravity-cli';
 import { runningClients } from '../clients';
+import { windowsAntigravityVersion } from '../windows-desktop';
+import { hasWindowsAntigravityCredential } from '../antigravity-windows';
 import { stepDiagnostic } from '../diagnostics';
 import { CredentialChangedError, LiveWriteDeferred, credentialState, credentialStateFromFiles } from '../credential-state';
 import path from 'path';
 import fs from 'fs';
 import { execFileSync } from 'child_process';
-import { BaseAgent, Identity, AuxiliaryCredential, StatusResult, AccountManagement, CredentialQuery, QueryOptions, LiveMutationJournal, UseOptions, UseResult, type CredentialFiles, type SharedQuotaLogin } from './base';
+import { BaseAgent, Identity, AuxiliaryCredential, StatusResult, AccountManagement, type AntigravityCliStatus, CredentialQuery, QueryOptions, LiveMutationJournal, UseOptions, UseResult, type CredentialFiles, type SharedQuotaLogin } from './base';
 import { readJsonFile, jwtInfo, fingerprint } from '../utils';
 import { listProfiles, profileDir } from '../store';
 import { releaseTemporaryCredentials } from '../temporary-credentials';
 import {
   readUnavailableDesktopQuotaFile, readActiveDesktopQuotaFile, retryNativeKeychainAccess, assertNativeSwitchReady, nativeLogoutSupport, ConflictingNativeFileLogins, readNativeToken, writeNativeToken, readAuxiliaryNativeTokens, parseNativeToken, findQuotaBearer, readSharedQuotaLogin, compareNativeSessionCopies,
-  isRecoverableNativeError, hasPendingNativeCleanup, nativeSwitchFingerprint,
+  isRecoverableNativeError, hasPendingNativeCleanup, hasUnifiedFileLogin, nativeSwitchFingerprint, nativeTokenIdentity, tokenEmail,
   createNativeMutationJournal, recoverInterruptedNativeSwitch, needsNativeRenewalMigration, sharedAntigravitySessions, quotaFromUsage,
 } from '../antigravity-native';
 
@@ -34,9 +36,12 @@ export { LiveWriteDeferred as DeferredNativeRenewal } from '../credential-state'
 export const antigravityRenewalHint = 'Antigravity 更新登录状态后，额度会自动刷新。';
 
 export type AntigravityRuntime = 'legacy' | 'unified' | 'unknown';
-/** Inspect installed app metadata, never token contents, to choose the adapter. */
+/** A known desktop generation takes precedence over a CLI or credentials left by another version. */
 export function detectAntigravityRuntime(): AntigravityRuntime {
-  if (process.platform === 'win32') return resolveAntigravityCli() ? 'unified' : 'unknown';
+  if (process.platform === 'win32') {
+    const major = /^(\d+)(?:\.|$)/.exec(windowsAntigravityVersion() || '');
+    if (major) return Number(major[1]) >= 2 ? 'unified' : 'legacy';
+  }
   if (process.platform === 'darwin') {
     for (const apps of [path.join(os.homedir(), 'Applications'), '/Applications']) {
       try {
@@ -49,9 +54,10 @@ export function detectAntigravityRuntime(): AntigravityRuntime {
       } catch { /* Continue to other install locations. */ }
     }
   }
-  // The agy CLI belongs to the unified-auth generation. Do not treat an old
-  // jetski token left on disk as evidence that the currently installed app uses it.
-  return resolveAntigravityCli() ? 'unified' : 'unknown';
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    if (resolveAntigravityCli() || hasUnifiedFileLogin() || (process.platform === 'win32' && hasWindowsAntigravityCredential())) return 'unified';
+  }
+  return 'unknown';
 }
 
 export class AntigravityAgent extends BaseAgent {
@@ -59,8 +65,22 @@ export class AntigravityAgent extends BaseAgent {
   readonly label = agentMetadata.agy.label;
   readonly homeDir = path.join(os.homedir(), '.gemini');
   readonly authFiles = [agentMetadata.agy.credential];
-  constructor(private readonly runtime: () => AntigravityRuntime = detectAntigravityRuntime,
-    private readonly nativeEnabled = ['darwin', 'win32'].includes(process.platform) && runtime() === 'unified') { super(); }
+  private generation: AntigravityRuntime;
+  private nativeEnabled: boolean;
+  constructor(private readonly runtime: () => AntigravityRuntime = detectAntigravityRuntime, nativeEnabled?: boolean,
+    private readonly cliStatus: (recheck?: boolean) => AntigravityCliStatus = antigravityCliStatus) {
+    super();
+    this.generation = runtime();
+    this.nativeEnabled = nativeEnabled ?? this.supportsNativeStorage();
+  }
+  private supportsNativeStorage(): boolean {
+    return ['darwin', 'win32'].includes(process.platform) && this.generation === 'unified';
+  }
+  recheckCapabilities(): void {
+    this.generation = this.runtime();
+    this.nativeEnabled = this.supportsNativeStorage();
+    this.cliStatus(true);
+  }
 
   readCredentials(dir = this.homeDir, quotaCopies?: Buffer[]): Record<string, Buffer | null> {
     return this.nativeEnabled && dir === this.homeDir
@@ -133,11 +153,14 @@ export class AntigravityAgent extends BaseAgent {
   identityFromBytes(bytes: Buffer | null, live = false): Identity | undefined {
     if (!this.nativeEnabled) return super.identityFromBytes(bytes, live);
     if (!bytes) return undefined;
-    try { return this.identityFromAuth(parseNativeToken(bytes)); }
+    try {
+      const token = parseNativeToken(bytes);
+      return { id: nativeTokenIdentity(token), email: tokenEmail(token) };
+    }
     catch { return undefined; }
   }
   identity(dir = this.homeDir, files?: CredentialFiles): Identity | undefined {
-    if (!this.nativeEnabled && dir === this.homeDir && this.runtime() !== 'legacy') return undefined;
+    if (dir === this.homeDir && this.switchSupport()) return undefined;
     return super.identity(dir, files);
   }
   identityFromAuth(raw: TokenPayload | null, live = false): Identity | undefined {
@@ -182,9 +205,10 @@ export class AntigravityAgent extends BaseAgent {
     return findQuotaBearer(parseNativeToken(bytes), copies, allowUndated);
   }
   ownsQuotaLogin(bytes: Buffer) { return !!readSharedQuotaLogin(bytes); }
-  recoverProfileCredential(dir: string, identity: string, original: Buffer) {
+  recoverProfileCredential(dir: string, identity: string, original: Buffer, preview = false) {
     const file = this.authFiles[0];
-    return recoverAntigravityQuota(this, identity, original, {
+    return recoverAntigravityQuota(identity, original, {
+      preview,
       read: () => this.readCredentials(dir)[file],
       write: bytes => this.writeCredentials(dir, { [file]: bytes }),
       confirmCopies: (bytes, matchesInput) => {
@@ -234,17 +258,21 @@ export class AntigravityAgent extends BaseAgent {
   }
   switchSupport(): string | undefined {
     if (this.nativeEnabled) return undefined;
-    if (this.runtime() === 'legacy') return undefined;
-    if (process.platform === 'win32') return '请先安装官方 Antigravity CLI（agy），再重新打开 AGS。';
+    if (process.platform === 'win32') return '尚未识别 Antigravity 2.x 桌面登录，请在官方客户端中管理账号。';
+    if (this.generation === 'legacy') return undefined;
     return 'Antigravity 2.x 使用 App、CLI 和 IDE 共用认证；旧版凭据文件不能切换当前登录，请在官方客户端管理账号。';
   }
   management(): AccountManagement {
-    if (this.nativeEnabled) return { quota: true, storage: 'keychain', canSaveCurrent: true, isolatedLogin: process.platform !== 'win32',
-      notice: process.platform === 'win32' ? '支持导入个人 Google 账号，或保存官方客户端的当前登录。切换前请结束共用登录的 CLI 或 IDE。'
-        : '支持个人 Google 账号；独立登录和额度刷新需要官方 agy CLI。切换前请结束共用认证的终端或 IDE 会话。' };
+    if (this.nativeEnabled) {
+      const cliStatus = this.cliStatus();
+      const quota = cliStatus.state === 'ready', isolatedLogin = quota && process.platform !== 'win32';
+      return { quota, storage: 'keychain', canSaveCurrent: true, isolatedLogin, cliStatus,
+        notice: '支持个人 Google 账号。切换前请结束共用认证的终端或 IDE 会话。',
+        ...(!isolatedLogin && { loginLabel: '打开 Antigravity 登录', loginHint: '在官方桌面登录后，返回 AGS 保存当前账号。' }) };
+    }
     if (process.platform === 'win32') return { quota: false, storage: 'unknown', canSaveCurrent: false,
-      notice: '安装官方 Antigravity CLI（agy）后重新打开 AGS，即可使用导入的个人账号切换和查询额度。' };
-    const runtime = this.runtime(), legacy = runtime === 'legacy';
+      notice: '尚未识别 Antigravity 2.x 桌面登录，可在官方客户端中管理账号。' };
+    const runtime = this.generation, legacy = runtime === 'legacy';
     return {
       quota: false, storage: legacy ? 'file' : runtime === 'unified' ? 'unified' : 'unknown', canSaveCurrent: legacy,
       notice: legacy ? '旧版文件凭据模式；切换后需重新打开 Antigravity。' : runtime === 'unified' ? 'Antigravity 2.x 已统一 App、CLI 与 IDE 登录。旧版凭据仅作备份，请在官方客户端切换账号。' : '尚未确认客户端版本；已保存的凭据可管理，登录与切换请在官方客户端完成。',
@@ -252,14 +280,14 @@ export class AntigravityAgent extends BaseAgent {
     };
   }
   credentialStatus(dir = this.homeDir): StatusResult {
-    if (!this.nativeEnabled && dir === this.homeDir && this.runtime() !== 'legacy') return { available: false, state: 'unsupported' };
+    if (dir === this.homeDir && this.switchSupport()) return { available: false, state: 'unsupported' };
     const status = super.credentialStatus(dir);
     return status.available && !status.account ? { ...status, account: 'Antigravity 账号' } : status;
   }
   async queryCredential(original: Buffer | null, options: QueryOptions = {}): Promise<CredentialQuery> {
     if (!original) return { status: { available: false, state: 'signed-out' } };
     const parsedOriginal = parseNativeToken(original);
-    const identity = this.identityFromAuth(parsedOriginal)!;
+    const identity = { id: nativeTokenIdentity(parsedOriginal), email: tokenEmail(parsedOriginal) };
     if (options.allowRefresh === false) {
       const bearer = findQuotaBearer(parsedOriginal, options.quotaCopies, options.allowUndatedBearer);
       if (bearer?.expiry) stepDiagnostic('access-valid');
@@ -275,9 +303,9 @@ export class AntigravityAgent extends BaseAgent {
           state: error ? 'error' : 'unverified', extra: error?.message ?? antigravityRenewalHint },
       });
       const queryBearer = async (current: NonNullable<typeof bearer>): Promise<CredentialQuery> => {
-        const data = await queryAccessTokenUsage(identity.email!, current.accessToken, current.expiry);
+        const data = await queryAccessTokenUsage(identity.email, current.accessToken, current.expiry);
         if (!current.expiry) stepDiagnostic('access-valid');
-        return { status: { ...quotaFromUsage(data, identity.email!), credentialRevision } };
+        return { status: { ...quotaFromUsage(data, identity.email), credentialRevision } };
       };
       if (options.verifyTarget !== undefined) return status();
       let rejected: AntigravityAccessRejected | undefined;
@@ -305,7 +333,7 @@ export class AntigravityAgent extends BaseAgent {
         if (!renewed || renewed.accessToken === bearer?.accessToken) return status(rejected ?? new Error('Antigravity 尚未更新当前登录，稍后将重试额度查询。'));
         try { return await queryBearer(renewed); } catch (error) { return status(error as Error); }
       }
-      try { return { status: { ...quotaFromUsage(data ?? {}, identity.email!), credentialRevision } }; }
+      try { return { status: { ...quotaFromUsage(data ?? {}, identity.email), credentialRevision } }; }
       catch (error) { return status(error as Error); }
     }
     if (options.verifyTarget !== undefined) {
@@ -323,8 +351,8 @@ export class AntigravityAgent extends BaseAgent {
       try { verifiedIdentity = this.identityFromAuth(parseNativeToken(result.rotated)); } catch {}
       let quotaStatus: StatusResult | undefined;
       let usageError = result.error;
-      if (!usageError && verifiedIdentity && verifiedIdentity.id === expected.id) {
-        try { quotaStatus = { ...quotaFromUsage(result.data || {}, verifiedIdentity.email!), plan: result.plan }; }
+      if (!usageError && verifiedIdentity?.email && verifiedIdentity.id === expected.id) {
+        try { quotaStatus = { ...quotaFromUsage(result.data || {}, verifiedIdentity.email), plan: result.plan }; }
         catch (error) { usageError = error as Error; }
       }
       if (!verifiedIdentity || verifiedIdentity.id !== expected.id || usageError || !quotaStatus) {
@@ -346,8 +374,11 @@ export class AntigravityAgent extends BaseAgent {
       return { status: quotaStatus, rotated: result.rotated, temporaryDirectory: result.temporaryDirectory, verifiedReplacement: true };
     }
     const result = await queryIsolatedUsage(original, identity.id, parsedOriginal.token.refresh_token);
+    let email: string | undefined;
     try {
-      if (this.identityFromAuth(parseNativeToken(result.rotated))?.id !== identity.id) throw new CredentialChangedError();
+      const next = parseNativeToken(result.rotated);
+      if (!matchesQuotaIdentity(identity.id, parsedOriginal, next)) throw new CredentialChangedError();
+      email = tokenEmail(next) ?? identity.email;
     } catch (error) {
       const failure = error instanceof Error ? error : new Error('无法确认查询后的账号身份');
       if (result.temporaryDirectory) failure.message += `；临时凭据已保留在 ${result.temporaryDirectory}`;
@@ -356,7 +387,7 @@ export class AntigravityAgent extends BaseAgent {
     let status: StatusResult;
     try {
       if (result.error) throw result.error;
-      status = { ...quotaFromUsage(result.data || {}, identity.email!), plan: result.plan };
+      status = { ...quotaFromUsage(result.data || {}, email), plan: result.plan };
     } catch (error) {
       const expired = error instanceof AntigravityLoginRequired;
       status = { available: true, account: identity.email, state: expired ? 'expired' : 'error',

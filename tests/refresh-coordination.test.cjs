@@ -26,7 +26,7 @@ beforeEach(t => {
 test('an unreadable native login source prevents spare and staged renewal even with the official clients closed', { skip: process.platform !== 'darwin' }, async t => {
   const native = require('../dist/antigravity-native');
   const { AntigravityAgent } = require('../dist/agents/antigravity');
-  const agy = new AntigravityAgent(() => 'unified', true), file = agy.authFiles[0];
+  const agy = new AntigravityAgent(() => 'unified', true, () => ({ state: 'ready' })), file = agy.authFiles[0];
   const token = login => Buffer.from(JSON.stringify({ auth_method: 'consumer', id_token_email: login + '@example.test',
     token: { access_token: 'access-' + login, refresh_token: 'refresh-' + login } }));
   const spare = token('spare'), live = token('desktop');
@@ -47,6 +47,9 @@ test('an unreadable native login source prevents spare and staged renewal even w
     await accounts.refreshAccount(agy, scenario, true);
     const staged = path.join(dir, file + '.pending');
     atomicWrite(staged, spare);
+    const callsBeforeOpen = requests.length;
+    assert.equal((await accounts.refreshAccount(agy, scenario, true, 'on-open')).stagedReplacement, true);
+    assert.equal(requests.length, callsBeforeOpen);
     const status = await accounts.refreshAccount(agy, scenario, true);
     assert.equal(status.stagedReplacement, true);
     assert.match(status.extra, /读取|确认.*登录来源/);
@@ -80,6 +83,63 @@ test('manual refresh reuses a completed query for 30 seconds without extending i
   assert.equal(queries, 3);
 });
 
+test('spare opens and regular queries share activity, reset and manual gates with the dashboard', async t => {
+  put('A');
+  const settings = require('../dist/settings');
+  const setInterval = spareRefreshInterval => settings.saveSettings({ ...settings.readSettings(), spareRefreshInterval });
+  const card = () => accounts.dashboard()[0].profiles.find(p => p.name === 'A');
+  const open = () => accounts.refreshAccount(agent, 'A', true, 'on-open');
+  await setInterval('15m');
+  let queries = 0, used = 20, resetsAt;
+  agent.queryLiveRpc = async () => {
+    queries++;
+    return { rates: { rateLimits: { primary: { usedPercent: used, windowDurationMins: 300, resetsAt } } } };
+  };
+  await open();
+  used = 35;
+  t.mock.timers.tick(120000);
+  await open();
+  assert.equal(queries, 1);
+  for (const [round, base] of [7.5, 7.5, 15, 30].entries()) {
+    t.mock.timers.tick(round ? 120001 : 1);
+    await open();
+    assert.equal(queries, round + 2);
+    const delta = card().refreshAt - Date.now();
+    assert.ok(delta >= base * 60000 * 0.88 && delta <= Math.min(30, base * 1.15) * 60000);
+    assert.equal(card().refreshAt, Date.now() + delta);
+  }
+  used = 100;
+  resetsAt = Math.floor(Date.now() / 1000) + 2700;
+  t.mock.timers.tick(30000);
+  await accounts.refreshAccount(agent, 'A', true, 'automatic');
+  const due = card().refreshAt;
+  assert.ok(due >= resetsAt * 1000 + 8000 && due <= resetsAt * 1000 + 25000);
+  t.mock.timers.tick(due - Date.now() - 1);
+  assert.equal(card().hotRefreshAt, Infinity);
+  await accounts.refreshAccount(agent, 'A');
+  await open();
+  assert.equal(queries, 6);
+  used = 0;
+  t.mock.timers.tick(1);
+  await accounts.refreshAccount(agent, 'A');
+  assert.equal(queries, 7);
+  assert.equal(card().meta.snapshot.quota.primaryWindow.usedPercent, 0);
+  assert.equal(card().meta.snapshot.spareActivity.activeRounds, 1, 'A reset consumes one follow-up without inventing activity');
+  t.mock.timers.tick(1800000);
+  let queued;
+  await store.withStoreLock(async () => {
+    queued = accounts.refreshAccount(agent, 'A', true, 'automatic');
+    await setInterval('manual');
+  }, agent.identity(store.profileDir('codex', 'A')).id);
+  await queued;
+  assert.equal(card().hotRefreshAt, Infinity);
+  await open();
+  await accounts.refreshAccount(agent, 'A');
+  assert.equal(queries, 7);
+  await accounts.refreshAccount(agent, 'A', true);
+  assert.equal(queries, 8);
+});
+
 test('failed queries retain quota history and back off; manual recovery clears failures', async t => {
   put('A');
   await accounts.refreshAccount(agent, 'A', true);
@@ -101,8 +161,9 @@ test('failed queries retain quota history and back off; manual recovery clears f
   await settings.saveSettings({ ...settings.readSettings(), spareRefreshInterval: '30m' });
   const account = accounts.dashboard()[0].profiles.find(p => p.name === 'A');
   assert.equal(account.refreshAt, Date.parse(account.meta.snapshot.checkedAt) + 1800000);
+  assert.equal(account.hotRefreshAt, account.refreshAt);
   t.mock.timers.tick(300000);
-  assert.equal((await accounts.refreshAccount(agent, 'A')).refreshFailures, 2);
+  assert.equal((await accounts.refreshAccount(agent, 'A', true, 'on-open')).refreshFailures, 2);
   t.mock.timers.tick(1500000);
   assert.equal((await accounts.refreshAccount(agent, 'A')).refreshFailures, 3);
   t.mock.timers.tick(30000);
@@ -167,7 +228,7 @@ test('a switch backup and a newer same-email login refresh their own credentials
   const native = require('../dist/antigravity-native');
   const cli = require('../dist/antigravity-cli');
   const { AntigravityAgent } = require('../dist/agents/antigravity');
-  const agy = new AntigravityAgent(() => 'unified', true);
+  const agy = new AntigravityAgent(() => 'unified', true, () => ({ state: 'ready' }));
   const providers = accounts.ALL_AGENTS.splice(0, accounts.ALL_AGENTS.length, agy);
   t.after(() => accounts.ALL_AGENTS.splice(0, 1, ...providers));
   function token(email, login, minutes) {

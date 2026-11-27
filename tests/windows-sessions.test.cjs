@@ -37,10 +37,14 @@ test('Windows Antigravity guards shared sessions and only reopens the desktop it
   const agy = { pid: 65, file: desktop, name:'Antigravity.exe', ownerKnown:true, created:'133820340000000002' };
   let running = [agy], publisher = 'Unrelated company';
   t.mock.method(windows, 'desktopCandidates', async () => running);
-  t.mock.method(windows, 'windowsQuery', async () => publisher);
   t.mock.method(require('../dist/windows-helper'), 'windowsHelper', () => 'fixture-helper');
-  const close = t.mock.method(cp, 'execFile', (exe, args, opts, callback) => {
-    assert.equal(exe, 'fixture-helper'); assert.deepEqual(args,[desktop,'window:65:133820340000000002']);
+  let closes = 0, elevated = false;
+  t.mock.method(cp, 'execFile', (exe, args, opts, callback) => {
+    assert.equal(exe, 'fixture-helper');
+    if (args[0] === 'publisher') { assert.deepEqual(args,['publisher',desktop]); return callback(null,publisher); }
+    assert.deepEqual(args,[desktop,'window:65:133820340000000002']);
+    if (elevated) return callback(Object.assign(new Error(), {code:5}));
+    closes++;
     running = []; callback(null,'');
   });
   const launch = t.mock.method(cp, 'spawn', (file, args) => {
@@ -49,8 +53,10 @@ test('Windows Antigravity guards shared sessions and only reopens the desktop it
   });
   assert.deepEqual(await clients.runningClients('agy'), ['Antigravity']);
   await assert.rejects(clients.quitClients(['Antigravity']), /安装位置/);
-  assert.equal(close.mock.callCount(), 0);
-  publisher = 'Google LLC';
+  assert.equal(closes, 0);
+  publisher = 'Google LLC'; elevated = true;
+  await assert.rejects(clients.quitClients(['Antigravity']), /管理员身份/);
+  elevated = false;
   await clients.quitClients(['Antigravity']); assert.deepEqual(await clients.runningClients('agy'), []);
   await clients.openClients(['Antigravity']);
   running = [agy]; await clients.quitClients(['Antigravity']); fs.appendFileSync(desktop, 'updated');
@@ -66,29 +72,37 @@ test('Windows restarts the registered Codex desktop and waits for its backend wh
   const family = 'OpenAI.Codex_2p2nqsd0c76g0';
   const file = path.join(root, 'WindowsApps', 'OpenAI.Codex_26.0.0_x64__2p2nqsd0c76g0', 'app', 'ChatGPT.exe');
   fs.mkdirSync(path.dirname(file), {recursive:true}); fs.writeFileSync(file, 'desktop');
+  const manifest = path.join(path.dirname(path.dirname(file)), 'AppxManifest.xml');
+  fs.writeFileSync(manifest, 'fixture');
   const app = { pid:90, created:'133820340000000001', ownerKnown:true, file };
   const terminal = { pid:75, created:'133820340000000002', ownerKnown:true, file:path.join(root,'bin','codex.exe') };
   const other = { ...app, pid:81, file:file.replace('2p2nqsd0c76g0','anotherpublisher').replace('ChatGPT.exe','Codex.exe') };
   const renderer = { pid:94, parent:90, created:'133820340000000004', ownerKnown:false, file:null };
-  let running = [renderer,app,terminal,other], registered = 'OpenAI.Codex_anotherpublisher!App';
+  let running = [renderer,app,terminal,other], registered = '', manifestUnreadable = false;
+  let closes = 0, manifests = 0, fallbacks = 0;
   t.mock.method(windows,'desktopCandidates',async () => running);
   t.mock.method(require('../dist/windows-helper'),'windowsHelper',() => 'desktop-helper');
-  t.mock.method(windows,'windowsQuery',async (script,_,env) => {
-    if (env?.AGS_DESKTOP_FILE) {
-      assert.equal(env.AGS_DESKTOP_FILE,file); assert.equal(env.AGS_CODEX_FAMILY,family); return registered;
+  t.mock.method(cp,'execFile',(exe,args,opts,callback) => {
+    if (exe !== 'desktop-helper') {
+      assert.match(exe,/powershell\.exe$/i);
+      assert.equal(opts.env.AGS_DESKTOP_FILE,file); assert.equal(opts.env.AGS_CODEX_FAMILY,family);
+      assert.equal(opts.timeout,10000); fallbacks++; return callback(null,registered);
     }
-    return JSON.stringify([
-      {pid:0,parent:0,born:'',backend:false},
-      {pid:92,parent:91,born:'133820340000000003',backend:true},
-      {pid:91,parent:90,born:'133820340000000002',backend:false},
-      {pid:90,parent:1,born:app.created,backend:false},
-      {pid:75,parent:1,born:terminal.created,backend:true},
-      {pid:76,parent:90,born:'133820340000000000',backend:true}, // Older than the current occupant of parent PID 90.
-    ]);
-  });
-  const close = t.mock.method(cp,'execFile',(exe,args,opts,callback) => {
+    if (args[0] === 'manifest') {
+      manifests++; assert.deepEqual(args,['manifest',file]);
+      return manifestUnreadable ? callback(Object.assign(new Error(),{code:3})) : callback(null,registered);
+    }
+    if (args[0] === 'processes') {
+      assert.deepEqual(args,['processes']);
+      const all = [
+        [92,91,'133820340000000003','codex-app-server.exe'], [91,90,'133820340000000002','shell.exe'],
+        [90,1,app.created,'ChatGPT.exe'], [75,1,terminal.created,'codex.exe'],
+        [76,90,'133820340000000000','codex.exe'], // Older than the current occupant of parent PID 90.
+      ].map(([pid,parent,created,name]) => ({pid,parent,created,name,ownerKnown:true,file:null}));
+      return callback(null,JSON.stringify(all));
+    }
     assert.deepEqual(args,[file,'wait:94:133820340000000004','window:90:133820340000000001','wait:92:133820340000000003']);
-    running = [terminal,other]; callback(null,'');
+    closes++; running = [terminal,other]; callback(null,'');
   });
   const launch = t.mock.method(cp,'spawn',(exe,args) => {
     assert.match(exe,/explorer\.exe$/i); assert.deepEqual(args,['shell:AppsFolder\\' + family + '!App']);
@@ -97,21 +111,29 @@ test('Windows restarts the registered Codex desktop and waits for its backend wh
   });
   const inventory = require('../dist/windows-desktop');
   running = [{ ...renderer, created:'133820339999999999' },app]; // An unknown PID cannot borrow a newer parent's identity.
-  await assert.rejects(inventory.windowsDesktop('Codex'), /无法确认/);
+  await assert.rejects(inventory.windowsDesktop('Codex'), /管理员身份/);
   running = [renderer,app,terminal,other];
   const confirmed = await clients.runningClients('codex');
   assert.deepEqual(confirmed, ['Codex']);
   await assert.rejects(clients.quitClients(confirmed), /启动项/);
-  assert.equal(close.mock.callCount(), 0);
-  registered = family + '!App';
+  assert.deepEqual([closes, fallbacks], [0,0]);
+  registered = 'App';
   running = [{ ...app, created:'133820340000000099' },terminal,other]; // PID reused while confirmation is open.
   await assert.rejects(clients.quitClients(confirmed), /已重新启动/);
-  assert.equal(close.mock.callCount(), 0);
+  assert.equal(closes, 0);
   running = [renderer,app,terminal,other];
   await clients.quitClients(confirmed); assert.deepEqual(await clients.runningClients('codex'),[]);
   t.mock.method(windows,'windowsCodexProcesses',async () => [terminal.pid]);
   assert.deepEqual(await runningCodexSessions({failClosed:true}),[terminal.pid]);
   await clients.openClients(['Codex']); assert.equal(launch.mock.callCount(),1);
+  // A known immutable package reuses its manifest. Only an inaccessible replacement invokes the package query.
+  const previousManifests = manifests;
+  running = [renderer,app]; await clients.quitClients(await clients.runningClients('codex'));
+  assert.deepEqual([manifests, fallbacks], [previousManifests,0]);
+  fs.appendFileSync(manifest, 'updated'); manifestUnreadable = true;
+  running = [renderer,app]; await clients.quitClients(await clients.runningClients('codex'));
+  assert.deepEqual([manifests, fallbacks], [previousManifests+1,1]);
+  running = [app,terminal];
   const reopenConfirmed = await clients.runningClients('codex');
   running = [terminal,other]; // The user quit during the confirmation dialog.
   await assert.rejects(clients.quitClients(reopenConfirmed),/已退出/);
@@ -142,6 +164,31 @@ test('Windows live session detection excludes a local isolated query and propaga
   await assert.rejects(runningCodexSessions({ failClosed:true }), /inventory unavailable/);
 });
 
+test('Windows probe failures preserve recovery guidance and record the switch stage', async t => {
+  const { initializeDiagnostics, runDiagnostic, exportDiagnostics } = require('../dist/diagnostics');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(),'ags-win-diagnostic-'));
+  t.after(() => fs.rmSync(dir,{recursive:true,force:true}));
+  initializeDiagnostics(dir,'0.1.0');
+  t.mock.method(require('../dist/windows-helper'), 'windowsHelper', () => 'native-helper');
+  let response;
+  t.mock.method(cp, 'execFile', (exe, args, opts, callback) => {
+    assert.equal(exe,'native-helper'); assert.equal(args[0],'processes');
+    response instanceof Error ? callback(response) : callback(null,response);
+  });
+  const unknown = {pid:41,parent:1,created:'133820340000000001',name:'codex.exe',file:null,ownerKnown:false};
+  for (const [data, message, result] of [
+    [JSON.stringify([unknown]), /管理员身份/, 'failed'],
+    [Object.assign(new Error(),{killed:true}), /超时（系统繁忙）/, 'timeout'],
+    ['unreadable', /安全软件拦截后重试/, 'failed'],
+    [Object.assign(new Error(),{code:'EACCES'}), /辅助组件缺失或被安全软件拦截/, 'failed'],
+  ]) {
+    response = data;
+    await assert.rejects(runDiagnostic('switch','codex','manual',undefined,windows.windowsCodexProcesses),message);
+    const r = exportDiagnostics().operations.at(-1);
+    assert.deepEqual([r.result,r.steps.map(s=>s.step)], [result,['process-unknown']]);
+  }
+});
+
 test('Windows recovery needs both boot records to change and preserves a pending write after reboot', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-boot-test-'));
   t.after(() => fs.rmSync(root, { recursive:true, force:true }));
@@ -155,7 +202,8 @@ test('Windows recovery needs both boot records to change and preserves a pending
   });
   await Promise.all([temp.initializeTemporaryBoot(), temp.initializeTemporaryBoot()]);
   for (const [prior, pending, removed] of [
-    ['11:133820340000000001', false, true], ['11:133820340000000001', true, false],
+    ['11:133810240000000000', false, true], ['11:133810240000000000', true, false],
+    ['11:133820340000000000', false, false], // A prior WMI receipt omitted the last 100ns digit.
     ['11:133820340000000002', false, false], ['12:133820340000000001', false, false], [undefined, false, false],
   ]) {
     const directory = temp.createTemporaryCredentials('quota');
@@ -170,11 +218,28 @@ test('Windows recovery needs both boot records to change and preserves a pending
   assert.equal(boot.mock.callCount(), 1);
 });
 
-test('Windows CIM reports disposable Codex and Antigravity CLI processes for the current user', {
+test('Windows native inventory reports disposable Codex and Antigravity CLI processes for the current user', {
   skip: process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true',
 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-session-test-'));
   t.after(() => fs.rmSync(directory, { recursive:true, force:true }));
+  const system = path.join(process.env.SystemRoot,'System32');
+  const expected = cp.execFileSync(path.join(system,'WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-Command',
+    '$sig = Get-AuthenticodeSignature -LiteralPath $env:AGS_TEST_SIGNED_EXE; if ($sig.Status -ne "Valid") { exit 1 }; $sig.SignerCertificate.GetNameInfo("SimpleName",$false)'],
+    {encoding:'utf8',timeout:20000,env:{...process.env,AGS_TEST_SIGNED_EXE:process.execPath}}).trim();
+  assert.ok(expected);
+  assert.equal(await windows.desktopCommand(['publisher', process.execPath],10000),expected);
+  const unsigned = require('../dist/windows-helper').windowsHelper('DesktopWindows');
+  assert.equal(await windows.desktopCommand(['publisher', unsigned]), '');
+  const counter = cp.spawnSync(path.join(system,'reg.exe'),['query',
+    'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management\\PrefetchParameters','/v','BootId'],{encoding:'utf8'});
+  const bootId = /BootId\s+REG_DWORD\s+0x([a-f\d]+)/i.exec(counter.stdout || '');
+  if (bootId && parseInt(bootId[1],16)) {
+    const boot = await windows.windowsBoot();
+    assert.match(boot,/^\d+:[1-9]\d{15,18}$/);
+    assert.equal(Number(boot.split(':')[0]),parseInt(bootId[1],16));
+    assert.equal(await windows.windowsBoot(),boot);
+  }
   for (const [name, scan] of [['codex-app-server.exe', windows.windowsCodexProcesses], ['agy.exe', () => windows.windowsAntigravitySessions(new Set())]]) {
     const binary = path.join(directory, name);
     fs.copyFileSync(process.execPath, binary);
@@ -187,7 +252,7 @@ test('Windows CIM reports disposable Codex and Antigravity CLI processes for the
   }
 });
 
-test('Windows CIM discovers the Electron desktop tree and closes only its root windows', {
+test('Windows native inventory discovers the Electron desktop tree and closes only its root windows', {
   skip: process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted',
   timeout: 90000,
 }, async t => {
@@ -230,7 +295,7 @@ test('Windows CIM discovers the Electron desktop tree and closes only its root w
     let verified = false;
     t.mock.method(cp, 'execFile', new Proxy(exec, { apply(target, receiver, values) {
       const [command, args] = values;
-      if (path.basename(command).toLowerCase() === 'desktopwindows.exe') {
+      if (path.basename(command).toLowerCase() === 'desktopwindows.exe' && args[0] !== 'processes') {
         assert.equal(args[0].toLowerCase(), exe.toLowerCase());
         assert.deepEqual(args.filter(arg => arg.startsWith('window:')), [`window:${main.pid}:${main.created}`]);
         assert.ok(renderers.every(pid => args.some(arg => arg.startsWith(`wait:${pid}:`))));

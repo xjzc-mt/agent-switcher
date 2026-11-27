@@ -44,7 +44,7 @@ const { logoutSupport, assertLogoutReady, clearClientCredentials } = require('..
 const { credentialState } = require('../dist/credential-state');
 const { atomicWrite } = require('../dist/utils');
 const codex = new CodexAgent();
-const nativeAgent = new AntigravityAgent(() => 'unified', true);
+const nativeAgent = new AntigravityAgent(() => 'unified', true, () => ({ state: 'ready' }));
 const auth = (account = 'A', generation = 1) => JSON.stringify({ auth_mode: 'chatgpt', tokens: {
   account_id: account, access_token: `access-${account}-${generation}`, refresh_token: `refresh-${account}-${generation}`,
   id_token: jwt({ sub: 'user-' + account, email: `${account}@example.test` }),
@@ -119,6 +119,23 @@ macTest('running desktop, CLI and IDE Codex processes prevent automatic logout w
   try { await assertLogoutReady(codex); }
   finally { isolatedCodexPids.delete(100); }
   assert.equal(codex.identity().id, 'A:user-A');
+});
+
+macTest('an inconclusive process probe blocks the action and records a redacted timeout', async t => {
+  const { initializeDiagnostics, runDiagnostic, exportDiagnostics } = require('../dist/diagnostics');
+  const { macDesktopRunning } = require('../dist/macos-desktop');
+  initializeDiagnostics(root, '0.1.0');
+  t.mock.method(cp, 'execFile', (command, _args, options, callback) => {
+    assert.equal(options.timeout, command === '/bin/ps' ? 3000 : 2000);
+    callback(Object.assign(new Error('fixture private text'), { killed: true }));
+  });
+  for (const probe of [() => assertLogoutReady(codex), () => macDesktopRunning('Codex', true)]) {
+    await assert.rejects(runDiagnostic('switch', 'codex', 'manual', undefined, probe), /检测.*超时/);
+    const record = exportDiagnostics().operations.at(-1);
+    assert.equal(record.result, 'timeout');
+    assert.deepEqual(record.steps.map(item => item.step), ['process-unknown']);
+  }
+  assert.equal(await macDesktopRunning('Codex'), false);
 });
 
 macTest('a parallel AGS query and its descendants stay isolated while a reused PID or an official CLI stays shared', async t => {

@@ -18,7 +18,7 @@
         <button role="tab" id="codex" aria-controls="content" aria-selected="true">Codex</button>
         <button role="tab" id="agy" aria-controls="content" aria-selected="false" tabindex="-1">Antigravity</button>
       </div>
-      <button class="icon-btn" id="refresh" aria-label="刷新当前账号额度" title="刷新各平台当前账号额度">
+      <button class="icon-btn" id="refresh" aria-label="刷新全部额度" title="刷新本平台全部额度">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 9a8 8 0 0 0-13-4L3 9m0-5v5h5m-4 6a8 8 0 0 0 13 4l4-4m0 5v-5h-5"/></svg>
       </button>
     </header>
@@ -30,6 +30,15 @@
       <div id="choices" role="group" aria-labelledby="choiceCount" hidden></div>
       <button id="add" hidden>添加账号</button>
       <div class="note empty" id="empty" hidden>暂无可切换账号</div>
+    </section>
+    <section id="switchPrompt" role="group" aria-labelledby="switchName" hidden>
+      <strong id="switchName"></strong>
+      <p id="switchDetail" role="status"></p>
+      <div class="switch-actions">
+        <button id="cancelSwitch">取消</button>
+        <button id="skipSave" hidden>直接切换</button>
+        <button id="confirmSwitch" hidden></button>
+      </div>
     </section>
     <footer class="panel-actions">
       <button id="open">打开主窗口</button>

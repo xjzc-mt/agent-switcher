@@ -1,6 +1,6 @@
 # 构建与发布
 
-[0.1.0](release-0.1.0.md) 分发 macOS Apple Silicon、Intel 两种 DMG 及 Windows x64 安装程序，并在官网托管 `install.sh` / `install.ps1` 一键安装脚本。版本基线、源码验收和待测环境见[当前待办](当前待办.md)。早期测试版资料保留在 [1.0.1](release-1.0.1.md) 与 [1.0.0](release-1.0.0.md)。
+[0.1.1](release-0.1.1.md) 分发 macOS Apple Silicon、Intel 两种 DMG 及 Windows x64 安装程序，并在官网托管 `install.sh` / `install.ps1` 一键安装脚本。版本基线、源码验收和待测环境见[当前待办](当前待办.md)。历史版本资料保留在 [0.1.0](release-0.1.0.md)、[1.0.1](release-1.0.1.md) 与 [1.0.0](release-1.0.0.md)。
 
 ## 版本与提交
 

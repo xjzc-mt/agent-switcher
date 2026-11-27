@@ -15,7 +15,9 @@ export function credentialStateFromFiles(agentId: string, files: ReadonlyArray<r
     try {
       const auth = JSON.parse(files[0][1]!.toString()), token = auth.token || auth;
       const updatedAt = Date.parse(token.expiry ?? auth.expiry);
-      return { revision: fingerprint(JSON.stringify([auth.auth_method, auth.id_token_email, auth.id_token,
+      const method = (auth.auth_method === undefined || auth.auth_method === '') && typeof auth.token?.refresh_token === 'string'
+        && auth.token.refresh_token.trim() ? 'consumer' : auth.auth_method;
+      return { revision: fingerprint(JSON.stringify([method, auth.id_token_email, auth.id_token,
         token.id_token, token.access_token, token.refresh_token])), updatedAt: Number.isFinite(updatedAt) ? updatedAt : undefined };
     } catch { /* Invalid data still has its own revision. */ }
   }
@@ -60,7 +62,7 @@ export function snapshotForCredentials(status: StatusResult | undefined, revisio
   // Keep useful quota history and its colors, but recheck this credential version.
   return { ...status, state: status.state === 'ok' ? 'ok' : 'unverified', authExpired: false,
     checkedAt: undefined, extra: undefined, authFailure: undefined, refreshConsumed: undefined, consumedRefreshFingerprint: undefined, refreshFailures: undefined,
-    creditActivity: undefined, credentialRevision: revision };
+    creditActivity: undefined, spareActivity: undefined, credentialRevision: revision };
 }
 
 export class CredentialChangedError extends Error {

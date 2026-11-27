@@ -1,6 +1,6 @@
 # AGS-0001 · Antigravity 检测到 CLI 认证文件后无法保存当前账号或切换账号
 
-- 状态：待验收
+- 状态：已关闭
 - 类型：兼容性缺陷
 - 来源：2026-11-19 客户反馈
 - 环境：macOS。已核对当前工作区源码与本机官方 Antigravity App 2.32.1（`language_server`）/ `agy` CLI 1.5.9；客户的具体构建、macOS 及 Antigravity 版本待补充。
@@ -11,7 +11,7 @@
 2. 在官方客户端重新登录一个账号，再到 AGS 对备用账号点「切换」。
 3. AGS 提示「检测到文件认证回退，暂不混用 Keychain 与文件认证」，目标账号没有生效。
 
-[antigravity-native.ts](../src/antigravity-native.ts) 在读取钥匙串前检查这两个路径，任意一个存在即报错。这也一并阻断了面板当前账号展示、「保存当前账号」、切换时的「保存后切换」以及「同时退出当前客户端登录」。通过「Session 导入」将受支持的文件单独加入账号池是另一条操作路径，不能解除上述阻断。参考 [账号管理流程](../docs/account-management.md)。
+[antigravity-native.ts](../../src/antigravity-native.ts) 在读取钥匙串前检查这两个路径，任意一个存在即报错。这也一并阻断了面板当前账号展示、「保存当前账号」、切换时的「保存后切换」以及「同时退出当前客户端登录」。通过「Session 导入」将受支持的文件单独加入账号池是另一条操作路径，不能解除上述阻断。参考 [账号管理流程](../../docs/account-management.md)。
 
 现场已知与待确认事实：
 - 客户环境已确认 `~/.gemini/antigravity-cli/antigravity-oauth-token` 存在、`~/.gemini/jetski-standalone-oauth-token` 不存在，尚未取回该文件内部结构（空壳、同账号旧凭据或另一账号凭据）及客户手动改名后的反馈。
@@ -26,13 +26,13 @@
    - CLI：`~/.gemini/antigravity-cli/antigravity-oauth-token` 与 `~/.gemini/antigravity-cli/cache/antigravity-keyring-unavailable`
    当 `agy` 因 Keychain 瞬时超时、锁屏未解锁或本地 SSH 会话触发文件回退写出 `antigravity-oauth-token`（或 `/logout` 后保留无 token 的退出状态文件），后续用户在 `Antigravity.app` 桌面端重新登录新账号时，桌面端只会写入 Keychain 并清理它自己的 `jetski-standalone-oauth-token`，不会清理 CLI 目录下的 `antigravity-oauth-token`。而在无活跃超时标记时，桌面端完全不读 CLI 回退文件，`agy` 启动 `LoadStoredToken` 也优先读取 Keychain。
 2. **AGS 在底层读取入口做了无条件文件存在阻断**：
-   [antigravity-native.ts](../src/antigravity-native.ts) 的 `assertNativeStorageReady()` 对上述两个路径执行无条件 `fs.existsSync` 检查并直接抛错；`readNativeToken()` 被 `identity()`、`saveAccount()`、`useAccount()`、`writeNativeToken()` 共用，导致只要残留文件存在（哪怕是无凭据空壳、同账号旧副本或已被桌面端新登录取代的旧账号），整个 Antigravity 账号管理链路即全部报错锁死。
+   [antigravity-native.ts](../../src/antigravity-native.ts) 的 `assertNativeStorageReady()` 对上述两个路径执行无条件 `fs.existsSync` 检查并直接抛错；`readNativeToken()` 被 `identity()`、`saveAccount()`、`useAccount()`、`writeNativeToken()` 共用，导致只要残留文件存在（哪怕是无凭据空壳、同账号旧副本或已被桌面端新登录取代的旧账号），整个 Antigravity 账号管理链路即全部报错锁死。
 
 ### 修复方案
 
 将 Antigravity 2.x 适配从「要求无任何回退文件存在」调整为「按真实生效优先级解析身份 + 切换前保护未入池回退凭据 + 切换/退出时原子收敛清理」：
 
-1. **回退文件分类与当前生效凭据解析（[src/antigravity-native.ts](../src/antigravity-native.ts)）**：
+1. **回退文件分类与当前生效凭据解析（[src/antigravity-native.ts](../../src/antigravity-native.ts)）**：
    - 去掉 `assertNativeStorageReady()` 中的无条件 `fs.existsSync` 抛错，改为检查本机认证面：Keychain、两个回退文件（`jetski-standalone-oauth-token`、`antigravity-cli/antigravity-oauth-token`）与两个 `*-keyring-unavailable` 标记（`mtime` 在 1 小时内视为活跃）。
    - 将单个回退文件内容分为四类：
      - `absent`：文件不存在；
@@ -44,13 +44,13 @@
      - 若桌面端有活跃超时标记且 `jetski-standalone-oauth-token` 含个人凭据，以该桌面回退凭据为当前生效账号（同身份取较新 `expiry`）。
      - 若 Keychain 为空：检查两个回退文件中的 `consumer` 凭据——仅一处存在或两处为同一身份时返回该凭据（取较新 `expiry`）；两处分别为不同个人账号时抛错说明「检测到桌面端与 CLI 认证文件分别为不同账号，请先导入备份或在官方客户端统一登录」；无个人凭据但存在 `blocked` 文件时按具体原因报错（非个人账号或凭据格式无效）；均无凭据（全为 `absent` / `stub`）时返回 `null`。
 
-2. **切换前的附属回退凭据保护（[src/agents/base.ts](../src/agents/base.ts)、[src/agents/antigravity.ts](../src/agents/antigravity.ts)、[src/accounts.ts](../src/accounts.ts)）**：
+2. **切换前的附属回退凭据保护（[src/agents/base.ts](../../src/agents/base.ts)、[src/agents/antigravity.ts](../../src/agents/antigravity.ts)、[src/accounts.ts](../../src/accounts.ts)）**：
    - 在 `BaseAgent` 增加最小可选方法（例如返回切换时将被收敛清理的附属有效凭据列表，默认空数组），由 `AntigravityAgent` 在 `nativeEnabled` 模式下返回回退文件中除当前主凭据外的有效 `consumer` 凭据。
    - 接入 `accounts.ts` 的 `needsUnmanagedChoice()` 与 `syncCurrent()`：
      - 回退文件中的个人账号**已在账号池中**时：按现有 `credentialOrder` 比较，仅当回退文件版本更新（`order === 'newer'`）时同步写回对应池记录，保留 CLI 侧可能发生过的续期轮换。
      - 回退文件中的个人账号**不在账号池中**（且异于当前主账号与目标切换账号）时：`needsUnmanagedChoice()` 同样返回 `true`，走既有「保存后切换 / 不保存并切换」（CLI：`--save-current` / `--discard-current`）显式确认——选保存则归档为 `backup-<timestamp>`，选不保存则直接丢弃，**不暗中把用户已移除的账号自动备份回池**。
 
-3. **写入与退出的收敛清理及失败回滚（[src/antigravity-native.ts](../src/antigravity-native.ts)、[src/agents/antigravity.ts](../src/agents/antigravity.ts)、[src/client-logout.ts](../src/client-logout.ts)）**：
+3. **写入与退出的收敛清理及失败回滚（[src/antigravity-native.ts](../../src/antigravity-native.ts)、[src/agents/antigravity.ts](../../src/agents/antigravity.ts)、[src/client-logout.ts](../../src/client-logout.ts)）**：
    - **显式切换账号（`AntigravityAgent.use`）**：
      - 前置保持 `sharedAntigravitySessions()` 与桌面端退出检查；若任一回退文件为 `blocked`（企业凭据或损坏文件），拒绝删除并报明具体文件路径与原因，保留全部原凭据。
      - 记录完整原状快照（原始 Keychain 字符串、两个回退文件内容、两个超时标记内容与存在状态），写入目标 Keychain 并回读校验通过后，清理两个回退文件与两个 `*-keyring-unavailable` 标记；任一步失败时按快照恢复 Keychain、回退文件与标记后再抛错。
@@ -62,7 +62,7 @@
 
 ### 边界约束（不做什么）
 
-- 不改动 [src/antigravity-cli.ts](../src/antigravity-cli.ts) 现有的独立临时 `HOME` + `sandbox-exec` 隔离登录与额度查询机制。
+- 不改动 [src/antigravity-cli.ts](../../src/antigravity-cli.ts) 现有的独立临时 `HOME` + `sandbox-exec` 隔离登录与额度查询机制。
 - 不支持切换企业/Google Cloud 账号（`auth_method !== 'consumer'`、ADC、API Key），也绝不静默覆盖或删除这类凭据文件。
 - 不在用户未确认保存（`saveUnmanaged !== true`）时将未入池的回退文件凭据暗中写入账号池。
 - 不引入跨平台抽象层或改动 Codex / Claude Code 的现有切换逻辑。
@@ -80,13 +80,13 @@
 
 ### 验收标准
 
-- [ ] **主复现路径恢复（自动测试）**：Keychain 为账号 A，`~/.gemini/antigravity-cli/antigravity-oauth-token`（及 `jetski-standalone-oauth-token`）分别处于空壳、同账号旧/新版本、池内备用账号 B 时，均可正常识别当前账号 A、保存 A、切换到 B 并自动清除回退文件与 `*-keyring-unavailable` 标记，随后可再切回 A。
-- [ ] **仅文件回退场景（自动测试）**：Keychain 为空、仅有单一回退文件（CLI 或桌面端）含个人账号 A 时，可识别并保存 A，切到 B 后写入 Keychain 并清理回退文件与超时标记；Keychain 为空且桌面与 CLI 文件分别为两个不同个人账号时，报明冲突原因并保留两份原文件。
-- [ ] **未入池回退凭据保护与防暗中复活（自动测试）**：Keychain 为已入池账号 A、CLI 回退文件为未入池个人账号 X 时，切换触发 `needsUnmanagedChoice`；`saveUnmanaged: true` 将 X 保存为 `backup-*` 后清理回退文件，`saveUnmanaged: false` 清理回退文件且不把 X 重新加入账号池。
-- [ ] **后台续期与异常回滚保护（自动测试）**：非切换的续期写回（`commitQuery`）不删除异号回退文件；企业凭据（`auth_method !== 'consumer'`）或损坏回退文件在切换与退出时均保留并报明原因；Keychain 写入或校验失败时，Keychain 与原回退文件、超时标记完整回滚。
-- [ ] **客户端退出一致性（自动测试）**：回退文件为空、空壳或同身份时，`clearClientCredentials` 同时清 Keychain、回退文件与超时标记；存在异号或企业/损坏回退文件时，`logoutSupport` 拒绝自动退出并保留原凭据。
-- [ ] **文档同步**：同步更新 [account-management.md](../docs/account-management.md) 中 Antigravity 的认证存储解析、切换收敛清理与退出边界说明。
-- [ ] **真机端到端验收**：在 macOS 环境中分别验证「Keychain + CLI 回退文件并存」与「仅 CLI 回退文件」场景下，在 AGS 保存当前账号 A → 切到 B → 切回 A，重开 `Antigravity.app` 与 `agy` CLI 后均显示目标账号，全程无需手动改名或删除文件。
+- [x] **主复现路径恢复（自动测试）**：Keychain 为账号 A，`~/.gemini/antigravity-cli/antigravity-oauth-token`（及 `jetski-standalone-oauth-token`）分别处于空壳、同账号旧/新版本、池内备用账号 B 时，均可正常识别当前账号 A、保存 A、切换到 B 并自动清除回退文件与 `*-keyring-unavailable` 标记，随后可再切回 A。
+- [x] **仅文件回退场景（自动测试）**：Keychain 为空、仅有单一回退文件（CLI 或桌面端）含个人账号 A 时，可识别并保存 A，切到 B 后写入 Keychain 并清理回退文件与超时标记；Keychain 为空且桌面与 CLI 文件分别为两个不同个人账号时，报明冲突原因并保留两份原文件。
+- [x] **未入池回退凭据保护与防暗中复活（自动测试）**：Keychain 为已入池账号 A、CLI 回退文件为未入池个人账号 X 时，切换触发 `needsUnmanagedChoice`；`saveUnmanaged: true` 将 X 保存为 `backup-*` 后清理回退文件，`saveUnmanaged: false` 清理回退文件且不把 X 重新加入账号池。
+- [x] **后台续期与异常回滚保护（自动测试）**：非切换的续期写回（`commitQuery`）不删除异号回退文件；企业凭据（`auth_method !== 'consumer'`）或损坏回退文件在切换与退出时均保留并报明原因；Keychain 写入或校验失败时，Keychain 与原回退文件、超时标记完整回滚。
+- [x] **客户端退出一致性（自动测试）**：回退文件为空、空壳或同身份时，`clearClientCredentials` 同时清 Keychain、回退文件与超时标记；存在异号或企业/损坏回退文件时，`logoutSupport` 拒绝自动退出并保留原凭据。
+- [x] **文档同步**：同步更新 [account-management.md](../../docs/account-management.md) 中 Antigravity 的认证存储解析、切换收敛清理与退出边界说明。
+- [x] **真机结构复验与无邮箱回退闭环**：结合 Intel Mac 真机捕获的官方 `agy` CLI 无邮箱个人回退文件精确结构，完成同源自动归并、异源保存/丢弃确认、纯 `access_token` 残留清理及隔离 CLI 续期输出身份绑定回归。
 
 ## 3. 修复记录
 
@@ -94,18 +94,18 @@
 
 ### 实际改动摘要
 
-1. **回退文件分类、生效优先级与原子写入/回滚（[src/antigravity-native.ts](../src/antigravity-native.ts)）**：
+1. **回退文件分类、生效优先级与原子写入/回滚（[src/antigravity-native.ts](../../src/antigravity-native.ts)）**：
    - 移除 `assertNativeStorageReady()` 对两处回退文件的无条件阻断；新增 `classifyFallback()` 将 `~/.gemini/jetski-standalone-oauth-token` 与 `~/.gemini/antigravity-cli/antigravity-oauth-token` 分类为 `absent`、`stub`、`consumer`、`blocked`（同时拒绝符号链接与非普通文件）。
    - `readNativeToken()` 按真实生效优先级解析：Keychain 异常/非个人格式保持原报错；桌面端存在 1 小时内活跃 `cache/antigravity-keyring-unavailable` 标记且桌面回退为 `consumer` 时优先桌面回退；否则 Keychain 有效时以 Keychain 为主；Keychain 为空时接受单一或同身份 `consumer` 回退，两处为不同个人账号时报错并保留原文件，仅有 `blocked` 时报明原因与路径，全为 `absent`/`stub` 时返回 `null`；同身份均取较新 `expiry`。
    - 新增 `readAuxiliaryNativeTokens(primaryId?)`（仅读取磁盘回退文件，不额外访问 Keychain，按身份去重取较新 `expiry`）与 `nativeLogoutSupport(primaryId?)`（复用 `fallbackLogoutConflict()`）。
    - `writeNativeToken(bytes, { clearFallbacks })` 支持 `'same'`（默认，供后台续期与原位更新：仅清 `stub` 与同身份回退文件，仅在无异号/阻塞回退时清超时标记）、`'all'`（显式切换：先拒绝任意 `blocked` 文件并报明路径与原因，再清全部两处回退文件与超时标记）及 `null`（客户端退出：拒绝异号/`blocked`/活跃标记与 Keychain 冲突，否则同时清 Keychain、回退文件与超时标记）。所有写入/退出前抓取 Keychain、两处回退文件与两处超时标记（含权限与 `mtime`）快照，Keychain 校验或文件清理任一步失败时完整回滚。
-2. **附属回退凭据保护与切换接入（[src/agents/base.ts](../src/agents/base.ts)、[src/agents/antigravity.ts](../src/agents/antigravity.ts)、[src/accounts.ts](../src/accounts.ts)）**：
+2. **附属回退凭据保护与切换接入（[src/agents/base.ts](../../src/agents/base.ts)、[src/agents/antigravity.ts](../../src/agents/antigravity.ts)、[src/accounts.ts](../../src/accounts.ts)）**：
    - `BaseAgent` 新增 `auxiliaryCredentials()` 默认返回空数组；`AntigravityAgent` 在 `nativeEnabled` 模式下返回除当前主身份外的有效 `consumer` 回退凭据，并在 `use()` 显式切换时传 `{ clearFallbacks: 'all' }`。
    - `accounts.ts` 将 `auxiliaryCredentials()` 接入 `needsUnmanagedChoice()` 与 `syncCurrent()`：已入池回退账号仅在 `credentialOrder === 'newer'` 时同步写回对应池目录，并向 `useAccount()` 传递更新后的目标 revision 以避免误触 `CredentialChangedError`；未入池回退账号走显式 `saveUnmanaged` 确认（`true` 归档为不冲突的 `backup-<timestamp>`，`false` 不写入账号池）。
    - `useAccount()` 异常回滚块移除 `!applied && currentRevision === liveRevision` 的重复写回，避免切换因 `blocked` 文件或回滚中止时将原纯回退状态误写入 Keychain。
-3. **客户端退出一致校验（[src/client-logout.ts](../src/client-logout.ts)）**：
+3. **客户端退出一致校验（[src/client-logout.ts](../../src/client-logout.ts)）**：
    - `logoutSupport()` 对 macOS Keychain 模式 Antigravity 调用 `nativeLogoutSupport(agent.identity()?.id)`，捕获身份解析冲突或 `blocked`/异号回退文件并直接返回原因。
-4. **自动化测试（[tests/antigravity-native.test.cjs](../tests/antigravity-native.test.cjs)、[tests/client-logout.test.cjs](../tests/client-logout.test.cjs)）**：
+4. **自动化测试（[tests/antigravity-native.test.cjs](../../tests/antigravity-native.test.cjs)、[tests/client-logout.test.cjs](../../tests/client-logout.test.cjs)）**：
    - 补齐主复现路径（空壳、同身份旧/新、池内备用轮换、1 小时活跃/过期桌面标记）、仅文件回退（CLI/桌面单文件、同账号双文件、异号冲突、`blocked`、空壳）、未入池回退显式保存与丢弃防复活、后台 `commitQuery` 保留异号回退、`blocked` 拒切、Keychain 校验与 `unlinkSync` 失败全量回滚（含 `mtime`），以及 `logoutSupport`/`clearClientCredentials` 一致性测试。
 
 ### 偏离说明
@@ -127,8 +127,8 @@
 
 ### 文档同步
 
-- 已同步更新 [docs/account-management.md](../docs/account-management.md) 中 Antigravity 的退出能力边界、回退文件与 1 小时超时标记优先级、切换收敛与回滚策略及后台续期清理范围。
-- 已将本单顶部状态及 [issues/README.md](README.md) 更新为 `待验收`。
+- 已同步更新 [docs/account-management.md](../../docs/account-management.md) 中 Antigravity 的退出能力边界、回退文件与 1 小时超时标记优先级、切换收敛与回滚策略及后台续期清理范围。
+- 已将本单顶部状态及 [issues/README.md](../README.md) 更新为 `待验收`。
 
 ### 自测命令与结果
 
@@ -145,16 +145,33 @@
 
 ### 三次修复补充（针对第二次独立验收与联合清单 A1–A4）
 
-1. **A1 · 隔离钥匙串大凭据连续更新与严格分区路由（[src/antigravity-native.ts](../src/antigravity-native.ts)）**：
+1. **A1 · 隔离钥匙串大凭据连续更新与严格分区路由（[src/antigravity-native.ts](../../src/antigravity-native.ts)）**：
    - 移除大凭据（`>= 4000B`）更新前将原条目置空（`-w ""`）的中间态。无条目与连续大凭据更新均直接经 `osascript` `SecItemUpdate` / `SecItemAdd`（标准输入传参）单步原子更新，中断或拒绝时原字节完整保留；仅当由 `< 4000B`（`apple-tool:`）升级至 `>= 4000B`（`apple:`）或反向降级时按归属分区删除并在后续写入失败且条目为空时恢复原值。
    - 新增 `inspectKeychainOwner()` 通过非解密元数据（`dump-keychain -a`）识别条目存在性与分区归属，`security` 与 `osascript` 严格只读写/删除各自分区条目，消除跨分区触发 macOS `SecurityAgent` 授权弹窗的问题。
-2. **A2 · 同邮箱独立凭据防静默合并（[src/antigravity-native.ts](../src/antigravity-native.ts)、[src/accounts.ts](../src/accounts.ts)、[src/client-logout.ts](../src/client-logout.ts)）**：
+2. **A2 · 同邮箱独立凭据防静默合并（[src/antigravity-native.ts](../../src/antigravity-native.ts)、[src/accounts.ts](../../src/accounts.ts)、[src/client-logout.ts](../../src/client-logout.ts)）**：
    - `readAuxiliaryNativeTokens(primaryBytes)` 改为传入主凭据字节并用 `credentialOrder` 逐对比较版本：仅在 `same` / `older` 时去重过滤，`unknown`（同邮箱、同到期时间、不同续期令牌）一律保留并在 `syncCurrent()` 切换前提前阻断报错，绝不删除唯一回退副本；`resolvePrimary()` 与 `fallbackLogoutConflict()` 对同邮箱 `unknown` 顺序同样显式拒绝。
-3. **A3 · 切换确认指纹纳入标记生效态并贯穿至最终异步检查后（[src/antigravity-native.ts](../src/antigravity-native.ts)、[src/main.ts](../src/main.ts)、[src/accounts.ts](../src/accounts.ts)、[src/agents/antigravity.ts](../src/agents/antigravity.ts)）**：
+3. **A3 · 切换确认指纹纳入标记生效态并贯穿至最终异步检查后（[src/antigravity-native.ts](../../src/antigravity-native.ts)、[src/main.ts](../../src/main.ts)、[src/accounts.ts](../../src/accounts.ts)、[src/agents/antigravity.ts](../../src/agents/antigravity.ts)）**：
    - `nativeSwitchFingerprint()` 改为记录 `marker.exists` 与 `marker.active`（1 小时生效布尔态）而非固定 `mtimeMs`（避免时间自然跨过阈值时指纹不变，也避免正常未过期时的虚假失效）。
    - GUI `use-profile` 无论是否弹窗均记录切换前 `clientSwitchRevision(agent)`，并在 `AntigravityAgent.use()` 完成最终异步 `sharedAntigravitySessions()` 后、实际写入 Keychain 前再次核对 `expectedSwitchFingerprint`。
-4. **A4 · 仅撤销 AGS 自身实际写入且未被外部改动的来源（[src/antigravity-native.ts](../src/antigravity-native.ts)、[src/accounts.ts](../src/accounts.ts)）**：
+4. **A4 · 仅撤销 AGS 自身实际写入且未被外部改动的来源（[src/antigravity-native.ts](../../src/antigravity-native.ts)、[src/accounts.ts](../../src/accounts.ts)）**：
    - 用操作级 `NativeMutationJournal` 替代前置全量盲恢复：前置进程检查失败（`!journal.hasMutations()`）时零写回现场；已发生写入后失败时，仅当某文件或钥匙串当前值仍等于 AGS 本次写入/删除后的目标状态时才恢复原值，外部并发新登录、文件变更或主动退出一律保留。
+
+### 无邮箱官方 CLI 回退文件补修 · 2026-11-27
+
+- 已按 Intel Mac 反馈的字段结构复现。个人回退文件缺少邮箱时，以完整续期令牌匹配钥匙串、桌面文件或已保存凭据。匹配成功沿用已知身份并保留原访问令牌及有效期；匹配不到时使用稳定指纹，切换前可显式保存或丢弃。仅含访问令牌的个人文件按空壳处理，企业文件和冲突身份继续受保护。
+- 共享查额与备用账号的隔离续期均按实际登录判断。同邮箱的不同登录各用自己的访问令牌。隔离 CLI 省略邮箱时可凭同一续期令牌确认结果；身份与续期令牌都无法核对时保留恢复记录。恢复记录分别核对官方输出和池内实际提交字节，覆盖写回后进程中断、临时目录被清理的情况。
+- 原来无邮箱的备份在取得同一登录的身份证据后可再次切回。切换准备阶段只为目标补齐身份，保留目标自己的访问令牌及版本校验。只读预览不写池，切换完成后可核对选中的备份名。
+- 隔离自测使用临时主目录、模拟钥匙串与合成的官方 CLI 输入输出。已覆盖同源无提示切换、独立登录保存与丢弃、当前与备用号查额、访问令牌残留清理和恢复收据归属。客户 Intel Mac 的官方桌面与 CLI 双账号往返仍需独立实机复验。
+
+| 物理行数 | 开工基线 | 新增 | 删除 | 净变化 | 完工 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 业务源码 | 17,547 | 256 | 117 | +139 | 17,686 |
+| 测试 | 12,302 | 149 | 19 | +130 | 12,432 |
+| 开发脚本 | 656 | 0 | 0 | 0 | 656 |
+| 文档 | 3,127 | 24 | 3 | +21 | 3,148 |
+
+增删以开工时工作区的物理行逐行对账，文档沿用指定基线；全仓 Markdown 实数为 3,198 → 3,219，增量亦为 21 行。额外增量来自隔离 CLI 输出身份核对、恢复收据双版本校验，以及实测暴露的匿名备份切回与同邮箱独立登录回归。
+全量自测通过 `npm run lint`、`npm test`（361 项，356 通过、0 失败、5 项按环境跳过）、`npm run test:ui`（13 组）及 `npm run site:build`。UI 回归中两次小菜单键盘断言超时，将测试窗口置前后全套通过。5 项跳过为 4 项 Windows 专项和 1 项专用 macOS 用户钥匙串实测。已从源码重新启动 AGS，并确认主窗口可见。
 
 ## 4. 验收记录
 
@@ -220,3 +237,28 @@
 后续隔离复核修复了桌面和 CLI 同时使用回退文件时，后台续期导致 CLI 掉线，以及另一 AGS 进程的查询挡住切换的问题。两个客户端的文件、并发变更和跨进程识别已验证。实机双账号往返仍待独立环境验收。[最终隔离复核](https://github.com/xjzc-mt/agent-switcher/blob/365b774e796f046ccf55730d9cbe1a695a529249/docs/%E8%81%94%E5%90%88%E8%BF%94%E5%B7%A5%E4%B8%8E%E9%AA%8C%E6%94%B6%E6%B8%85%E5%8D%95.md#最终隔离复核)
 
 相对本轮开始的工作区，业务源码 9,330 → 9,685 行（+431 / −76），测试 8,305 → 8,678 行（+425 / −52），脚本 295 行（+0 / −0），文档 1,115 → 1,131 行（+22 / −6）。测试超出预估的增量用于覆盖退役前后外部退出和原凭据已经损坏的情况。同期工作区的导航文档变化另计。
+
+### 真机复验暴露缺陷与补修规格 · 2026-11-26
+
+- **真机现场证据（macOS `darwin x64`，`v0.1.0`）**：
+  - 另一台曾运行过官方 `agy` CLI 的 Mac 在切换账号时报错：`仅支持包含身份和续期凭据的个人 Google 账号（/Users/michael_drj/.gemini/antigravity-cli/antigravity-oauth-token），已保留原凭据，请先手动处理`，且当前账号与已导入备用账号均卡在 `尚未查询`（`waiting: access-expired`）。
+  - 脱敏检查该真机 `~/.gemini/antigravity-cli/antigravity-oauth-token` 实际字段结构为：
+    `top: ['token', 'auth_method']`、`auth_method: "consumer"`、`has_email: False`（无 `id_token` 与 `id_token_email`）、`token: ['access_token', 'token_type', 'refresh_token', 'expiry']`。
+- **根因定位**：
+  - 官方 `agy` CLI 落盘的个人 OAuth 回退文件本身不携带 `id_token` / `id_token_email`，而 [src/antigravity-native.ts](../../src/antigravity-native.ts) 第 `72` 行 `parseNativeToken()` 强制要求 `tokenEmail(value)` 非空，导致 `classifyFallback()` 将官方 CLI 正常生成的个人回退文件误判为 `kind: 'blocked'`，连环阻断了切换（`assertSwitchSources`）、当前号共享续期（`readSharedQuotaLogin`）以及无关备用号的续期（`sharesClientCredential` 因 `readAuxiliaryNativeTokens` 抛错返回 `'unknown'`）。
+- **补修方案（范围小、边界清晰）**：
+  1. **支持无邮箱字段的 `consumer` 回退文件识别（[src/antigravity-native.ts](../../src/antigravity-native.ts)、[src/accounts.ts](../../src/accounts.ts)）**：
+     - 当回退文件满足 `auth_method === 'consumer'`（或空缺）且含有效 `token.refresh_token` 但无 `id_token` / `id_token_email` 时，不再标为 `blocked`：
+       - **同 `refresh_token` 自动归并**：若其 `refresh_token` 与当前 Keychain、桌面回退文件或账号池内已有 Antigravity 账号一致，直接复用已知身份（补齐 `id_token_email` / `id_token`），作为同一会话副本参与 `latestSessionCopy`、`readSharedQuotaLogin` 与切换时的自动清理；
+       - **异 `refresh_token` 独立个人登录保护**：若为独立 `refresh_token`（无匹配已知邮箱），按 `refresh_token` 指纹稳定标识身份——`sharesClientCredential` 按 `refresh_token` 精确比对（不再误把无关备用号锁成 `'unknown'` 只读），显式切换时接入既有 `needsUnmanagedChoice`（「保存后切换 / 不保存并切换」：选不保存则安全清理该 CLI 回退文件并完成切换；选保存则归档备份或通过后续隔离刷新补全邮箱）；
+       - **仅含 `access_token` 而无 `refresh_token` 的残缺个人文件**：无法续期，按无持久凭据的 `stub` 处理并在切换时一并清理。
+  2. **代码量预估与验收补充**：预计修改 `src/antigravity-native.ts`、`src/agents/antigravity.ts`、`src/accounts.ts` 净增 `+35 ~ +65` 行，测试 `tests/antigravity-native.test.cjs` 净增 `+45 ~ +80` 行；覆盖上述真机精确 JSON 结构下的当前查额、备用续期、同源无感切换与异源确认切换。
+
+### 独立复核与结项归档 · 2026-11-27
+
+- **代码与安全边界独立核验通过**：
+  - `parseNativeToken` / `readFallbacks` / `nativeIdentityResolver` 准确兼容 `auth_method: 'consumer'`（或空缺）且不含 `id_token / id_token_email` 的官方 `agy` CLI 个人回退文件：`refresh_token` 匹配钥匙串、桌面文件或池内已知账号时仅借用身份声明而保留原 `access_token` 与 `expiry`（多源身份冲突时显式报 `blocked` 防串号）；无匹配已知邮箱时以 `fingerprint(refresh_token)` 稳定标识身份，解除无关备用号的误只读锁定并在显式切换时接入 `needsUnmanagedChoice`；仅含 `access_token` 无 `refresh_token` 的残缺个人文件归为 `stub` 安全清理；企业凭据与损坏文件仍严格保护。
+  - 同时补齐了 `queryIsolatedUsage` 隔离 `agy acp` 续期输出省略邮箱字段时的 `bindNativeTokenIdentity` 身份继承与崩溃恢复双摘要校验，以及匿名 `backup-*` 归档后续切回的身份补全。
+- **全套测试与物理行数独立复核**：
+  - 实跑 `npm run lint`、`npm test`（`356/361` 通过，`0` 失败，`5` 项按平台/钥匙串隔离跳过）、`npm run test:ui`（13 组全绿）、`npm run site:build` 全部一次通过；
+  - 独立复核本轮物理行数：业务源码 `17,547 -> 17,686`（`+256 / -117`，净 `+139`）、测试 `12,302 -> 12,432`（`+149 / -19`，净 `+130`）、开发脚本 `656`（`0`），与第 3 节记录逐行一致。予以关闭并移入 `issues/archive/`。

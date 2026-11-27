@@ -8,7 +8,7 @@
     put them in one desktop window: see who still has quota left at a glance, switch in one click without breaking flow or overwriting your unsaved primary login.
   </p>
   <p>
-    <a href="docs/release-0.1.0.md"><img src="https://img.shields.io/badge/release-0.1.0-4F46E5?style=flat-square" alt="0.1.0 release" /></a>
+    <a href="docs/release-0.1.1.md"><img src="https://img.shields.io/badge/release-0.1.1-4F46E5?style=flat-square" alt="0.1.1 release" /></a>
     <img src="https://img.shields.io/badge/desktop-macOS_%C2%B7_Windows_x64-172033?style=flat-square" alt="macOS Apple Silicon, macOS Intel, Windows x64" />
     <img src="https://img.shields.io/badge/agents-Codex_%C2%B7_Antigravity-6366F1?style=flat-square" alt="Codex and Antigravity" />
     <img src="https://img.shields.io/badge/privacy-Zero_Backend_%C2%B7_AES--256--GCM-0D9488?style=flat-square" alt="Zero Backend · AES-256-GCM" />
@@ -19,7 +19,7 @@
     <a href="#visual-tour">Visual Tour</a> ·
     <a href="#security--platform-support">Security &amp; Support</a> ·
     <a href="#quick-install">Quick Install</a> ·
-    <a href="docs/release-0.1.0.md">0.1.0 Release Notes</a> ·
+    <a href="docs/release-0.1.1.md">0.1.1 Release Notes</a> ·
     <a href="#beyond-the-gate">✦ Beyond the Gate</a>
   </p>
 </div>
@@ -67,18 +67,18 @@ Select accounts and set a dedicated password of at least 6 characters to export 
 - **No silent overwrites or side effects**: Switching away from an unsaved active login triggers a protection prompt first. AGS only swaps login credentials — never touching chat history or project configs, and never auto-switching in the background.
 - **Clear boundaries**: Only add someone else’s account with explicit permission; this release is strictly local to your machine. See [Account Management Flow](docs/account-management.md) and [Quota Refresh](docs/refresh-behavior.md) for details (docs in Chinese).
 
-| Platform | Status | macOS Support & Requirements |
+| Platform | Status | Capabilities & Requirements |
 | --- | :---: | --- |
 | **Codex** (`codex`) | ✅ Supported | Isolated sign-in, `auth.json` switching, `5h / 7d` quota & Credits (uses the Codex CLI bundled with the desktop app or installed separately; Keychain-only storage is unsupported; API keys have no subscription quota) |
-| **Antigravity** (`agy`) | ✅ Supported | Isolated sign-in for personal Google accounts in Antigravity 2.x, switching via Keychain or official credential files, and quotas by model group (requires the official `agy` CLI; enterprise authentication is unverified) |
+| **Antigravity** (`agy`) | ✅ Supported | Save, import, and manually switch personal Google accounts on macOS and Windows with just the Antigravity 2.x desktop app; model-group quotas and isolated browser sign-in require official `agy` 1.5.9+ CLI (enterprise auth is unverified) |
 
-**0.1.0 Cross-Platform Status**: Passed installation, launch, and uninstall checks on Windows x64. On Windows, AGS can sign in and check quota using either a standalone Codex CLI or the runtime installed by the Microsoft Store version of Codex on first launch, and can close and reopen the Codex desktop app during a switch with your confirmation. Personal Antigravity 2.x accounts require the official `agy` CLI. Two-account round trips on Mac and real-device end-to-end checks on Windows still await independent verification.
+**0.1.1 Cross-Platform Status**: Verified installation, launch, and automated regression checks across macOS (Apple Silicon / Intel) and Windows x64. On Windows, AGS supports standalone or Microsoft Store Codex runtimes, fast native process & DPAPI inspection, and desktop-only Antigravity 2.x account switching; installing official `agy` 1.5.9+ and clicking **Recheck** unlocks quota queries. Two-account round trips on Mac and real-device end-to-end checks on Windows still await final sign-off.
 
 ---
 
 ## Quick Install
 
-Use a one-line command to auto-detect your architecture, verify the signed release manifest, and install AGS (if you previously installed an early `1.0.x` test build, running the command replaces the app cleanly at `0.1.0` while keeping all saved accounts):
+Existing `0.1.0` users can upgrade in one click inside **Settings → App & Updates → Install & Restart**. For fresh installs (or replacing an early `1.0.x` test build cleanly at `0.1.1` while keeping all saved accounts), run the one-line installer:
 
 ```bash
 # macOS (requires macOS 13+, auto-detects Apple Silicon / Intel and installs into /Applications)
@@ -90,15 +90,15 @@ curl -fsSL https://xjzc-mt.github.io/agent-switcher/install.sh | bash
 irm https://xjzc-mt.github.io/agent-switcher/install.ps1 | iex
 ```
 
-Or download a `0.1.0` installer directly:
-[macOS · Apple Silicon (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-0.1.0-arm64.dmg) · [macOS · Intel (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-0.1.0-x64.dmg) · [Windows · x64 (EXE)](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-Setup-0.1.0-x64.exe)
+Or download a `0.1.1` installer directly:
+[macOS · Apple Silicon (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.1/AgentSwitcher-0.1.1-arm64.dmg) · [macOS · Intel (DMG)](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.1/AgentSwitcher-0.1.1-x64.dmg) · [Windows · x64 (EXE)](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.1/AgentSwitcher-Setup-0.1.1-x64.exe)
 
 - **macOS** — Open the DMG and drag AGS into **Applications**. Finish active tasks in the official client before switching. With your confirmation, AGS quits and reopens the desktop client if it was running. For Antigravity, first close any `agy` or IDE sessions that share the login.
 - **Windows** — Run the EXE installer. Finish any CLI or IDE sessions that share the login before switching; if the Codex desktop app is running, AGS can close and reopen it after your confirmation.
 
 ```bash
 shasum -a 256 AgentSwitcher-*.dmg   # macOS. Compare the result with SHA256SUMS from the same release.
-# Windows PowerShell: Get-FileHash .\AgentSwitcher-Setup-0.1.0-x64.exe
+# Windows PowerShell: Get-FileHash .\AgentSwitcher-Setup-0.1.1-x64.exe
 ```
 
 > [!IMPORTANT]

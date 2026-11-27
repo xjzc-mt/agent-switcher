@@ -133,6 +133,16 @@ export function stepDiagnostic(step: Step, details?: RpcDetails): void {
   save(r);
 }
 
+export function processProbeError(error: unknown, message: string, timeoutMessage = message): Error {
+  stepDiagnostic('process-unknown');
+  const child = error as { code?: string; killed?: boolean } | undefined;
+  if (child?.code === 'ETIMEDOUT' || child?.killed) {
+    resultDiagnostic('timeout');
+    return new Error(timeoutMessage);
+  }
+  return new Error(message);
+}
+
 export function resultDiagnostic(result: Exclude<Result,'interrupted'>, lastSuccess?: string): void {
   const context = scope.getStore();
   if (!context || context.record.result || !results.includes(result)) return;

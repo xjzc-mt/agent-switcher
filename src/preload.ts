@@ -1,10 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { WindowCommand, TraySnapshot } from './tray-menu';
 contextBridge.exposeInMainWorld('api', {
+  getQuotaPaused: () => ipcRenderer.invoke('get-quota-paused'),
+  onQuotaPower: (callback: (paused: boolean) => void) => { ipcRenderer.on('quota-power', (_event, paused) => callback(paused)); },
+  onQuotaOpen: (callback: (platform?: string) => void) => { ipcRenderer.on('quota-open', (_event, platform) => callback(platform)); },
+  onMainVisibility: (callback: (visible: boolean) => void) => { ipcRenderer.on('main-visibility', (_event, visible) => callback(visible)); },
   ...(process.platform === 'darwin' && {
     updateTray: (snapshot: TraySnapshot) => ipcRenderer.invoke('tray-state', snapshot),
     trayReady: () => ipcRenderer.invoke('tray-ready'),
-    revealTrayMain: () => ipcRenderer.invoke('tray-reveal-main'),
+    replyTraySwitch: (request: string, result: unknown) => ipcRenderer.invoke('tray-switch-result', request, result),
     onTrayCommand: (callback: (command: WindowCommand) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, command: WindowCommand) => callback(command);
       ipcRenderer.on('tray-command', listener);
@@ -30,12 +34,15 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('app-quit-state', listener);
   },
   getStatus: () => ipcRenderer.invoke('get-status'),
+  openAntigravityInstall: () => ipcRenderer.invoke('open-antigravity-install'),
+  recheckAntigravityCli: () => ipcRenderer.invoke('recheck-antigravity-cli'),
   setSidebarLayout: (collapsed: boolean, width: number) => ipcRenderer.invoke('set-sidebar-layout', collapsed, width),
   refreshAccount: (id: string, name?: string, force = false, source?: string) => ipcRenderer.invoke('refresh-account', id, name, force, source),
   loginStatus: (id: string) => ipcRenderer.invoke('login-status', id),
   saveProfile: (id: string, name: string, attempt?: number) => ipcRenderer.invoke('save-profile', id, name, attempt),
   updateFromLogin: (id: string, name: string, attempt: number) => ipcRenderer.invoke('update-from-login', id, name, attempt),
-  useProfile: (id: string, name: string, source?: string) => ipcRenderer.invoke('use-profile', id, name, source),
+  useProfile: (id: string, name: string, source?: string, decision?: { token: string; saveUnmanaged?: boolean }) =>
+    ipcRenderer.invoke('use-profile', id, name, source, decision),
   previewDeleteProfile: (id: string, name: string) => ipcRenderer.invoke('preview-delete-profile', id, name),
   deleteProfile: (id: string, name: string, options: { previewId: string; logout: boolean }) => ipcRenderer.invoke('delete-profile', id, name, options),
   renameProfile: (id: string, oldName: string, newName: string) => ipcRenderer.invoke('rename-profile', id, oldName, newName),

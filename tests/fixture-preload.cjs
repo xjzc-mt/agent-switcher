@@ -14,6 +14,7 @@ if (manualStartup) profiles.forEach(p => { p.meta.snapshot.checkedAt = new Date(
 let failNextSettings = false;
 contextBridge.exposeInMainWorld('settingsTestApi', { failNext: () => { failNextSettings = true; } });
 const calls = [];
+let trayConfirmation;
 let appUpdateState = { currentVersion: '1.0.0', status: 'idle', autoCheck: true };
 let appUpdateFailure;
 const appUpdateListeners = new Set();
@@ -63,6 +64,15 @@ contextBridge.exposeInMainWorld('providerTestApi', {
     data[1].active='Google A';data[1].status=data[1].profiles[0].meta.snapshot;
     Object.assign(data[1].status, { fetchedAt: activeSnapshotAt, checkedAt: activeSnapshotAt });
   },
+  cli: (state, version) => { Object.assign(data[1].management, {
+    cliStatus:{state,version}, quota:state==='ready', isolatedLogin:state==='ready',
+    loginLabel:state==='ready'?undefined:'打开 Antigravity 登录',
+  }); },
+  desktopLogin: email => {
+    data[1].profiles.forEach(p=>p.isActive=p.meta.email===email);
+    data[1].active=data[1].profiles.find(p=>p.isActive)?.name;
+    data[1].status={available:true,state:'unverified',account:email};
+  },
   setup:()=>{
     data[1].management={quota:false,storage:'unified',canSaveCurrent:false,notice:'Antigravity 2.x 已统一 App、CLI 与 IDE 登录。旧版凭据仅作备份，请在官方客户端切换账号。',loginLabel:'打开 Antigravity',loginHint:'在官方客户端中查看或更改登录账号。'};
     data[1].switchUnsupported='共用认证暂不支持文件切换';
@@ -70,6 +80,7 @@ contextBridge.exposeInMainWorld('providerTestApi', {
   },
 });
 contextBridge.exposeInMainWorld('accountTestApi',{
+  trayConfirmation: value => { trayConfirmation=value; },
   proTiers:()=>{['promax','prolite','pro','promax'].forEach((plan,i)=>profiles[i].meta.snapshot.plan=plan);},
   failDelete:()=>{failNextDelete=true;},
   blockDelete:()=>{blockNextDelete=true;},
@@ -106,22 +117,33 @@ contextBridge.exposeInMainWorld('refreshTestApi', {
   failNext:()=>{failNextRefresh=true;},
   nextCredit:balance=>{nextRefreshCredit=balance;},
 });
-contextBridge.exposeInMainWorld('testApi', {calls:()=>calls, clearInjection:()=>{profiles[2].meta.snapshot.plan='plus';}, setImportMode:value=>{importMode=value;}, blockNextRefresh:()=>{blockNextRefresh=true;}, releaseRefresh:()=>releaseRefresh?.(), spendingCredits:()=>{ const activity={lastDecreaseAt:new Date().toISOString(),previousBalance:'12.5',currentBalance:'11.5'}; profiles[0].meta.snapshot.creditActivity=activity; profiles[0].meta.snapshot.quota.credits.balance='11.5'; profiles[1].meta.snapshot.creditActivity={...activity,previousBalance:'4.2',currentBalance:'3.2'}; profiles[1].meta.snapshot.quota.credits.balance='3.2'; }, rename:()=>{data[0].profiles[2].name="O'Reilly & <team>";}, inject:()=>{data[0].profiles[2].meta.snapshot.plan='<img src=x onerror="window.injected=true">';}});
-contextBridge.exposeInMainWorld('api', {
- ...(process.argv.includes('--test-tray-menu') && {
-   updateTray: state => ipcRenderer.send('fixture-tray-state', state),
-   onTrayCommand: callback => { ipcRenderer.on('tray-command', (_event, command) => callback(command)); },
-   trayReady: () => {},
- }),
- setSidebarLayout:async(collapsed,width)=>process.argv.includes('--test-window-layout')?ipcRenderer.invoke('test-window-layout',collapsed,width):contextBridge.executeInMainWorld({func:sidebarWidth=>({minWidth:AccountLayout.minimumWidth(sidebarWidth),minHeight:620}),args:[collapsed?56:width]}),
- getStatus:async()=>{
+contextBridge.exposeInMainWorld('testApi', {calls:()=>calls, clearInjection:()=>{profiles[2].meta.snapshot.plan='plus';}, setImportMode:value=>{importMode=value;}, blockNextRefresh:name=>{blockNextRefresh=name || true;}, releaseRefresh:()=>releaseRefresh?.(), spendingCredits:()=>{ const activity={lastDecreaseAt:new Date().toISOString(),previousBalance:'12.5',currentBalance:'11.5'}; profiles[0].meta.snapshot.creditActivity=activity; profiles[0].meta.snapshot.quota.credits.balance='11.5'; profiles[1].meta.snapshot.creditActivity={...activity,previousBalance:'4.2',currentBalance:'3.2'}; profiles[1].meta.snapshot.quota.credits.balance='3.2'; }, rename:()=>{data[0].profiles[2].name="O'Reilly & <team>";}, inject:()=>{data[0].profiles[2].meta.snapshot.plan='<img src=x onerror="window.injected=true">';}});
+async function fixtureDashboard() {
    statusReads++;
    if(failStatusReads)throw new Error('模拟账号列表读取失败');
    const mins = { '1m':1, '3m':3, '5m':5, '15m':15, '30m':30, manual:Infinity };
    const live = mins[settings.liveRefreshInterval], spare = mins[settings.spareRefreshInterval];
-   return data.map(a=>({...a,refreshPeriods:{live:live*60000,spare:spare*60000},refreshAt:a.id==='codex'||a.management?.quota?Date.parse(a.status.checkedAt||now)+live*60000:Infinity,
-     profiles:a.profiles.map(p=>({...p,refreshAt:p.meta.snapshot?.available===false?Infinity:Date.parse(p.meta.snapshot?.checkedAt||now)+(p.isActive?live:spare)*60000}))}));
- },
+   const deadlines = (s, minutes) => {
+     if (s?.available===false || !Number.isFinite(minutes)) return {refreshAt:Infinity,hotRefreshAt:Infinity};
+     return { refreshAt:Date.parse(s?.checkedAt||now)+minutes*60000, hotRefreshAt:Date.parse(s?.checkedAt||now)+Math.min(minutes,2)*60000 };
+   };
+   return data.map(a=>({...a,refreshPeriods:{live:live*60000,spare:spare*60000},...deadlines(a.status,live),
+     profiles:a.profiles.map(p=>({...p,...deadlines(p.meta.snapshot,p.isActive?live:spare)}))}));
+}
+contextBridge.exposeInMainWorld('api', {
+ getQuotaPaused: async () => false,
+ onQuotaPower: cb => { ipcRenderer.on('quota-power', (_event, paused) => cb(paused)); },
+ onQuotaOpen: cb => { ipcRenderer.on('quota-open', (_event, platform) => cb(platform)); },
+ ...(process.argv.includes('--test-tray-menu') && {
+   updateTray: state => ipcRenderer.send('fixture-tray-state', state),
+   replyTraySwitch: (request, result) => ipcRenderer.send('fixture-tray-reply', request, result),
+   onTrayCommand: callback => { ipcRenderer.on('tray-command', (_event, command) => callback(command)); },
+   trayReady: () => {},
+ }),
+ setSidebarLayout:async(collapsed,width)=>process.argv.includes('--test-window-layout')?ipcRenderer.invoke('test-window-layout',collapsed,width):contextBridge.executeInMainWorld({func:sidebarWidth=>({minWidth:AccountLayout.minimumWidth(sidebarWidth),minHeight:620}),args:[collapsed?56:width]}),
+ getStatus:fixtureDashboard,
+ recheckAntigravityCli:async()=>{calls.push({method:'recheck-agy'});return fixtureDashboard();},
+ openAntigravityInstall:async()=>{calls.push({method:'open-agy-install'});},
  getSettings:async()=>settings,
  saveSettings:async(value)=>{
    if(failNextSettings){failNextSettings=false;throw new Error('模拟设置保存失败');}
@@ -175,7 +197,7 @@ contextBridge.exposeInMainWorld('api', {
    if(typeof force!=='boolean')throw new Error('force must be a boolean');
    calls.push({method:'refresh',id,name,force});
    if(refreshBarrier)await refreshBarrier;
-   if(blockNextRefresh){blockNextRefresh=false;await new Promise(resolve=>{releaseRefresh=resolve;});releaseRefresh=undefined;}
+   if(blockNextRefresh===true || blockNextRefresh===name){blockNextRefresh=false;await new Promise(resolve=>{releaseRefresh=resolve;});releaseRefresh=undefined;}
    if(failNextRefresh){failNextRefresh=false;return {ok:false,error:'fixture query failed'};}
    const agent=data.find(a=>a.id===id);
    const status=agent.profiles.find(p=>p.name===name)?.meta.snapshot || agent.status;
@@ -193,7 +215,7 @@ contextBridge.exposeInMainWorld('api', {
    return status;
  },
  loginStatus:async id=>{
-   const status=((id==='codex'||data.find(a=>a.id===id)?.management?.isolatedLogin) && browserLogin) || {ready:true,account:'new@example.test'};
+   const status=((id==='codex'||data.find(a=>a.id===id)?.management?.isolatedLogin) && browserLogin) || {ready:true,account:data[1].management?.cliStatus && id==='agy' ? data[1].status.account : 'new@example.test'};
    if(!status.updateProfile){
      const existing=data.find(a=>a.id===id)?.profiles.find(p=>p.meta.email===status.email);
      return {...status,existingProfile:existing?.name,existingProfileUpdatable:existing?.meta.snapshot?.state==='expired'};
@@ -206,7 +228,10 @@ contextBridge.exposeInMainWorld('api', {
    if(blockNextSave){blockNextSave=false;await new Promise(resolve=>{releaseSave=resolve;});releaseSave=undefined;}
    const existing=data.find(a=>a.id===id)?.profiles.find(p=>p.meta.email===browserLogin?.email&&p.meta.snapshot?.state==='expired');
    if(existing)existing.meta.snapshot={...existing.meta.snapshot,state:'unverified',authExpired:false};
-   if(id==='agy'&&browserLogin?.ready&&!existing)data[1].profiles.push({name,meta:{email:browserLogin.email,snapshot:{available:true,account:browserLogin.email,state:'unverified'}}});
+   if(id==='agy'&&!existing) {
+     const email=data[1].management.isolatedLogin ? browserLogin?.ready && browserLogin.email : data[1].status.account;
+     if(email)data[1].profiles.push({name,meta:{email,snapshot:{available:true,account:email,state:'unverified'}}});
+   }
    browserLogin=undefined;return {ok:true,...(existing?{updated:true,profile:existing.name}:{})};
  },
  updateFromLogin:async(id,name,attempt)=>{
@@ -217,7 +242,13 @@ contextBridge.exposeInMainWorld('api', {
    browserLogin=undefined;return {ok:true,agent:id,profile:name};
  },
  renameProfile:async(id,oldName,newName)=>{calls.push({method:'rename',id,oldName,newName});if(blockNextRename){blockNextRename=false;await new Promise(resolve=>{releaseRename=resolve;});releaseRename=undefined;}const agent=data.find(a=>a.id===id),profile=agent.profiles.find(p=>p.name===oldName);if(agent.profiles.some(p=>p!==profile&&p.name===newName))return {ok:false,error:'该名称已被使用'};profile.name=newName;if(profile.meta.label)profile.meta.label=newName;if(agent.active===oldName)agent.active=newName;return {ok:true,name:newName};},
- useProfile:async(id,name)=>{calls.push({method:'switch',id,name}); const a=data.find(a=>a.id===id); a.profiles.forEach(p=>p.isActive=p.name===name); a.active=name; a.status=a.profiles.find(p=>p.isActive).meta.snapshot; return {ok:true};},
+ useProfile:async(id,name,source,decision)=>{
+   if(source==='tray' && trayConfirmation && decision?.token!==trayConfirmation.token) return {confirmation:trayConfirmation};
+   calls.push({method:'switch',id,name,...(decision?{decision}:{})});
+   const a=data.find(a=>a.id===id); a.profiles.forEach(p=>p.isActive=p.name===name);
+   a.active=name; a.status=a.profiles.find(p=>p.isActive).meta.snapshot;
+   return {ok:true,clientRestartError:decision && '账号已切换，请手动打开客户端'};
+ },
  previewDeleteProfile:async(agent,name)=>{
    calls.push({method:'preview-delete',agent,name});
    if(blockNextDeletePreview){blockNextDeletePreview=false;await new Promise(resolve=>{releaseDeletePreview=resolve;});releaseDeletePreview=undefined;}

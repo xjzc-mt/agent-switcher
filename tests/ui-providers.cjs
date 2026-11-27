@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 module.exports = suite(
   { width: 880, height: 700 },
-  async ({ window: w, run, load, pause, capture }) => {
+  async ({ window: w, run, load, until, pause, capture }) => {
     await load();
     await run(`window.providerTestApi.setup();loadStatus();`);
     assert.deepEqual(await run(`[...document.querySelectorAll('.sidebar-menu .nav-item[data-action]')].map(e=>e.dataset.agent)`),['codex','agy']);
@@ -50,8 +50,24 @@ module.exports = suite(
     assert.equal(await run(`document.querySelector('#modalProfileInput').required`),false);
     assert.equal(await run(`document.querySelector('#btnConfirmSave').hidden`),true);
     await run(`closeSaveModal();`);
-    await run(`window.providerTestApi.native();loadStatus()`);await pause(100);
-    await run(`selectTab('agy');renderWorkbench()`);
+    await run(`providerTestApi.native();providerTestApi.cli('missing');loadStatus()`);
+    assert.deepEqual(await run(`[$('btnRefresh').hidden,document.querySelector('.current-plan').textContent,document.querySelector('.credential-card .plan-tier').textContent]`),[true,'Ultra','Pro']);
+    await run(`document.querySelector('[data-action=openAntigravityInstall]').click(); document.querySelector('.btn-switch').click()`);
+    await until("!switchingAccount && agentsData[1].active==='Google B'");
+    await run("openSaveModal('agy')");
+    assert.deepEqual(await run("[activeDialog.tab,$('btnModalLaunch').textContent,$('btnCopyLoginLink').hidden,$('addTab-backup').hidden,$('addTab-session').hidden]"),['local','打开 Antigravity 登录',true,false,false]);
+    await run("handleLaunchLogin('agy')");
+    await run("providerTestApi.desktopLogin('desktop@example.test')");
+    await pause(2500);await until("$('modalAccountEmail').textContent.includes('desktop@example.test')");
+    await run("$('modalProfileInput').value='Desktop';confirmSaveProfile()");
+    assert.ok(await run("agentsData[1].profiles.some(p=>p.name==='Desktop' && p.meta.email==='desktop@example.test')"));
+    assert.ok(await run("testApi.calls().some(c=>c.method==='open-agy-install') && !testApi.calls().some(c=>c.method==='refresh' && c.id==='agy')"));
+    await run("providerTestApi.cli('outdated','1.5.8');document.querySelector('[data-action=recheckAntigravityCli]').click()");
+    await until("document.querySelector('.cli-notice')?.textContent.includes('本机 agy CLI 版本过旧（当前 v1.5.8），请运行 agy update 更新后查看额度')");
+    assert.equal(await run("document.querySelector('[data-action=openAntigravityInstall]')"),null);
+    await run("providerTestApi.native();providerTestApi.cli('ready','1.5.9');document.querySelector('[data-action=recheckAntigravityCli]').click()");
+    await until("!$('btnRefresh').hidden && !!document.querySelector('.current-quota')");
+    assert.equal(await run("testApi.calls().filter(c=>c.method==='recheck-agy').length"),2);
     assert.equal(await run(`document.querySelector('.current-plan').textContent`),'Ultra');
     const gradients=await run(`[...document.querySelectorAll('linearGradient')].map(g=>g.id)`);
     assert.ok(gradients.length>=2 && new Set(gradients).size===gradients.length);

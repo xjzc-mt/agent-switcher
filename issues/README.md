@@ -8,10 +8,9 @@
 
 | 编号 | 类型 | 状态 | 平台 | 来源 | 模块 | 摘要与当前卡点 |
 | --- | --- | --- | --- | --- | --- | --- |
-| [AGS-0001](AGS-0001-antigravity-file-auth.md) | 缺陷 | `待验收` | macOS | local | Antigravity 凭据 | CLI 认证文件并存时的保存、切换与长凭据迁移；隔离回归已过，待双测试账号真机往返核验 |
-| [AGS-0003](AGS-0003-desktop-only-accounts.md) | 架构 | `待分析` | 全平台 | local | 桌面端发现 | 只装官方桌面版（未单装 CLI）时，各 Agent 账号读取、切换与额度能力边界梳理 |
 | [AGS-0008](AGS-0008-windows-runtime-and-sandbox.md) | 缺陷/架构 | `待验收` | Windows | local | 沙箱与多平台底座 | Windows 受限令牌沙箱、进程容错与多平台拆文件解耦；CI 标准用户沙箱已过，待 Windows 10/11 真机验收 |
 | [AGS-0009](AGS-0009-windows-codex-desktop-support.md) | 缺陷 | `待验收` | Windows | local | Codex 桌面端 | Windows 仅装商店版 Codex 桌面端时的内置 CLI 发现、关窗等待与按原安装重开；待 Windows 真机验收 |
+| [AGS-0021](AGS-0021-windows-native-process-and-dpapi-fastpath.md) | 缺陷/性能 | `待验收` | Win / macOS | local | 进程探测与密钥库 | 进程探测与 DPAPI 原生化、只读刷新免写预检及 4 类报错指引已通过源码与自动化复验；待与 0008/0009 一并 Windows 真机终验 |
 
 ## 2. 线上 GitHub Issues 分流映射（Online Inbox）
 
@@ -25,11 +24,13 @@
 ## 3. 已关闭归档索引（Archive）
 
 <details>
-<summary>已归档 14 项（位于 <code>issues/archive/</code>，点击展开）</summary>
+<summary>已归档 18 项（位于 <code>issues/archive/</code>，点击展开）</summary>
 
 | 编号 | 来源 | 平台 | 关闭日期 / 版本 | 归档记录 |
 | --- | --- | --- | --- | --- |
+| AGS-0001 | local | macOS | 2026-11-27 (`v0.1.1`) | [Antigravity CLI 无邮箱个人回退认证文件兼容、长凭据双文件迁移与切换收敛保护](archive/AGS-0001-antigravity-file-auth.md) |
 | AGS-0002 | local | macOS | 2026-11-20 (`v1.0.1`) | [双屏切换平台时小菜单跳屏](archive/AGS-0002-macos-tray-display.md) |
+| AGS-0003 | local | 全平台 | 2026-11-27 (`v0.1.1`) | [Antigravity 免 `agy` 纯桌面原生管理解耦、旧版 CLI 快速阻断与免重启检测](archive/AGS-0003-desktop-only-accounts.md) |
 | AGS-0004 | local | macOS | 2026-11-23 (`v0.1.0`) | [Antigravity 额度续期断层、长凭据切换重入与 macOS 钥匙串主线程阻塞](archive/AGS-0004-antigravity-quota-switch-flow.md) |
 | AGS-0005 | local | 全平台 | 2026-11-23 (`v0.1.0`) | [账号池跨锁并发竞态、孤儿明文临时目录残留与 Linux 密钥误报](archive/AGS-0005-credential-lock-and-temp-cleanup.md) |
 | AGS-0006 | local | 全平台 | 2026-11-23 (`v0.1.0`) | [桌面端样式双源冗余（CSP unsafe-inline）、原生菜单缺失与工程交互细节清理](archive/AGS-0006-desktop-ui-css-and-hygiene.md) |
@@ -41,8 +42,10 @@
 | AGS-0014 | local | macOS | 2026-11-24 (`v0.1.0`) | [macOS 菜单栏小菜单重设计：常驻展开、额度优先与定宽双列语义胶囊](archive/AGS-0014-macos-tray-redesign.md) |
 | AGS-0015 | local | 全平台 | 2026-11-25 (`v0.1.0`) | [Codex 查询失败精确分流自愈与账号详情恢复指引直出](archive/AGS-0015-codex-error-classification-and-detail-guidance.md) |
 | AGS-0016 | local | 全平台 | 2026-11-25 (`v0.1.0`) | [版本体系回调至 0.1.0、历史 1.0.x 防回跳与官网跨平台一键安装脚本](archive/AGS-0016-release-0.1.0-and-one-click-install.md) |
-| AGS-0017 | local | 全平台 | 2026-11-25 (`main`) | [免下载远程元数据离线签名与一键发布脚本](archive/AGS-0017-zero-download-release-signing.md) |
-| AGS-0018 | local | Win / macOS | 2026-11-25 (`main`) | [Windows PowerShell 5.1 安装脚本 BOM/中文乱码与共享代理 IP 触发 GitHub API 限流修复](archive/AGS-0018-installer-rate-limit-and-ps51-encoding.md) |
+| AGS-0017 | local | 全平台 | 2026-11-25 (`v0.1.1`) | [免下载远程元数据离线签名与一键发布脚本](archive/AGS-0017-zero-download-release-signing.md) |
+| AGS-0018 | local | Win / macOS | 2026-11-25 (`v0.1.1`) | [Windows PowerShell 5.1 安装脚本 BOM/中文乱码与共享代理 IP 触发 GitHub API 限流修复](archive/AGS-0018-installer-rate-limit-and-ps51-encoding.md) |
+| AGS-0019 | local | macOS | 2026-11-26 (`v0.1.1`) | [小菜单跨组件单一数据源、就地切换确认、点击防丢与视口优化](archive/AGS-0019-tray-state-consistency-and-interaction.md) |
+| AGS-0020 | local | 全平台 | 2026-11-27 (`v0.1.1`) | [共享号池后台连续智能刷新策略与全端刷新按钮行为统一](archive/AGS-0020-smart-quota-refresh-strategy.md) |
 
 </details>
 

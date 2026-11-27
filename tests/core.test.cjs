@@ -298,39 +298,44 @@ test('preferences migrate legacy files and preserve independent options on parti
 });
 
 test('refresh deadlines honor independent intervals and query once after each reset', () => {
-  const { quotaRefreshAt } = require('../dist/quota-refresh');
+  const { quotaRefreshTimes } = require('../dist/quota-refresh');
   const checked = 2000000000000;
   const status = {state:'ok',checkedAt:new Date(checked).toISOString()};
   const policy = require('../renderer/account-policy');
+  const deadline = (status, interval, identity = 'fixture') => quotaRefreshTimes(status, interval, identity, false, checked).refreshAt;
   for (const [interval, minutes, staleMinutes] of [['1m',1,5], ['3m',3,5], ['5m',5,5], ['15m',15,16], ['30m',30,31], ['manual',Infinity,30]]) {
-    assert.equal(quotaRefreshAt(status,interval,checked), checked + minutes * 60000);
-    assert.equal(quotaRefreshAt({...status,state:'error'},interval,checked), checked + Math.max(2,minutes) * 60000);
+    const delay = deadline(status, interval) - checked;
+    assert.ok(minutes * 60000 * 0.88 <= delay && delay <= minutes * 60000 * 1.15);
+    assert.equal(deadline(status, interval), checked + delay);
+    if (Number.isFinite(minutes)) assert.notEqual(deadline(status, interval, 'another'), checked + delay);
+    assert.equal(deadline({...status,state:'error'},interval), checked + Math.max(2,minutes) * 60000);
     const sample = { ...status, fetchedAt: status.checkedAt };
     for (const delta of [0,1]) assert.equal(policy.stale(sample,checked+staleMinutes*60000+delta,'codex',interval),delta===1);
   }
   const reset = checked+20000;
   status.quota = {primaryWindow:{usedPercent:100,resetsAt:reset/1000}};
-  assert.equal(quotaRefreshAt(status,'5m',checked),reset+10000);
-  assert.equal(quotaRefreshAt(status,'30m',checked),reset+10000);
-  assert.equal(quotaRefreshAt(status,'manual',checked),Infinity);
-  assert.equal(quotaRefreshAt(undefined,'manual',checked),Infinity);
+  assert.equal(deadline(status,'5m'),reset+10000);
+  assert.equal(deadline(status,'1m'),checked+52000);
+  assert.equal(deadline(status,'30m'),reset+10000);
+  assert.equal(deadline(status,'manual'),Infinity);
+  assert.equal(deadline(undefined,'manual'),Infinity);
   status.checkedAt = new Date(reset+5000).toISOString();
-  assert.equal(quotaRefreshAt(status,'5m',checked),reset+35000);
+  assert.equal(deadline(status,'5m'),reset+35000);
   status.checkedAt = new Date(reset+10000).toISOString();
-  assert.equal(quotaRefreshAt(status,'5m',checked),reset+310000);
+  assert.ok(deadline(status,'5m') >= reset+10000+0.88*300000);
   status.state='error'; status.refreshFailures=1;
-  assert.equal(quotaRefreshAt(status,'1m'),reset+130000);
+  assert.equal(deadline(status,'1m'),reset+130000);
   status.refreshFailures=2;
-  assert.equal(quotaRefreshAt(status,'1m'),reset+310000);
+  assert.equal(deadline(status,'1m'),reset+310000);
   status.refreshFailures=3;
-  assert.equal(quotaRefreshAt(status,'1m'),reset+910000);
-  status.state='expired'; assert.equal(quotaRefreshAt(status,'1m'),Infinity);
+  assert.equal(deadline(status,'1m'),reset+910000);
+  status.state='expired'; assert.equal(deadline(status,'1m'),Infinity);
 });
 
 test('reset refresh bypasses ordinary cache but never invents restored quota', async () => {
   putProfile('reset','reset');
   let calls=0;
-  agent.queryLiveRpc=async()=>{calls++; return {rates:{rateLimits:{primary:{usedPercent:100,windowDurationMins:300,resetsAt:Math.floor(Date.now()/1000)-20}}}};};
+  agent.queryLiveRpc=async()=>{calls++; return {rates:{rateLimits:{primary:{usedPercent:100,windowDurationMins:300,resetsAt:Math.floor(Date.now()/1000)-28}}}};};
   const first=await accounts.refreshAccount(agent,'reset',true);
   const meta=store.readProfileMeta('codex','reset'); meta.snapshot.checkedAt=new Date(Date.now()-40000).toISOString(); store.writeProfileMeta('codex','reset',meta);
   const second=await accounts.refreshAccount(agent,'reset'); assert.equal(calls,2); assert.equal(second.quota.primaryWindow.usedPercent,100);

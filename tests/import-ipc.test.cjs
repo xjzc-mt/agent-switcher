@@ -57,7 +57,7 @@ test('unsupported account switching is rejected before inspecting or quitting ru
     assert.equal(result.ok,false);assert.match(result.error,/共用认证/);assert.equal(inspected,0);
   } finally {agent.switchSupport=previousSupport;clients.runningClients=previousRunning;}
 });
-test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C or marker active state flips during final async session check', { skip: process.platform !== 'darwin' }, async t => {
+test('Desktop-only Antigravity restores backups; GUI use-profile invalidates stale confirmation when CLI changes B->C or marker active state flips during final async session check', { skip: process.platform !== 'darwin' }, async t => {
   const native = require('../dist/antigravity-native');
   const clients = require('../dist/clients');
   const accounts = require('../dist/accounts');
@@ -86,8 +86,44 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
   agyAgent.switchSupport = () => undefined;
   try {
     fs.rmSync(gemini, { recursive: true, force: true });
-    await accounts.saveAccount(agyAgent, 'AGY-A');
+    let cliState = 'missing';
+    t.mock.method(agyAgent, 'cliStatus', () => ({ state: cliState }));
+    assert.equal(agyAgent.management().quota, false);
+    const launch = t.mock.method(clients, 'openClients', async names => assert.deepEqual(names, ['Antigravity']));
+    const login = await invoke('login-status', 'agy');
+    assert.equal(login.email, 'kc-a@example.test');
+    assert.equal((await invoke('save-profile', 'agy', 'AGY-A')).ok, true);
+    cliState = 'ready';
+    t.mock.method(require('../dist/antigravity-cli'), 'startAcpLogin', () => {
+      cliState = 'outdated';
+      const refused = Promise.reject(new Error('fixture: unsupported acp'));
+      return { link: refused, complete: refused, stop: async () => {} };
+    });
+    assert.match((await invoke('launch-login', 'agy')).error, /unsupported acp/);
+    assert.equal((await invoke('launch-login', 'agy')).ok, true);
+    assert.equal(launch.mock.callCount(), 1);
+    launch.mock.restore();
     atomicWrite(path.join(store.profileDir('agy', 'AGY-TARGET'), agyAgent.authFiles[0]), makeTok('target@example.test', 1));
+
+    const target = store.profileDir('agy', 'AGY-TARGET');
+    store.writeProfileMeta('agy', 'AGY-A', { email: 'kc-a@example.test', snapshot: { available: true, plan: 'Google AI Pro' } });
+    selectedFile = path.join(root, 'desktop-only.ags');
+    atomicWrite(selectedFile, await backup.exportBackup([{ agent:'agy', profile:'AGY-TARGET' }], 'fixture-pass'));
+    fs.rmSync(target, { recursive:true });
+    const selected = await invoke('preview-import', 'backup');
+    const unlocked = await invoke('unlock-import', selected.id, 'fixture-pass');
+    const restoredBackup = await invoke('commit-import', unlocked.id, [unlocked.items[0].key]);
+    assert.deepEqual(restoredBackup.imported, ['agy/AGY-TARGET']);
+    const savedStatus = accounts.dashboard().find(agent => agent.id === 'agy');
+    assert.equal(savedStatus.active, 'AGY-A');
+    assert.equal(savedStatus.status.plan, 'Google AI Pro');
+    assert.equal(savedStatus.profiles.find(p => p.name === 'AGY-TARGET').meta.email, 'target@example.test');
+    const newerDesktop = t.mock.method(agyAgent, 'desktopLogin', () => makeTok('kc-a@example.test', 2));
+    const local = (await invoke('get-status')).find(agent => agent.id === 'agy');
+    assert.equal(local.active, 'AGY-A');
+    assert.equal(local.status.plan, 'Google AI Pro');
+    assert.equal(local.status.quota, undefined);
+    newerDesktop.mock.restore();
 
     const big = Buffer.from(JSON.stringify({ ...JSON.parse(makeTok('long@example.test')), id_token: 'x'.repeat(8000) }));
     atomicWrite(path.join(store.profileDir('agy', 'AGY-LONG'), agyAgent.authFiles[0]), big);
@@ -112,8 +148,35 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
     t.mock.method(clients, 'quitClients', async () => { running = false; desktopActions.push('quit'); });
     t.mock.method(clients, 'openClients', async () => { running = true; desktopActions.push('open'); });
     native.sharedAntigravitySessions = async () => [];
-    confirmationResponse = 1;
-    const applied = await invoke('use-profile', 'agy', 'AGY-LONG');
+    const nativeDialogs = confirmations.length;
+    let interrupted = true;
+    t.mock.method(agyAgent, 'hasInterruptedSwitch', () => interrupted);
+    t.mock.method(agyAgent, 'recoverInterruptedSwitch', async () => { interrupted = false; });
+    const traySwitch = decision => invoke('use-profile', 'agy', 'AGY-LONG', 'tray', decision);
+    const initial = (await traySwitch()).confirmation;
+    assert.deepEqual(initial, { token: initial.token, clients: ['Antigravity'], interrupted: true, unmanaged: false, migration: false });
+    assert.equal(interrupted, true);
+    assert.deepEqual(desktopActions, []);
+    const unmanaged = makeTok('unsaved@example.test');
+    fs.mkdirSync(path.dirname(cliPath), { recursive: true });
+    fs.writeFileSync(cliPath, unmanaged);
+    // The CLI login changed after showing the question. The old consent cannot quit the desktop or recover.
+    const renewed = (await traySwitch({ token: initial.token })).confirmation;
+    assert.notEqual(renewed.token, initial.token);
+    assert.equal(interrupted, true);
+    assert.deepEqual(desktopActions, []);
+    const next = (await traySwitch({ token: renewed.token })).confirmation;
+    assert.deepEqual(next, { token: next.token, clients: ['Antigravity'], interrupted: false, unmanaged: true, migration: true });
+    assert.deepEqual(desktopActions, ['quit', 'open']);
+    assert.deepEqual(fs.readFileSync(cliPath), unmanaged);
+    const poolBefore = store.listProfiles('agy');
+    const replay = (await traySwitch({ token: renewed.token, saveUnmanaged: false })).confirmation;
+    assert.notEqual(replay.token, next.token);
+    assert.deepEqual(desktopActions, ['quit', 'open']);
+    assert.deepEqual(store.listProfiles('agy'), poolBefore);
+    desktopActions.length = 0;
+    const applied = await traySwitch({ token: replay.token, saveUnmanaged: true });
+    assert.equal(confirmations.length, nativeDialogs);
     assert.equal(applied.ok, true, applied.error);
     assert.deepEqual(desktopActions, ['quit', 'open']);
     assert.equal(keychain.state.stored, null);
@@ -122,6 +185,17 @@ test('A3: GUI use-profile invalidates stale confirmation when CLI changes B->C o
     clients.runningClients = async () => [];
     const restored = await invoke('use-profile', 'agy', 'AGY-A');
     assert.equal(restored.ok, true, restored.error);
+    const activeItem = keychain.state.stored;
+    let inventories = 0;
+    // The desktop starts during the transaction, after preflight and its initial process inventory.
+    clients.runningClients = async () => ++inventories >= 3 ? ['Antigravity'] : [];
+    const reopened = await invoke('use-profile', 'agy', 'AGY-TARGET', 'tray');
+    assert.match(reopened.error, /重新打开/);
+    assert.equal(keychain.state.stored, activeItem);
+    clients.runningClients = async () => [];
+    assert.equal((await invoke('use-profile', 'agy', 'AGY-TARGET', 'tray')).ok, true);
+    assert.equal((await invoke('use-profile', 'agy', 'AGY-A', 'tray')).ok, true);
+    assert.equal(confirmations.length, nativeDialogs);
 
     // Case 1: CLI holds unmanaged B when user confirms discard (response=1), then during final async sharedAntigravitySessions(), CLI changes B -> C!
     fs.mkdirSync(path.dirname(cliPath), { recursive: true });

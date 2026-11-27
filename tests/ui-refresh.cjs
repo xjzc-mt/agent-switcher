@@ -4,9 +4,9 @@ const {antigravityRenewalHint}=require('../dist/agents/antigravity');
 
 module.exports = suite(
   { width: 1120, height: 740, additionalArguments: ['--test-manual-refresh'] },
-  async ({ run, load, pause, until }) => {
+  async ({ window, run, load, pause, until }) => {
     const calls=()=>run(`window.testApi.calls().filter(c=>c.method==='refresh')`);
-    const idle=async()=>{for(let i=0;i<100;i++){if(await run(`refreshQueue.jobs.size===0&&!refreshing`))return;await pause(20);}throw new Error('refresh did not finish');};
+    const idle=async()=>{for(let i=0;i<100;i++){if(await run(`refreshQueue.jobs.size===0&&!refreshBatches.size`))return;await pause(20);}throw new Error('refresh did not finish');};
     const context=selector=>run(`document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2}))`);
     const close=()=>run(`{const d=document.querySelector('dialog[open]');d.querySelector('[data-close-dialog]').click();d.dismissAccountDialog();}`);
 
@@ -24,14 +24,15 @@ module.exports = suite(
     };
     await load();await idle();
     assert.equal((await calls()).length,0,'Manual startup must not query overdue accounts');
-    await run(`Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));window.dispatchEvent(new Event('focus'));refreshAll(false)`);
+    window.webContents.send('quota-open', 'codex');
     await pause(1100);
     assert.equal((await calls()).length,0,'Visible manual mode must not start overdue timers or reset checks');
-    await run(`handleTrayCommand({action:'refresh'})`);await idle();
-    assert.deepEqual((await calls()).map(c=>[c.name,c.force]),[['个人主力',true]]);
+    const expected = await run(`[agentsData[0].active, ...sortedProfiles(agentsData[0]).map(p=>p.name)]`);
+    await run(`handleTrayCommand({action:'refresh', agent:'codex'})`);await idle();
+    assert.deepEqual((await calls()).map(c=>[c.id,c.name,c.force]),expected.map(name=>['codex',name,true]));
     await run(`handleSwitchProfile('codex','工作账号')`);await idle();
-    assert.deepEqual((await calls()).slice(1).map(c=>[c.name,c.force]),[['工作账号',true]]);
     await run(`handleSwitchProfile('codex','个人主力')`);await idle();
+    assert.equal((await calls()).length,expected.length,'Manual mode continues to suppress automatic checks after switching');
     const beforeManualAll=(await calls()).length;
     await run(`document.querySelector('#btnRefresh').click()`);await idle();
     assert.equal((await calls()).length-beforeManualAll,4,'Manual mode keeps the explicit full refresh available');
@@ -61,7 +62,7 @@ module.exports = suite(
     const visualSnapshot=()=>run(`(()=>({
       accounts:[...document.querySelectorAll('[data-account-context]')].map(card=>({
         name:card.dataset.profile,
-        quotas:[...card.querySelectorAll('.quota-cell')].map(cell=>({value:cell.querySelector('.quota-number').textContent,state:cell.dataset.valueState,color:getComputedStyle(cell.querySelector('.quota-number')).color})),
+        quotas:[...card.querySelectorAll('.quota-cell')].map(cell=>({value:cell.querySelector('.quota-number').textContent,state:cell.dataset.tone,color:getComputedStyle(cell.querySelector('.quota-number')).color})),
         credits:card.querySelector('.credit-badge b')?.textContent||null,
         creditClass:card.querySelector('.credit-badge,.credit-corner')?.className||null
       }))
@@ -69,11 +70,11 @@ module.exports = suite(
     await setIntervals('1m','5m');
     const beforeResume=await visualSnapshot();
     const beforeResumeCalls=(await calls()).length;
-    await run(`Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));window.refreshTestApi.ageSnapshots()`);
-    await run(`window.refreshTestApi.blockAll();Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'))`);await pause(30);
+    await run(`window.refreshTestApi.ageSnapshots();window.refreshTestApi.blockAll()`);
+    window.webContents.send('quota-open', 'codex');await until(`refreshQueue.running===3`);
     assert.equal((await calls()).length,beforeResumeCalls+3,'Resume starts at most three background queries');
     assert.deepEqual(await visualSnapshot(),beforeResume,'Returning to the window must preserve previous values, colors and order while the network is pending');
-    assert.equal(await run(`document.querySelectorAll('.quota-cell.cached').length`),0);
+    assert.equal(await run(`document.querySelectorAll('.quota-cell[data-tone="cached"]').length`),0);
     assert.match(await run(`document.querySelector('.credit-corner').dataset.tooltip`),/缓存/,'Cached data remains identifiable without graying every card');
     await run(`window.refreshTestApi.releaseAll()`);await idle();
     assert.deepEqual(await visualSnapshot(),beforeResume,'An unchanged refresh must not change the presentation');
@@ -122,14 +123,15 @@ module.exports = suite(
     await run(`window.refreshTestApi.expireAll();loadStatus()`);
     await run(`window.refreshTestApi.blockAll();void refreshAll(false)`);await pause(30);
     assert.equal((await calls()).length,beforeBatch+3,'Only three accounts may query while their results are pending');
-    await context('[data-profile="备用账号"].account-card');
+    const queued = await run(`[...refreshQueue.jobs.values()].find(job=>job.state==='queued').payload.profile`);
+    await context(`[data-profile="${queued}"].account-card`);
     assert.equal(await run(`document.querySelector('dialog [data-refresh-account]').disabled`),false);
     assert.equal(await run(`document.querySelector('dialog [data-refresh-account]').getAttribute('aria-label')`),'等待刷新…');
     await run(`document.querySelector('dialog [data-refresh-account]').click();void refreshAll(true);void refreshAll(true)`);
     assert.equal(await run(`document.querySelector('#btnRefresh').disabled`),true);
     await run(`window.refreshTestApi.releaseAll()`);await idle();
     const batch=(await calls()).slice(beforeBatch);
-    assert.equal(batch.length,4);assert.equal(new Set(batch.map(c=>c.name)).size,4);assert.equal(batch[0].name,'个人主力');assert.equal(batch[3].name,'备用账号');assert.equal(batch[3].force,true);
+    assert.equal(batch.length,4);assert.equal(new Set(batch.map(c=>c.name)).size,4);assert.equal(batch[0].name,'个人主力');assert.equal(batch[3].name,queued);assert.equal(batch[3].force,true);
     await close();
 
     const beforeFail=(await calls()).length;
@@ -157,10 +159,12 @@ module.exports = suite(
     const beforeHidden=(await calls()).length;
     await run(`window.refreshTestApi.expireAll();loadStatus()`);
     await run(`window.refreshTestApi.blockAll();void refreshAll(false)`);await pause(30);
-    await run(`Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));window.refreshTestApi.releaseAll()`);await idle();
-    assert.equal((await calls()).length,beforeHidden+3,'In-flight queries finish, but the fourth account stays unqueried while hidden');
-    await run(`Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'))`);await pause(30);await idle();
-    assert.equal((await calls()).length,beforeHidden+4);
+    await run(`void Object.defineProperty(document,'hidden',{configurable:true,value:true})`);
+    window.webContents.send('quota-power',true);await until('quotaPaused===true');
+    await run(`window.refreshTestApi.releaseAll()`);await idle();
+    assert.equal((await calls()).length,beforeHidden+3,'In-flight work finishes while locked; queued automatic work waits');
+    window.webContents.send('quota-power',false);await until(`window.testApi.calls().filter(c=>c.method==='refresh').length===${beforeHidden+4}`);await idle();
+    assert.equal((await calls()).length,beforeHidden+4,'Unlock picks up the one outstanding account with the window still hidden');
     const yesterday=new Date(Date.now()-86400000).toISOString();
     await run(`Object.defineProperty(document,'hidden',{configurable:true,value:true});window.providerTestApi.native(${JSON.stringify(yesterday)});loadStatus()`);
     await run(`selectTab('agy')`);await context('.active-session-card');
@@ -230,11 +234,20 @@ module.exports = suite(
       await run(`refreshSelected('codex','个人主力',true)`);
       assert.deepEqual((await calls()).slice(beforeOutage+1),[{...activeCalls,force:true}],
         'A manual request remains available while local status is unavailable');
-      await run(`window.refreshTestApi.stageCurrent(600000,0);window.refreshTestApi.failStatusReads(false);document.dispatchEvent(new Event('visibilitychange'))`);
+      await run(`window.refreshTestApi.stageCurrent(600000,0);window.refreshTestApi.failStatusReads(false);resumeQuotaRefresh()`);
       for(let i=0;i<100&&(await calls()).length===beforeOutage+2;i++)await pause(20);
       await idle();
       assert.deepEqual((await calls()).slice(beforeOutage+2),[activeCalls],
         'A fresh dashboard after recovery must immediately schedule a newly due candidate');
     }
+    await setIntervals('manual','30m');
+    await run(`for(const name of ['候选甲','候选乙','凭据失效']) window.accountTestApi.alias('工作账号',name);
+      window.loginTestApi.expire('凭据失效');window.refreshTestApi.ageSnapshots();loadStatus()`);
+    const front = await run(`sortedProfiles(agentsData[0]).filter(p=>p.name!=='凭据失效').slice(0,4).map(p=>p.name)`);
+    const beforeOpen=(await calls()).length;
+    window.webContents.send('quota-open','codex');await until(`window.testApi.calls().filter(c=>c.method==='refresh').length===${beforeOpen+4}`);await idle();
+    assert.deepEqual((await calls()).slice(beforeOpen).map(c=>c.name),front,'Opening refreshes only the four leading eligible spares with the current account in manual mode');
+    await run(`resumeQuotaRefresh('codex')`);await idle();
+    assert.equal((await calls()).length,beforeOpen+4,'Recent checks occupy their existing Top-4 slots without refilling from further down the list');
   },
 );

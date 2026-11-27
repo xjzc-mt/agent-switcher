@@ -18,9 +18,17 @@
     request(key, payload, { force = false, priority = 0, automatic = !force } = {}) {
       let job = this.jobs.get(key);
       if (job) {
-        if (job.automatic && !automatic) { job.automatic = false; job.payload = payload; }
+        if (job.automatic && (!automatic || (force && !job.force))) {
+          job.automatic = automatic;
+          job.payload = payload;
+        }
         job.force ||= force;
-        job.priority = Math.max(job.priority, priority);
+        if (job.state === 'queued' && job.priority < priority) {
+          job.priority = priority;
+          // Preserve the foreground list order for promoted and newly enqueued rows alike.
+          this.jobs.delete(key);
+          this.jobs.set(key, job);
+        }
         this.onChange();
         return job.promise;
       }

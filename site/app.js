@@ -136,8 +136,8 @@
     'support.codexDesc':
       'Requires the official Codex CLI. Supports isolated sign-in, switching via auth.json, 5h and 7d quotas, and Credits. Keychain-only logins are unsupported. API keys have no subscription quota.',
     'support.agyDesc':
-      'Antigravity 2.x on macOS supports signing in, saving and switching personal Google accounts, and checking quotas by model group. Requires the official agy CLI. Enterprise authentication is unverified.',
-    'support.foot': 'Both 0.1.0 Mac builds launched on their respective architectures, and the Windows x64 installer passed installation, launch, and uninstall checks. On Mac, a personal Antigravity account refreshed its quota across two token expirations while the desktop app stayed open. Two-account round trips on Mac and real-device end-to-end checks on Windows still await independent verification.',
+      'Save, import, and manually switch personal Google accounts on macOS and Windows with just the Antigravity 2.x desktop app. Model-group quotas and isolated sign-in require official agy 1.5.9 or later. Enterprise authentication is unverified.',
+    'support.foot': 'Both 0.1.1 Mac builds and the Windows x64 installer passed architecture-specific installation, launch, and automated checks. On Mac, a personal Antigravity account refreshed its quota across token expirations while the desktop app stayed open. Two-account round trips on Mac and real-device end-to-end checks on Windows still await independent verification.',
     'install.title': 'Download & quick install',
     'install.subtitle':
       'Mac requires macOS 13 or later. Use the one-line terminal command to auto-detect your chip and verify the install, or download an installer directly. Once installed, both macOS and Windows x64 support one-click updates in Settings → App & Updates.',

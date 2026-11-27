@@ -1,9 +1,10 @@
 import fs from 'fs';
 import { QuotaBearerRejected } from './credential-state';
-import { findQuotaBearer, parseNativeToken, tokenEmail, type UsageData } from './antigravity-native';
+import { bindNativeTokenIdentity, findQuotaBearer, nativeTokenIdentity, parseNativeToken, tokenEmail, type NativeToken, type UsageData } from './antigravity-native';
 import os from 'os';
 import path from 'path';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
+import type { AntigravityCliStatus } from './agents/base';
 import { createInterface } from 'readline';
 import { atomicWrite, ensureDir } from './utils';
 import { macUsageLaunch, prepareMacLoginLink } from './mac-usage';
@@ -43,10 +44,62 @@ export function resolveAntigravityCli(): string | undefined {
   }
 }
 
+let versionProbe: { fingerprint: string; status: AntigravityCliStatus; unsupportedSyntax?: boolean } | undefined;
+
+function cliFingerprint(file: string) {
+  const stat = fs.statSync(file, { bigint: true });
+  return [file, stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+}
+
+export function antigravityCliStatus(recheck = false): AntigravityCliStatus {
+  const file = resolveAntigravityCli();
+  if (!file) { versionProbe = undefined; return { state: 'missing' }; }
+  try {
+    const fingerprint = cliFingerprint(file);
+    if (!recheck && versionProbe?.fingerprint === fingerprint) return versionProbe.status;
+    const probe = spawnSync(file, ['--version'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 2000, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 });
+    const match = probe.status === 0 && /^(?:(?:agy|antigravity(?: cli)?) +)?(?:version[: ]+)?v?(\d{1,6})\.(\d{1,6})\.(\d{1,6})(-[\w.-]+)?(?:\+[\w.-]+)?$/im.exec(probe.stdout + '\n' + probe.stderr);
+    const unsupportedSyntax = fingerprint === versionProbe?.fingerprint && versionProbe.unsupportedSyntax;
+    let status: AntigravityCliStatus = { state: 'unverified' };
+    if (match) {
+      const [major, minor, patch] = match.slice(1, 4).map(Number);
+      const supported = major > 1 || (major === 1 && (minor > 5 || (minor === 5 && (patch > 9 || (patch === 9 && !match[4])))));
+      status = { state: supported && !unsupportedSyntax ? 'ready' : 'outdated', version: match.slice(1, 4).join('.') + (match[4] || '') };
+    }
+    versionProbe = { fingerprint, status, unsupportedSyntax };
+    return status;
+  } catch { return { state: 'unverified' }; }
+}
+
+// Keep only a short suffix between pipe chunks. Raw diagnostics may contain account data.
+function watchUnsupportedSyntax(stderr: NodeJS.ReadableStream, launched: string, fail: (message: string) => void) {
+  let tail = '';
+  stderr.on('data', (chunk: Buffer) => {
+    const text = tail + chunk.toString('utf8');
+    if (/(?:unknown|unrecogni[sz]ed|unsupported|unexpected|no such)\s+(?:(?:shorthand|command-line)\s+)?(?:flag|option|argument|subcommand|command)s?\b|flag provided but not defined|no help topic for\b/i.test(text)) {
+      const probe = versionProbe;
+      const version = probe && probe.fingerprint === launched ? probe.status.version : undefined;
+      if (probe && probe.fingerprint === launched) {
+        probe.unsupportedSyntax = true;
+        probe.status = { state: 'outdated', version };
+      }
+      fail(`本机 agy CLI${version ? '（当前 v' + version + '）' : ''}不支持此命令，请运行 agy update 更新后重试`);
+    }
+    tail = text.slice(-96);
+  });
+}
+
 function officialCli(): string {
   const binary = ['darwin', 'win32'].includes(process.platform) && resolveAntigravityCli();
   if (!binary) throw new Error('请先安装官方 Antigravity CLI（agy）');
   return binary;
+}
+
+function cliLaunch(binary: string, args: string[], root: string, isolated: boolean, env: NodeJS.ProcessEnv) {
+  const fingerprint = cliFingerprint(binary);
+  const launch = process.platform === 'win32' ? windowsUsageLaunch : macUsageLaunch;
+  return { ...launch(binary, args, root, isolated, env), fingerprint };
 }
 
 /** The official CLI owns OAuth and file fallback; the child cannot reach the live login. */
@@ -55,8 +108,7 @@ export function isolatedCli(directory: string, args: string[], original?: Buffer
   ensureDir(directory);
   const root = fs.realpathSync(directory);
   if (original) atomicWrite(cliTokenPath(root), original);
-  if (process.platform === 'win32') return windowsUsageLaunch(binary, args, root, true, inheritedEnv);
-  return macUsageLaunch(binary, args, root, true, inheritedEnv);
+  return cliLaunch(binary, args, root, true, inheritedEnv);
 }
 
 export function startAcpLogin(directory: string, allowBrowser = true, onAuthenticate?: () => void) {
@@ -66,7 +118,7 @@ export function startAcpLogin(directory: string, allowBrowser = true, onAuthenti
   const linkFile = path.join(directory, 'login-url');
   if (!windows) prepareMacLoginLink(directory);
   const child = withTemporaryProcess(directory, () => spawn(launch.command, launch.args, {
-    ...launch.options, detached: !windows, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
+    ...launch.options, detached: !windows, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
   }));
   if (child.pid) isolatedCliPids.add(child.pid);
   let resolveLink!: (url: string) => void, rejectLink!: (error: Error) => void;
@@ -125,7 +177,8 @@ export function startAcpLogin(directory: string, allowBrowser = true, onAuthenti
   }
   const send = (message: object) => { if (child.stdin.writable) child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n'); };
   child.on('error', () => finish('无法启动官方 Antigravity CLI'));
-  child.stdin.on('error', () => finish('Antigravity 登录连接已关闭'));
+  child.stdin.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'EPIPE') finish('Antigravity 登录连接已关闭'); });
+  watchUnsupportedSyntax(child.stderr, launch.fingerprint, finish);
   createInterface({ input: child.stdout }).on('line', line => {
     if (ending) return;
     let message;
@@ -146,7 +199,7 @@ export function startAcpLogin(directory: string, allowBrowser = true, onAuthenti
   return { link, complete, stop: () => { finish('登录已取消'); return stopped; } };
 }
 
-type UsageLaunch = { command: string; args: string[]; options: { cwd: string; env: NodeJS.ProcessEnv } };
+type UsageLaunch = ReturnType<typeof cliLaunch>;
 
 function runUsage(launch: UsageLaunch, isolatedDirectory?: string): Promise<{ stdout: string; code: number | null }> {
   const start = () => spawn(launch.command, launch.args, {
@@ -171,6 +224,7 @@ function runUsage(launch: UsageLaunch, isolatedDirectory?: string): Promise<{ st
       stop('Antigravity 额度查询超时，请稍后重试');
     }, 45000);
     child.on('error', () => { failure ??= new Error('无法启动官方 Antigravity CLI'); });
+    watchUnsupportedSyntax(child.stderr, launch.fingerprint, stop);
     // Headless CLI can start an OAuth flow after a network failure. Match its prompt
     // at a line boundary so quoted text inside a successful JSON response is harmless.
     const loginPrompt = '\nAuthentication required. Please visit the URL to log in:';
@@ -249,15 +303,14 @@ export async function querySharedUsage(): Promise<UsageData> {
   const cwd = windows ? createTemporaryCredentials('agy-quota') : fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ags-shared-usage-'));
   try {
     const args = [...usageArgs, '--settings', '{"disableSlashCommands":false}', '--log-file', windows ? 'NUL' : '/dev/null'];
-    const launch = windows ? windowsUsageLaunch : macUsageLaunch;
-    return await readUsage(launch(binary, args, cwd, false, networkEnvironment()));
+    return await readUsage(cliLaunch(binary, args, cwd, false, networkEnvironment()));
   } finally {
     if (windows) releaseTemporaryCredentials(cwd);
     else fs.rmSync(cwd, { recursive: true, force: true });
   }
 }
 
-export async function queryAccessTokenUsage(email: string, accessToken: string, expiry?: string): Promise<UsageData> {
+export async function queryAccessTokenUsage(email: string | undefined, accessToken: string, expiry?: string): Promise<UsageData> {
   const directory = createTemporaryCredentials('agy-quota');
   try {
     const token = { auth_method: 'consumer', id_token_email: email,
@@ -266,6 +319,14 @@ export async function queryAccessTokenUsage(email: string, accessToken: string, 
     const launch = isolatedCli(directory, usageArgs, Buffer.from(JSON.stringify(token)), networkEnvironment());
     return await readUsage(launch, directory);
   } finally { releaseTemporaryCredentials(directory); }
+}
+
+/** Verification seeds have no email and must obtain the requested identity from the official output. */
+export function matchesQuotaIdentity(expected: string, input: NativeToken, output: NativeToken): boolean {
+  const from = nativeTokenIdentity(input), to = nativeTokenIdentity(output);
+  if (to === expected) return from === expected || !tokenEmail(input);
+  return from === expected && input.token.refresh_token === output.token.refresh_token &&
+    (!tokenEmail(input) || !tokenEmail(output));
 }
 
 export async function queryIsolatedUsage(original: Buffer, identity: string, refreshToken?: string) {
@@ -287,22 +348,27 @@ export async function queryIsolatedUsage(original: Buffer, identity: string, ref
     const file = cliTokenPath(directory);
     // OAuth may rotate before /usage fails. Do not discard the new refresh token.
     const output = fs.existsSync(file) ? fs.readFileSync(file) : null;
-    const rotated = output ?? original;
-    const changed = !original.equals(rotated);
-    if (!changed && requestStarted && error && !(error instanceof AntigravityLoginRequired)) {
+    const changed = !!output && !original.equals(output);
+    const seed = parseNativeToken(original);
+    let rotated = output ?? original;
+    if (changed) {
+      try { rotated = bindNativeTokenIdentity(rotated, seed); }
+      catch { /* Preserve unrecognized output for the existing identity and recovery checks. */ }
+    }
+    if ((!changed || rotated.equals(original)) && requestStarted && error && !(error instanceof AntigravityLoginRequired)) {
       // A lost reply is not proof the server left the input refresh token untouched.
       throw new PendingQuotaConflict();
     }
-    recordAntigravityQuotaOutput(directory, identity, output);
+    recordAntigravityQuotaOutput(directory, identity, output, rotated);
     if (!changed) releaseTemporaryCredentials(directory);
     if (!error) {
       try {
         const credential = parseNativeToken(rotated), email = tokenEmail(credential);
-        if (email?.toLowerCase() !== identity) throw new Error('官方 CLI 返回的账号与查询目标不一致');
+        if (!matchesQuotaIdentity(identity, seed, credential)) throw new Error('官方 CLI 返回的账号与查询目标不一致');
         const bearer = findQuotaBearer(credential);
         if (!bearer) throw new Error('官方 CLI 完成认证后未提供可用的访问令牌');
         // /usage cannot rotate again, even if the bearer expires or its response is lost.
-        data = await queryAccessTokenUsage(identity, bearer.accessToken, bearer.expiry);
+        data = await queryAccessTokenUsage(email, bearer.accessToken, bearer.expiry);
       } catch (failure) { error = failure as Error; }
     }
     return { data, plan, error, rotated, temporaryDirectory: changed ? directory : undefined };

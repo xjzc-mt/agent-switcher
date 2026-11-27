@@ -25,6 +25,9 @@ export function createLoginManager(agent: BaseAgent, startServer: (directory: st
     cancelLogin(agent);
   }
   function hasLogin() { return !!server || operations > 0; }
+  function canDiscardForDesktop(seenAttempt?: number) {
+    return server?.phase === 'failed' || (server?.phase === 'complete' && server.attempt === seenAttempt);
+  }
   function cancel() {
     generation++;
     server?.stop();
@@ -106,5 +109,5 @@ export function createLoginManager(agent: BaseAgent, startServer: (directory: st
       return result;
     });
   }
-  return { hasLogin, cancel, cancelIdentity, useLink, status, save, update };
+  return { hasLogin, canDiscardForDesktop, cancel, cancelIdentity, useLink, status, save, update };
 }

@@ -9,7 +9,7 @@ import { earlierWindowsBoot, windowsBoot } from './windows-processes';
 import { createPrivateWindowsQuotaDirectory, trustedWindowsQuotaDirectory } from './antigravity-windows';
 import { encodeCredentialFile, verifyCredentialWrite } from './credential-vault';
 import { atomicWrite, ensureDir, readBuffer, syncPath } from './utils';
-import { stepDiagnostic } from './diagnostics';
+import { processProbeError, stepDiagnostic } from './diagnostics';
 
 const run = promisify(execFile);
 
@@ -23,6 +23,7 @@ interface Owner {
   inputRevision?: string;
   quotaIdentity?: string;
   recoveryDigest?: string;
+  storedDigest?: string;
   verification?: boolean;
   processes: Array<{ pid: number; group: boolean; jobDrained?: true }>;
 }
@@ -143,7 +144,9 @@ export function confirmWindowsQuotaExit(directory: string, child: ChildProcess, 
 
 /** A retained directory can outlive its PID. Confirm the working directory before excluding another AGS process. */
 export async function sharedCliSessions(local: Set<number>, matches: (command: string) => boolean): Promise<number[]> {
-  const { stdout } = await run('/bin/ps', ['-xo', 'pid=,pgid=,comm=']);
+  const { stdout } = await run('/bin/ps', ['-xo', 'pid=,pgid=,comm='], { timeout: 3000 }).catch(error => {
+    throw processProbeError(error, '无法检测共用登录的终端或 IDE 会话，请关闭相关进程后重试', '检测共用登录的终端或 IDE 会话超时，请稍后重试');
+  });
   const candidates = stdout.split('\n').flatMap(line => {
     const row = /^(\d+)\s+(\d+)\s+(.+)$/.exec(line.trim());
     if (!row || !matches(row[3])) return [];
@@ -283,7 +286,7 @@ const outputDigest = (identity: string, bytes: Buffer) => createHash('sha256').u
 const refreshDigest = (prefix: string, identity: string, token: string) =>
   createHash('sha256').update(JSON.stringify([prefix, identity, token])).digest('hex');
 
-type QuotaIntent = { name: string; nonce: string; inputDigest: string; recoveryDigest?: string; output?: string };
+type QuotaIntent = { name: string; nonce: string; inputDigest: string; recoveryDigest?: string; storedDigest?: string; output?: string };
 const quotaFilePrefix = (identityHash: string) => '.antigravity-quota-' + identityHash + '-';
 function quotaIntentFile(owner: Owner) {
   if (!owner.quotaIdentity || !owner.refreshInput) return;
@@ -392,7 +395,20 @@ export function pendingCodexQuota(identity: string, token: string, original: Buf
 }
 
 /** Only the account refresh lock holder may reconcile a stopped query. The caller commits under the pool lock. */
-export function pendingAntigravityQuota(identity: string, refreshToken: string, original: Buffer) {
+export function pendingAntigravityQuota(identity: string, refreshToken: string, original: Buffer, preview = false) {
+  const anonymous = bytesDigest(Buffer.from(refreshToken));
+  if (anonymous !== identity) {
+    // An anonymous query can gain an email while retaining its grant. Its sealed intent still uses the old key.
+    const key = quotaFilePrefix(bytesDigest(Buffer.from(anonymous))) + refreshDigest('ags-agy-quota-', anonymous, refreshToken);
+    if (fs.lstatSync(path.join(roots().store, key), { throwIfNoEntry: false })) {
+      if (pendingForIdentity(identity, refreshToken, original, true)) throw new PendingQuotaConflict();
+      return pendingForIdentity(anonymous, refreshToken, original, preview);
+    }
+  }
+  return pendingForIdentity(identity, refreshToken, original, preview);
+}
+
+function pendingForIdentity(identity: string, refreshToken: string, original: Buffer, preview: boolean) {
   const prefix = 'ags-agy-quota-', digest = outputDigest(identity, original);
   const { quota, store } = roots(), input = refreshDigest(prefix, identity, refreshToken);
   const matches = quotaRoots(prefix).flatMap(parent => matchingPending(parent, prefix, input, digest));
@@ -410,7 +426,7 @@ export function pendingAntigravityQuota(identity: string, refreshToken: string, 
       if (!(error instanceof PendingQuotaConflict)) stepDiagnostic('storage-unavailable');
       throw error;
     }
-    if (!intent || (!sameInput && intent.recoveryDigest !== digest)) continue;
+    if (!intent || (!sameInput && intent.recoveryDigest !== digest && intent.storedDigest !== digest)) continue;
     if (persisted) throw new PendingQuotaConflict();
     persisted = { file, intent };
   }
@@ -419,7 +435,7 @@ export function pendingAntigravityQuota(identity: string, refreshToken: string, 
     const { intent, file } = persisted;
     const directory = path.join(quota, intent.name);
     const recordedGrant = path.basename(file).slice(intentPrefix.length);
-    const alreadyStored = intent.recoveryDigest === digest;
+    const alreadyStored = intent.recoveryDigest === digest || intent.storedDigest === digest;
     const savedOutput = intent.output ? Buffer.from(intent.output, 'base64') : alreadyStored ? original : undefined;
     if (!savedOutput) throw new PendingQuotaConflict(true, 'recovery-missing');
     if (outputDigest(identity, savedOutput) !== intent.recoveryDigest) throw new PendingQuotaConflict();
@@ -428,10 +444,11 @@ export function pendingAntigravityQuota(identity: string, refreshToken: string, 
     }
     return { directory, savedOutput, alreadyStored, launched: true, exactInput: intent.inputDigest === bytesDigest(original),
       matchesInput: (bytes: Buffer, token?: string) => intent.inputDigest === bytesDigest(bytes) || matchesGrant(recordedGrant, token),
-      checkOutput, beforeStore(bytes: Buffer) {
-        checkOutput(bytes);
+      checkOutput, beforeStore(bytes: Buffer, raw = bytes) {
+        checkOutput(raw);
         const current = readQuotaIntent(file);
         if (current?.nonce !== intent.nonce || current.recoveryDigest !== intent.recoveryDigest) throw new PendingQuotaConflict();
+        if (!raw.equals(bytes)) writeQuotaIntent(file, { ...current, storedDigest: outputDigest(identity, bytes) });
       }, finish: () => finishQuotaIntent(file, intent.nonce) };
   }
   if (!matches.length) return;
@@ -444,6 +461,7 @@ export function pendingAntigravityQuota(identity: string, refreshToken: string, 
   if (persisted && !persisted.intent.recoveryDigest && !record.recoveryDigest && persisted.intent.inputDigest === record.inputDigest &&
       windowsQuotaNeverStarted(directory, record) && quotaIntentFile(record) === persisted.file &&
       (!ownerStillRunning(record) || owned.get(directory)?.nonce === record.nonce)) {
+    if (preview) return;
     if (JSON.stringify(readOwner(directory)) !== JSON.stringify(record)) throw unavailable;
     for (const p of record.processes) p.jobDrained = true;
     writeOwner(directory, record); owned.set(directory, record);
@@ -456,7 +474,7 @@ export function pendingAntigravityQuota(identity: string, refreshToken: string, 
   if (writersRemain(record) || (!persisted?.intent.recoveryDigest && ownerStillRunning(record) && owned.get(directory)?.nonce !== record.nonce)) {
     throw new PendingQuotaConflict(true, 'recovery-owner-unknown');
   }
-  const alreadyStored = record.recoveryDigest === digest || persisted?.intent.recoveryDigest === digest;
+  const alreadyStored = [record.recoveryDigest, record.storedDigest, persisted?.intent.recoveryDigest, persisted?.intent.storedDigest].includes(digest);
   function checkOwner() {
     const current = readOwner(directory);
     if (!current || JSON.stringify(current) !== JSON.stringify(record) || writersRemain(current)) throw unavailable;
@@ -470,15 +488,16 @@ export function pendingAntigravityQuota(identity: string, refreshToken: string, 
       if (expected && !bytes) throw new PendingQuotaConflict(true, 'recovery-missing');
       if (expected && bytes && expected !== outputDigest(identity, bytes)) throw unavailable;
     },
-    beforeStore(bytes: Buffer) {
+    beforeStore(bytes: Buffer, raw = bytes) {
       checkOwner();
       record.inputDigest ??= bytesDigest(original);
-      record.recoveryDigest = outputDigest(identity, bytes);
-      if (persisted?.intent.recoveryDigest !== record.recoveryDigest) {
+      record.recoveryDigest = outputDigest(identity, raw);
+      record.storedDigest = raw.equals(bytes) ? undefined : outputDigest(identity, bytes);
+      if (persisted?.intent.recoveryDigest !== record.recoveryDigest || persisted?.intent.storedDigest !== record.storedDigest) {
         record.quotaIdentity = bytesDigest(Buffer.from(identity));
         const file = quotaIntentFile(record)!;
         const intent: QuotaIntent = { name: path.basename(directory), nonce: record.nonce, inputDigest: record.inputDigest,
-          recoveryDigest: record.recoveryDigest, output: bytes.toString('base64') };
+          recoveryDigest: record.recoveryDigest, storedDigest: record.storedDigest, output: raw.toString('base64') };
         writeQuotaIntent(file, intent, !persisted);
         persisted = { file, intent };
       }
@@ -563,7 +582,7 @@ export function markTemporaryCredentialsPending(directory: string, identity?: st
 }
 
 /** A later restart can match a verified pool write even after its refresh token changed. */
-export function recordAntigravityQuotaOutput(directory: string, identity: string, bytes: Buffer | null): void {
+export function recordAntigravityQuotaOutput(directory: string, identity: string, bytes: Buffer | null, stored = bytes): void {
   const record = readOwner(directory);
   if (!record?.pendingCommit || owned.get(directory)?.nonce !== record.nonce) throw new PendingQuotaConflict();
   if (writersRemain(record)) throw new PendingQuotaConflict(false);
@@ -572,13 +591,14 @@ export function recordAntigravityQuotaOutput(directory: string, identity: string
     return;
   }
   record.recoveryDigest = outputDigest(identity, bytes);
+  record.storedDigest = stored && !stored.equals(bytes) ? outputDigest(identity, stored) : undefined;
   const file = quotaIntentFile(record);
   if (file) {
     const intent = readQuotaIntent(file);
     // Failures proven to occur before process creation have no outstanding authorization request.
     if (!intent && !record.processes.length) return;
     if (!intent || intent.nonce !== record.nonce) throw new PendingQuotaConflict();
-    writeQuotaIntent(file, { ...intent, recoveryDigest: record.recoveryDigest,
+    writeQuotaIntent(file, { ...intent, recoveryDigest: record.recoveryDigest, storedDigest: record.storedDigest,
       output: bytesDigest(bytes) === intent.inputDigest ? undefined : bytes.toString('base64') });
   }
   writeOwner(directory, record);

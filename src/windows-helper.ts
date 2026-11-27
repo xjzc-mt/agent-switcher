@@ -4,7 +4,14 @@ import { createHash } from 'node:crypto';
 
 type Helper = 'AntigravityCredential' | 'AgySandbox' | 'DesktopWindows';
 
-export class WindowsHelperError extends Error {}
+export class WindowsHelperError extends Error {
+  constructor(message = 'Windows 辅助组件缺失或被安全软件拦截，请检查杀毒软件隔离区或重新安装 AgentSwitcher') { super(message); }
+}
+
+export function checkWindowsHelperError(error: unknown): void {
+  if (error instanceof WindowsHelperError) throw error;
+  if (['ENOENT', 'EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException)?.code ?? '')) throw new WindowsHelperError();
+}
 
 export function windowsHelper(name: Helper): string {
   const directory = 'windows-helpers';
@@ -13,6 +20,6 @@ export function windowsHelper(name: Helper): string {
   try {
     const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, directory, 'sha256.json'), 'utf8'));
     if (fs.lstatSync(file).isFile() && createHash('sha256').update(fs.readFileSync(file)).digest('hex') === manifest[name]) return file;
-  } catch { /* Return the same actionable error for missing and incomplete installations. */ }
-  throw new WindowsHelperError('Windows 辅助组件缺失或校验失败，请重新构建源码或安装完整的 AgentSwitcher');
+  } catch { throw new WindowsHelperError(); }
+  throw new WindowsHelperError('Windows 辅助组件校验失败，请重新安装 AgentSwitcher');
 }

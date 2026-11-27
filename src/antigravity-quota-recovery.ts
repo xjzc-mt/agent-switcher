@@ -1,8 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import type { AntigravityAgent } from './agents/antigravity';
-import { cliTokenPath } from './antigravity-cli';
-import { compareNativeSessionCopies, findQuotaBearer, parseNativeToken } from './antigravity-native';
+import { cliTokenPath, matchesQuotaIdentity } from './antigravity-cli';
+import { bindNativeTokenIdentity, compareNativeSessionCopies, findQuotaBearer, parseNativeToken } from './antigravity-native';
 import { stepDiagnostic } from './diagnostics';
 import { pendingAntigravityQuota, PendingQuotaConflict } from './temporary-credentials';
 
@@ -28,20 +27,23 @@ function readRecoveryOutput(directory: string): Buffer | undefined {
 }
 
 /** Only for credentials owned by AGS, while holding the identity and store locks. */
-export function recoverAntigravityQuota(agent: AntigravityAgent, identity: string, original: Buffer, storage: {
-  read: () => Buffer | null; write: (bytes: Buffer) => void;
+export function recoverAntigravityQuota(identity: string, original: Buffer, storage: {
+  preview?: boolean; read: () => Buffer | null; write: (bytes: Buffer) => void;
   confirmCopies?: (output: Buffer, matchesInput: (bytes: Buffer) => boolean) => void;
 }): { bytes: Buffer; pending: boolean; readOnly: boolean } {
   const input = parseNativeToken(original);
   try {
-    const pending = pendingAntigravityQuota(identity, input.token.refresh_token, original);
+    const pending = pendingAntigravityQuota(identity, input.token.refresh_token, original, storage.preview);
     if (!pending) return { bytes: original, pending: false, readOnly: false };
     stepDiagnostic('recovery-found');
     // The authenticated Windows intent is sealed after the kernel job drains. An unsealed sandbox file
     // on that platform has no POSIX owner/mode evidence and cannot by itself authorize a pool write.
-    const output = process.platform === 'win32' ? pending.savedOutput ?? (pending.alreadyStored ? original : undefined)
+    const raw = process.platform === 'win32' ? pending.savedOutput ?? (pending.alreadyStored ? original : undefined)
       : readRecoveryOutput(pending.directory) ?? pending.savedOutput;
-    pending.checkOutput(output);
+    pending.checkOutput(raw);
+    let output: Buffer | undefined;
+    try { if (raw) output = bindNativeTokenIdentity(raw, input); }
+    catch { throw new PendingQuotaConflict(); }
     if (pending.alreadyStored) stepDiagnostic('recovery-stored');
     let selected = original;
     let confirmed = true;
@@ -50,7 +52,7 @@ export function recoverAntigravityQuota(agent: AntigravityAgent, identity: strin
       if ((output && !output.equals(original)) || (pending.alreadyStored && !output)) throw new PendingQuotaConflict();
     } else {
       if (!output) throw new PendingQuotaConflict(true, 'recovery-missing');
-      if (output.equals(original) || agent.identityFromBytes(output)?.id !== identity) throw new PendingQuotaConflict();
+      if (output.equals(original) || !matchesQuotaIdentity(identity, input, parseNativeToken(output))) throw new PendingQuotaConflict();
       const next = parseNativeToken(output).token;
       if (next.refresh_token !== input.token.refresh_token) selected = output;
       else {
@@ -65,8 +67,9 @@ export function recoverAntigravityQuota(agent: AntigravityAgent, identity: strin
     }
     if (!confirmed && !findQuotaBearer(parseNativeToken(selected), [], false)) throw new PendingQuotaConflict();
     if (!storage.read()?.equals(original)) throw new Error('账号凭据已变化，已保留恢复副本');
+    if (storage.preview) return { bytes: selected, pending: true, readOnly: !confirmed };
     if (selected !== original) {
-      if (confirmed) pending.beforeStore(selected);
+      if (confirmed) pending.beforeStore(selected, raw);
       try {
         storage.write(selected);
         if (!storage.read()?.equals(selected)) throw new Error('未能确认账号凭据已安全写回，已保留恢复副本');
@@ -76,8 +79,10 @@ export function recoverAntigravityQuota(agent: AntigravityAgent, identity: strin
     if (pending.alreadyStored || selected !== original) {
       const successor = parseNativeToken(selected).token.refresh_token;
       storage.confirmCopies?.(selected, bytes => {
-        if (agent.identityFromBytes(bytes)?.id !== identity) return false;
-        const token = parseNativeToken(bytes).token.refresh_token;
+        let copy;
+        try { copy = parseNativeToken(bytes); } catch { return false; }
+        if (!matchesQuotaIdentity(identity, input, copy)) return false;
+        const token = copy.token.refresh_token;
         // Even differently formatted copies of a consumed grant must advance together.
         // A bearer-only update can only replace the exact input copy.
         return pending.matchesInput(bytes, token !== successor ? token : undefined);

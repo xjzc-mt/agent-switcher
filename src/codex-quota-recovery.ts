@@ -43,7 +43,7 @@ export function codexQuotaRecovery(agent: BaseAgent, dir: string, profile: strin
     selected = output;
   }
   const changed = selected !== original;
-  return { changed, apply() {
+  return { changed, selected, apply() {
     if (!agent.readCredentials(dir)[file]?.equals(original)) throw new CredentialChangedError();
     for (const entry of pending) if (changed && entry.output?.equals(selected)) entry.beforeStore(selected);
     let retain = false;

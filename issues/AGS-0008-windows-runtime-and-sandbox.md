@@ -44,7 +44,7 @@
 - [ ] 在开启 Clash / v2ray 本地代理（`127.0.0.1`）的 Windows 11 真机验证 Antigravity 备用账号查额与续期连通性。
 - [ ] 在同时开启 UAC 管理员终端、多工作区窗口及深色任务栏的 Windows 11 真机验证切换、关窗重开与托盘唤醒体验。
 - [ ] 完成 `antigravity-mac.ts` / `antigravity-windows.ts` 对称拆分且确认 `src/accounts.ts` 零 `process.platform` 判断，Mac 与 Windows 打包产物互不混入对方专属资源。
-- [ ] 结合 [AGS-0003](AGS-0003-desktop-only-accounts.md) 一并确认纯桌面安装与 CLI 安装的边界，敲定最终方案与代码量预估后再进入编码。
+- [x] 结合 [AGS-0003](archive/AGS-0003-desktop-only-accounts.md) 一并确认纯桌面安装与 CLI 安装的边界，敲定最终方案与代码量预估后再进入编码。
 
 ## 3. 修复记录
 

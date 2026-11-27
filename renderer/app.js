@@ -15,7 +15,8 @@ let accountLayout = readLayout('accountLayout', 'cards') === 'rows' ? 'rows' : '
 let inputModality = 'pointer';
 const exportSelection = new Set();
 let selecting = false, filter = '';
-let loading, refreshing, refreshBatch;
+let loading;
+const refreshBatches = new Map();
 let switchingAccount = false;
 const refreshFailedAt = new Map();
 let activeDialog = newAccountDialog(0);
@@ -23,6 +24,7 @@ function newAccountDialog(generation) {
   return { generation, tab:'local', loginMode:'open', login:{} };
 }
 let quotaRefreshTimer;
+let quotaPaused, quotaInitialized = false, initialOpenPlatform;
 let statusRetryAt = 0;
 const $ = id => document.getElementById(id);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -98,14 +100,10 @@ function resetLabel(w) {
 function quotaCell(w, status, model = '', current = false) {
   const label = `${model ? model+' · ' : ''}${quotaWindowLabel(w)}`;
   const tip = model ? ` data-tooltip="${escapeHTML(`${label} 剩余额度；${Number.isFinite(w.resetsAt)?'重置：'+time(w.resetsAt*1000):'重置时间未提供'}`)}"` : '';
-  if (!Number.isFinite(w.usedPercent)) return `<div class="quota-cell" data-value-state="missing" aria-label="${escapeHTML(label)} 未提供"${tip}><div class="quota-cell-line"><span class="quota-label">${escapeHTML(quotaWindowLabel(w))}</span><strong class="quota-value"><span class="quota-number">—</span></strong><span class="quota-reset">未提供</span></div></div>`;
-  // A window's reset only invalidates that window's displayed quota.
-  const sample = { ...status, quota: { primaryWindow: w } };
-  const value = AccountPolicy.remaining(w), pct = Math.round(value), cached = AccountPolicy.invalidated(sample);
-  const amount=pct===0&&w.usedPercent<100?'<1':pct;
-  const state=cached?'cached':w.usedPercent>=100?'zero':pct<=30?'low':pct>=80?'ample':'normal';
-  return `<div class="quota-cell ${cached?'cached':''}" data-value-state="${state}" aria-label="${escapeHTML(`${label} 剩余 ${amount}%${stale(sample, 'codex', current)?'（上次查询）':''}`)}"${tip}>
-    <div class="quota-cell-line"><span class="quota-label">${escapeHTML(quotaWindowLabel(w))}</span><strong class="quota-value"><span class="quota-number">${escapeHTML(amount)}<small>%</small></span></strong>${resetLabel(w)}</div><progress class="quota-track" aria-hidden="true" value="${value}" max="100" data-fill="${value <= 0 ? 'zero' : value <= 30 ? 'low' : 'normal'}"></progress></div>`;
+  const view = AccountPolicy.quotaWindowView(w, AccountPolicy.queryInvalidated(status));
+  if (view.remaining === undefined) return `<div class="quota-cell" aria-label="${escapeHTML(label)} 未提供"${tip}><div class="quota-cell-line"><span class="quota-label">${escapeHTML(quotaWindowLabel(w))}</span><strong class="quota-value"><span class="quota-number">${view.text}</span></strong><span class="quota-reset">未提供</span></div></div>`;
+  return `<div class="quota-cell" data-tone="${view.tone}" aria-label="${escapeHTML(`${label} 剩余 ${view.text}${stale(status, currentTab, current)?'（上次查询）':''}`)}"${tip}>
+    <div class="quota-cell-line"><span class="quota-label">${escapeHTML(quotaWindowLabel(w))}</span><strong class="quota-value"><span class="quota-number">${escapeHTML(view.text.slice(0,-1))}<small>%</small></span></strong>${resetLabel(w)}</div><progress class="quota-track" aria-hidden="true" value="${view.remaining}" max="100"></progress></div>`;
 }
 function quotaSummary(bucket, status, current) {
   const name = escapeHTML(bucket.label), compact = !current;
@@ -210,21 +208,33 @@ function profileStatus(agent, profile) { return profile?.isActive ? agent.status
 function hasIsolatedLogin(id) { return agentsData.find(a => a.id === id)?.management?.isolatedLogin ?? id === 'codex'; }
 function hasQuota(agent) { return agent?.management?.quota ?? agent?.id === 'codex'; }
 function canSaveLocal(agent) { return agent?.management?.canSaveCurrent ?? true; }
+const knownPlan = status => status?.plan || status?.quota?.plan;
 const profileKey = (id, name) => `${id}/${name}`;
 
+function providerNotice(management) {
+  const cli = management?.cliStatus;
+  if (!cli || cli.state === 'ready') return management?.notice ? `<p class="provider-notice">${escapeHTML(management.notice)}</p>` : '';
+  const missing = cli.state === 'missing';
+  const message = missing ? '查看额度需安装官方 agy CLI。' : cli.state === 'outdated'
+    ? `本机 agy CLI 版本过旧${cli.version ? `（当前 v${cli.version}）` : ''}，请运行 agy update 更新后查看额度。`
+    : '未能确认本机 agy CLI 版本，请检查安装后重新检测。';
+  return `<div class="provider-notice cli-notice"><span>${escapeHTML(message)}</span>
+    ${missing ? button('openAntigravityInstall','查看官方安装说明','agy',undefined,'app-update-link') : ''}
+    ${button('recheckAntigravityCli','重新检测','agy',undefined,'app-update-link')}</div>`;
+}
 function renderProviderCurrent(agent, current, status) {
   const title=current?.meta?.label||current?.name||(status.available?'已登录':status.state==='signed-out'?'尚未登录':'登录状态未确认');
   const managed=agent.management?.storage==='unified'||agent.management?.storage==='unknown';
-  const account=status.account|| (managed?'在官方客户端查看与切换账号':status.state==='error'?'暂时无法读取 CLI 登录状态':'未检测到登录账号');
+  const account=status.account||current?.meta?.email|| (managed?'在官方客户端查看与切换账号':status.state==='error'?(status.extra||'暂时无法读取登录状态'):'未检测到登录账号');
   const action=agent.management?.loginLabel||'打开官方登录';
   const selectable=selecting&&current,checked=selectable&&exportSelection.has(profileKey(agent.id,current.name));
   const interaction=selectable?`data-account-context tabindex="0" data-action="toggleExport" role="button" aria-pressed="${!!checked}"`:status.available?'data-account-context tabindex="0" aria-haspopup="dialog" aria-keyshortcuts="Enter Shift+F10"':'';
   return `<section class="current-section"><div class="section-caption">${status.available?'当前使用':'客户端登录'}</div>
     <article class="active-session-card provider-session-card ${selectable?'selectable':''} ${checked?'is-selected':''}" ${interaction} data-agent="${agent.id}" data-profile="${escapeHTML(current?.name||'')}">
       <div class="session-card-header"><div class="session-meta-group"><div class="platform-logo-big">${agentLogo(agent.id, 'current')}</div>
-        <div class="session-title-group"><div class="detail-title"><strong class="account-name">${escapeHTML(managed?'Antigravity':title)}</strong>${status.plan?planLabel(status,'current-plan',agent.id):''}</div><div class="session-account-line"><span class="session-account-email" data-tooltip-overflow data-tooltip="${escapeHTML(account)}">${escapeHTML(account)}</span></div></div></div>
+        <div class="session-title-group"><div class="detail-title"><strong class="account-name">${escapeHTML(managed?'Antigravity':title)}</strong>${knownPlan(status)?planLabel(status,'current-plan',agent.id):''}</div><div class="session-account-line"><span class="session-account-email" data-tooltip-overflow data-tooltip="${escapeHTML(account)}">${escapeHTML(account)}</span></div></div></div>
         <div class="detail-header-actions">${selectable?`<span class="selection-check ${checked?'checked':''}" aria-hidden="true">${checked?'✓':''}</span>`:button('handleOfficialLogin',action,agent.id,undefined,'btn btn-sm')}${!selecting&&status.available&&!current&&canSaveLocal(agent)?button('openSaveModal','保存账号',agent.id):''}</div>
-      </div>${agent.management?.notice?`<p class="provider-notice">${escapeHTML(agent.management.notice)}</p>`:''}
+      </div>${providerNotice(agent.management)}
     </article></section>`;
 }
 function renderCurrentSectionHtml(agent, current, status, statusTip) {
@@ -264,9 +274,11 @@ function renderWorkbench() {
   const current = agent.profiles.find(p => p.isActive), status = agent.status;
   const poolCount = agent.profiles.filter(p => !p.isActive).length;
   const allSelected = agent.profiles.length > 0 && agent.profiles.every(p => exportSelection.has(profileKey(agent.id, p.name)));
+  $('btnRefresh').hidden = !hasQuota(agent) && !!agent.management?.cliStatus;
   $('btnRefresh').title = hasQuota(agent)?`刷新全部 ${agent.label} 账号额度；右键账号可在详情中单独刷新`:'刷新账号列表';
   if (hasQuota(agent) && !agent.profiles.length && !status.available && status.state !== 'ok' && !(status.state === 'error' && status.extra)) {
     container.innerHTML = `<div class="platform-empty"><div class="empty-icon-wrap">${agentLogo(agent.id, 'current')}</div><h2>尚未添加该智能体的账号凭据</h2><p>通过本地登录、Session 凭据或加密备份添加 ${escapeHTML(agent.label)} 账号。</p>${button('openSaveModal', '+ 添加账号', agent.id, undefined, 'btn btn-primary')}</div>`;
+    syncRefreshUi();
     return;
   }
   const focus = document.activeElement;
@@ -317,7 +329,7 @@ function trayAccount(agent, profile, positions, freshRows) {
     const privacyLabel = `账号 ${positions.get(profile)}`;
     nickname = nickname && !nickname.includes('@') ? `${nickname} · ${privacyLabel}` : privacyLabel;
   }
-  const plan = (status?.plan || status?.quota?.plan) && AccountPolicy.planInfo(status,agent.id).label;
+  const plan = knownPlan(status) && AccountPolicy.planInfo(status,agent.id).label;
   const slots = hasQuota(agent) && !expired ? AccountPolicy.quotaSlots(status, agent.id) : [];
   const row = {
     name: profile.name, label: nickname, expired,
@@ -326,11 +338,12 @@ function trayAccount(agent, profile, positions, freshRows) {
       [status.quota.primaryWindow, status.quota.secondaryWindow].every(w => !w || w.windowMins === 10080),
     windows: slots.map(w => ({
       label: quotaWindowLabel(w),
-      remaining: Number.isFinite(w.usedPercent) ? AccountPolicy.remaining(w) : undefined,
+      usedPercent: w.usedPercent,
+      invalidated: AccountPolicy.quotaWindowView(w, AccountPolicy.queryInvalidated(status)).invalidated,
       resetsAt: w.resetsAt,
     })),
   };
-  if (row.windows.some(w => w.remaining !== undefined)) {
+  if (row.windows.some(w => Number.isFinite(w.usedPercent))) {
     const isLive = !!profile.isActive;
     row.cached = stale(status, agent.id, isLive);
     if (!row.cached) freshRows.push({ row, status, agent: agent.id, isLive });
@@ -355,17 +368,23 @@ function syncTray(rebuild = false, cacheChanged = false) {
       const unmanaged = !active && agent.status.available && canSaveLocal(agent);
       const unavailable = !active && !unmanaged && agent.status.state !== 'signed-out' ? '登录状态未确认' : undefined;
       return { id, current: active && trayAccount(agent, active, positions, freshTrayRows), unmanaged, unavailable, canRefresh:hasQuota(agent),
-        alternates, total:pool.length };
+        alternates, total:pool.length, hasTargets: hasQuota(agent) && refreshTargets(agent, pool).length > 0 };
     });
   }
   if (!trayGroups) return;
-  const refreshing = trayGroups.some(g => (g.current || g.unmanaged) && refreshQueue.get(refreshKey(g.id,g.current?.name)));
+  let busyChanged = false;
+  for (const group of trayGroups) {
+    const refreshing = [...refreshQueue.jobs.values()].some(job => job.payload.id === group.id);
+    const bulkRefreshing = !!refreshBatches.get(group.id)?.manual.size;
+    busyChanged ||= group.refreshing !== refreshing || group.bulkRefreshing !== bulkRefreshing;
+    Object.assign(group, { refreshing, bulkRefreshing });
+  }
   const menu = { tab: currentTab, layout: accountLayout, blocked: !!document.querySelector('dialog[open]') || switchingAccount };
   if (!rebuild && !cacheChanged && menu.tab === lastTrayState?.menu.tab && menu.layout === lastTrayState?.menu.layout &&
-      menu.blocked === lastTrayState?.menu.blocked && refreshing === lastTrayState?.refreshing &&
+      menu.blocked === lastTrayState?.menu.blocked && !busyChanged &&
       switchingAccount === lastTrayState?.switching && lastAgentTab === lastTrayState?.selectedAgent &&
       settings.showResetTimes === lastTrayState?.countdown) return;
-  const state = { groups: trayGroups, refreshing, switching:switchingAccount, selectedAgent:lastAgentTab, countdown:settings.showResetTimes, menu };
+  const state = { groups: trayGroups, switching:switchingAccount, selectedAgent:lastAgentTab, countdown:settings.showResetTimes, menu };
   lastTrayState = state;
   const serialized = JSON.stringify(state);
   if (serialized !== lastTrayJson) {
@@ -374,11 +393,11 @@ function syncTray(rebuild = false, cacheChanged = false) {
   }
 }
 
-async function handleTrayCommand({action, agent:id, name, operation}) {
+async function handleTrayCommand({action, agent:id, name, operation, decision}) {
   if (loading && action !== 'add' && action !== 'open') await loading;
-  if (switchingAccount || action === 'open') return;
-  if (document.querySelector('dialog[open]')) {
-    if (action === 'switch') await window.api.revealTrayMain?.();
+  if (action === 'open') return;
+  if (switchingAccount || document.querySelector('dialog[open]')) {
+    if (action === 'switch') throw new Error(switchingAccount ? '另一项切换正在进行' : '请先完成主窗口中的操作');
     return;
   }
   if (action === 'menu') {
@@ -394,13 +413,9 @@ async function handleTrayCommand({action, agent:id, name, operation}) {
     return;
   }
   if (action === 'add') return openSaveModal(id || lastAgentTab);
+  if (action === 'refresh') return id && refreshAll(true, id, 'tray');
   if (statusRetryAt) {
     if (action === 'switch') throw new Error('暂时无法读取账号列表，请稍后重试');
-    return;
-  }
-  if (action === 'refresh') {
-    const live = agentsData.filter(a => agentEnabled(a.id) && hasQuota(a) && (a.active || a.status.available));
-    await Promise.all(live.map(a => requestRefresh(a.id, a.active, true, 2, 'tray')));
     return;
   }
   const agent = agentsData.find(a => a.id === id && agentEnabled(a.id));
@@ -415,11 +430,11 @@ async function handleTrayCommand({action, agent:id, name, operation}) {
   const profile = agent.profiles.find(p => p.name === name);
   if (!profile) throw new Error('账号列表已变更，请重新选择');
   if (canUpdateCredentials(profile,profileStatus(agent,profile))) {
-    if (action === 'switch') await window.api.revealTrayMain?.();
+    if (action === 'switch') throw new Error('请先在主窗口更新此账号的凭据');
     if (!document.querySelector('dialog[open]')) { selectTab(id); return openCredentialUpdate(id,name); }
   } else if (action === 'switch' && !profile.isActive) {
     if (agent.switchUnsupported) throw new Error(agent.switchUnsupported);
-    await handleSwitchProfile(id,name,'tray');
+    return handleSwitchProfile(id,name,'tray',decision);
   }
 }
 const invalidGroup = { key: '__invalid__', label: '凭据失效' };
@@ -432,7 +447,7 @@ function renderCardHTML(agent, p, invalid = false) {
   const checked = exportSelection.has(profileKey(agent.id, p.name));
   const info=AccountPolicy.planInfo(status,agent.id);
   const needsLogin=canUpdateCredentials(p, status);
-  if (!hasQuota(agent)) return `<article class="account-card credential-card ${selecting?'selectable':''} ${selecting&&checked?'is-selected':''}" role="listitem" data-account-context data-agent="${agent.id}" data-profile="${escapeHTML(p.name)}" ${selecting?'data-action="toggleExport"':'tabindex="0" aria-haspopup="dialog" aria-keyshortcuts="Enter Shift+F10"'} aria-label="${escapeHTML(p.meta.label||p.name)}"><div class="account-summary"><div class="account-title-row"><strong class="account-main-name" data-tooltip-overflow data-tooltip="${escapeHTML(p.meta.label||p.name)}">${escapeHTML(p.meta.label||p.name)}</strong>${status?.plan?planLabel(status,'plan-tier',agent.id):''}</div><div class="account-secondary"><span class="account-email-sub" data-tooltip-overflow data-tooltip="${escapeHTML(email)}">${escapeHTML(email)}</span></div></div><div class="card-actions">${selecting?`<input type="checkbox" class="account-select" data-action="toggleExport" data-agent="${agent.id}" data-profile="${escapeHTML(p.name)}" ${checked?'checked':''} aria-label="选择 ${escapeHTML(p.name)}">`:agent.switchUnsupported?'':button('handleSwitchProfile','切换',agent.id,p.name,'btn btn-brand-soft btn-switch')}</div></article>`;
+  if (!hasQuota(agent)) return `<article class="account-card credential-card ${selecting?'selectable':''} ${selecting&&checked?'is-selected':''}" role="listitem" data-account-context data-agent="${agent.id}" data-profile="${escapeHTML(p.name)}" ${selecting?'data-action="toggleExport"':'tabindex="0" aria-haspopup="dialog" aria-keyshortcuts="Enter Shift+F10"'} aria-label="${escapeHTML(p.meta.label||p.name)}"><div class="account-summary"><div class="account-title-row"><strong class="account-main-name" data-tooltip-overflow data-tooltip="${escapeHTML(p.meta.label||p.name)}">${escapeHTML(p.meta.label||p.name)}</strong>${knownPlan(status)?planLabel(status,'plan-tier',agent.id):''}</div><div class="account-secondary"><span class="account-email-sub" data-tooltip-overflow data-tooltip="${escapeHTML(email)}">${escapeHTML(email)}</span></div></div><div class="card-actions">${selecting?`<input type="checkbox" class="account-select" data-action="toggleExport" data-agent="${agent.id}" data-profile="${escapeHTML(p.name)}" ${checked?'checked':''} aria-label="选择 ${escapeHTML(p.name)}">`:agent.switchUnsupported?'':button('handleSwitchProfile','切换',agent.id,p.name,'btn btn-brand-soft btn-switch',needsLogin||status?.available===false)}</div></article>`;
   let resources;
   if (invalid) {
     const label = invalidCredentialLabel(status);
@@ -756,13 +771,14 @@ function accountDetailStatus(status, id) {
 }
 function accountDetailsContent(id,name,dialog) {
   const {agent,p,status}=detailAccount(id,name);if(!p)return '<p class="detail-note">此账号已移除。</p>';
-  const plan=status?.plan?(id==='agy'?escapeHTML(status.plan):planLabel(status,'',id)):'未取得';
-  if (!hasQuota(agent)) return `<p class="account-dialog-email">${escapeHTML(p.meta.email||status?.account||'账号信息未识别')}</p>${status?.plan?`<div class="account-detail-line"><span>套餐</span><b>${plan}</b></div>`:''}<p class="detail-note provider-detail-note">${escapeHTML(p.unsaved?(status?.extra||'来自官方 CLI 的当前登录状态。'):agent?.switchUnsupported?'文件凭据备份；可重命名、导出或从本机移除。':'文件凭据备份；切换后请重新打开终端会话。')}</p>${accountDetailActions(id,p,status,dialog)}`;
+  const savedPlan=knownPlan(status);
+  const plan=savedPlan?(id==='agy'?escapeHTML(savedPlan):planLabel(status,'',id)):'未取得';
+  if (!hasQuota(agent)) return `<p class="account-dialog-email">${escapeHTML(p.meta.email||status?.account||'账号信息未识别')}</p>${savedPlan?`<div class="account-detail-line"><span>套餐</span><b>${plan}</b></div>`:''}${agent?.switchUnsupported?'<p class="detail-note provider-detail-note">可重命名、导出或从本机移除这份备份。</p>':''}${accountDetailActions(id,p,status,dialog)}`;
   const staged = p.isActive && p.meta.snapshot?.stagedReplacement ? p.meta.snapshot : undefined;
   const candidateNote = staged ? `<p class="detail-note detail-status-note">新凭据验证 · ${escapeHTML(staged.extra || '等待验证')}</p>` : '';
   const credit=creditInfo(status, !!(p.isActive || p.unsaved)),email=p.meta.email||status?.account||'未取得';
   const refresh=button('refreshSelected',icon('restart'),id,name,'btn-icon-ghost detail-refresh').replace('<button ','<button data-refresh-account data-tooltip-instant data-tooltip="刷新额度" aria-label="刷新额度" ');
-  return `<p class="account-dialog-email">${escapeHTML(email)}</p><div class="account-detail-line"><span>套餐</span><b>${plan}</b></div>${id==='codex'||credit?`<div class="account-detail-line"><span>Credits</span><b>${escapeHTML(credit?.balance??'未取得')}</b></div>`:''}<div class="detail-quota-list">${accountDetailStatus(status,id)}${candidateNote}${(id==='agy'?(status?.quota?.buckets||[]).flatMap(bucket=>bucket.windows.map(w=>({...w,model:bucket.label}))):windows(status)).map(w=>`<div class="account-detail-line"><span>${escapeHTML(w.model?`${w.model} · ${quotaWindowLabel(w)}`:quotaWindowLabel(w))} 剩余</span><b>${Math.round(AccountPolicy.remaining(w))===0&&w.usedPercent<100?'&lt;1':Math.round(AccountPolicy.remaining(w))}%</b><span>${Number.isFinite(w.resetsAt)?AccountPolicy.resetText(w.resetsAt):'重置时间未提供'}</span></div>`).join('')}</div><div class="detail-update-row"><span>${status?.fetchedAt?'上次更新：':''}${escapeHTML(time(status?.fetchedAt))}</span>${refresh}</div>${accountDetailActions(id,p,status,dialog)}`;
+  return `<p class="account-dialog-email">${escapeHTML(email)}</p><div class="account-detail-line"><span>套餐</span><b>${plan}</b></div>${id==='codex'||credit?`<div class="account-detail-line"><span>Credits</span><b>${escapeHTML(credit?.balance??'未取得')}</b></div>`:''}<div class="detail-quota-list">${accountDetailStatus(status,id)}${candidateNote}${(id==='agy'?(status?.quota?.buckets||[]).flatMap(bucket=>bucket.windows.map(w=>({...w,model:bucket.label}))):windows(status)).map(w=>`<div class="account-detail-line"><span>${escapeHTML(w.model?`${w.model} · ${quotaWindowLabel(w)}`:quotaWindowLabel(w))} 剩余</span><b>${escapeHTML(AccountPolicy.quotaWindowView(w).text)}</b><span>${Number.isFinite(w.resetsAt)?AccountPolicy.resetText(w.resetsAt):'重置时间未提供'}</span></div>`).join('')}</div><div class="detail-update-row"><span>${status?.fetchedAt?'上次更新：':''}${escapeHTML(time(status?.fetchedAt))}</span>${refresh}</div>${accountDetailActions(id,p,status,dialog)}`;
 }
 function updateAccountDetails() {
   document.querySelectorAll('dialog[data-account-details]:not([data-closing])').forEach(dialog=>{
@@ -813,10 +829,10 @@ async function exportSelected() {
   if (!result.canceled) { showToast(`已加密导出 ${result.count} 个账号`); endSelection(); }
 }
 
-async function loadStatus() {
+async function loadStatus(silent = false, readDashboard = window.api.getStatus) {
   if (loading) return loading;
   loading = (async () => {
-    agentsData = check(await window.api.getStatus());
+    agentsData = check(await readDashboard());
     statusRetryAt = 0;
     syncTray(true);
     agentsData.forEach(a => { $(`badge-count-${a.id}`).textContent = a.profiles.length; $(`logo-nav-${a.id}`).innerHTML = agentLogo(a.id, 'sidebar'); });
@@ -833,51 +849,56 @@ async function loadStatus() {
   })().catch(error => {
     statusRetryAt = Date.now() + 60000;
     syncTray(true);
-    showToast(error.message, 'error');
+    if (!silent) showToast(error.message, 'error');
     scheduleQuotaRefresh();
   }).finally(() => { loading = null; });
   return loading;
 }
 function scheduleQuotaRefresh() {
   clearTimeout(quotaRefreshTimer);
-  if (!canAutoRefresh() || refreshBatch) return;
+  if (!canAutoRefresh()) return;
   if (statusRetryAt) {
     // Refresh the local deadlines before scheduling queries from a stale dashboard.
     quotaRefreshTimer = setTimeout(resumeQuotaRefresh, Math.max(0, statusRetryAt - Date.now()));
     return;
   }
-  const targets = agentsData.filter(hasQuota).flatMap(refreshTargets);
+  const targets = agentsData.filter(a => hasQuota(a) && !refreshBatches.has(a.id)).flatMap(a => refreshTargets(a));
   const deadline = Math.min(...targets.filter(t=>!refreshQueue.get(t.key)).map(t=>t.deadline));
   if (!Number.isFinite(deadline)) return;
-  quotaRefreshTimer = setTimeout(() => refreshAll(), Math.max(1000, deadline - Date.now()));
+  quotaRefreshTimer = setTimeout(() => refreshAll(), Math.min(2147483647, Math.max(1000, deadline - Date.now())));
 }
 function refreshKey(id, profile) {
   const agent=agentsData.find(a=>a.id===id);
   return JSON.stringify([id, profile || agent?.profiles.find(p=>p.isActive)?.name || null]);
 }
-function refreshTargets(agent) {
-  const active=agent.profiles.find(p=>p.isActive);
-  const targets=agent.profiles.filter(p=>!p.isActive).map(p=>({id:agent.id,profile:p.name,deadline:p.refreshAt}));
-  if (active || agent.status.available) {
-    const saved = active?.meta?.snapshot;
-    const deadline = saved?.stagedReplacement || saved?.available === false ? active.refreshAt : agent.refreshAt;
-    targets.unshift({id:agent.id,profile:active?.name,deadline});
-  }
-  return targets.map(target => {
-    const key = JSON.stringify([target.id, target.profile || null]);
+function refreshTargets(agent, pool = sortedProfiles(agent)) {
+  const active = agent.profiles.find(p => p.isActive);
+  const targets = [];
+  const add = (profile, live, record) => {
+    const saved = profile?.meta.snapshot;
+    const status = live && !saved?.stagedReplacement ? agent.status : saved;
+    if (saved?.available === false || ['signed-out','unsupported'].includes(status?.state) || (!saved?.stagedReplacement && credentialsExpired(status))) return;
+    const key = JSON.stringify([agent.id, profile?.name || null]);
     const failed = refreshFailedAt.get(key);
-    const retryAt = failed === undefined ? 0 : failed + agent.refreshPeriods[target.profile === active?.name ? 'live' : 'spare'];
-    return { ...target, key, deadline: Math.max(target.deadline ?? 0, retryAt) };
-  });
+    const retryAt = failed === undefined ? 0 : failed + agent.refreshPeriods[live ? 'live' : 'spare'];
+    targets.push({key, id:agent.id, profile:profile?.name, live,
+      deadline:Math.max(record.refreshAt ?? 0, retryAt), hotRefreshAt:Math.max(record.hotRefreshAt ?? Infinity, retryAt),
+      switchable:!agent.switchUnsupported && !canUpdateCredentials(profile, status)});
+  };
+  if (active || agent.status.available) add(active, true, active?.meta.snapshot?.stagedReplacement ? active : agent);
+  for (const profile of pool) add(profile, false, profile);
+  return targets;
 }
 function syncRefreshUi() {
   syncTray();
-  const supportsQuota=hasQuota(agentsData.find(a=>a.id===currentTab));
-  $('refreshIcon')?.classList.toggle('spin',supportsQuota&&!!refreshBatch);
+  const supportsQuota = hasQuota(agentsData.find(a=>a.id===currentTab));
+  const batch = supportsQuota && refreshBatches.get(currentTab);
+  const manual = batch?.manual?.size;
+  $('refreshIcon')?.classList.toggle('spin',!!batch);
   if($('btnRefresh')){
-    $('btnRefresh').disabled=supportsQuota&&!!refreshBatch?.force;
-    $('btnRefresh').setAttribute('aria-busy',String(supportsQuota&&!!refreshBatch));
-    $('refreshLabel').textContent=!supportsQuota?'刷新':refreshBatch?.force?`刷新中 ${refreshBatch.completed}/${refreshBatch.requests.size}`:'刷新全部';
+    $('btnRefresh').disabled = !!manual;
+    $('btnRefresh').setAttribute('aria-busy',String(!!batch));
+    $('refreshLabel').textContent = !supportsQuota ? '刷新' : manual ? `刷新中 ${batch.completed}/${batch.requests.size}` : '刷新全部';
   }
   document.querySelectorAll('[data-refresh-account]').forEach(el=>{
     const job=refreshQueue.get(refreshKey(el.dataset.agent,el.dataset.profile));
@@ -891,7 +912,7 @@ function syncRefreshUi() {
   scheduleQuotaRefresh();
 }
 function canAutoRefresh(payload) {
-  if (document.hidden) return false;
+  if (!quotaInitialized || quotaPaused) return false;
   if (payload) return accountRefreshInterval(payload.id, payload.profile) !== 'manual';
   return settings.liveRefreshInterval !== 'manual' || settings.spareRefreshInterval !== 'manual';
 }
@@ -901,24 +922,33 @@ const refreshQueue = new AccountRefreshQueue({
   onChange:syncRefreshUi,
   run:async ({id,profile,source},force)=>{
     const key=refreshKey(id,profile);
-    const agent=agentsData.find(a=>a.id===id);
+    const startingAgent = agentsData.find(a=>a.id===id);
+    if (!hasQuota(startingAgent)) return { skipped: true };
+    const startingSnapshot = profile ? startingAgent?.profiles.find(p=>p.name===profile)?.meta.snapshot : startingAgent?.status;
     try {
       const result=check(await window.api.refreshAccount(id,profile,force,source));
+      if (result.skipped) return result;
+      const batch = refreshBatches.get(id);
+      const agent = agentsData.find(a=>a.id===id);
       refreshFailedAt.delete(key);
-      if (!refreshBatch) {
-        await loadStatus();
-      } else if (agent && agentsData.includes(agent)) {
+      if (!batch) {
+        await loadStatus(source === 'automatic' || source === 'on-open');
+      } else if (agent) {
         const saved = agent.profiles.find(p => p.name === profile);
+        if (startingAgent !== agent) {
+          const revision = (profile ? saved?.meta.snapshot : agent.status)?.credentialRevision;
+          if (!revision || (revision !== startingSnapshot?.credentialRevision && revision !== result.credentialRevision)) return result;
+        }
         const checkingCandidate = saved?.meta.snapshot?.stagedReplacement || result.stagedReplacement;
         if (saved) saved.meta.snapshot = result;
         // Only the subsequent dashboard read can confirm which login a verified replacement reached.
-        if (!profile || (saved?.isActive && !checkingCandidate)) agent.status = result;
+        if ((!profile && !agent.active) || (saved?.isActive && !checkingCandidate)) agent.status = result;
+        syncTray(true);
         updateAccountDetails();
-        if (currentTab === id && !refreshBatch.frame) {
-          const batch = refreshBatch;
+        if (currentTab === id && !batch.frame) {
           batch.frame = requestAnimationFrame(() => {
             batch.frame = 0;
-            if (refreshBatch === batch && currentTab === id) renderWorkbench();
+            if (refreshBatches.get(id) === batch && currentTab === id) renderWorkbench();
           });
         }
       }
@@ -932,14 +962,14 @@ const refreshQueue = new AccountRefreshQueue({
 });
 function requestRefresh(id,profile,force,priority,source = 'automatic') {
   const resolved=profile||agentsData.find(a=>a.id===id)?.profiles.find(p=>p.isActive)?.name;
-  return refreshQueue.request(refreshKey(id,resolved),{id,profile:resolved,source},{force,priority,automatic:source === 'automatic'});
+  return refreshQueue.request(refreshKey(id,resolved),{id,profile:resolved,source},{force,priority,automatic:source === 'automatic' || source === 'on-open'});
 }
 async function refreshSelected(id = currentTab, profile, force = true, trigger, source = 'manual') {
   if (!hasQuota(agentsData.find(a=>a.id===id))) { await loadStatus(); return; }
   const restoreFocus=trigger?.matches(':focus-visible');
   const previousCheckedAt=detailAccount(id,profile).status?.checkedAt;
   let result;
-  try { result=await requestRefresh(id,profile,force || accountRefreshInterval(id, profile) === 'manual',2,source); }
+  try { result=await requestRefresh(id,profile,force || accountRefreshInterval(id, profile) === 'manual',4,source); }
   finally {
     if(restoreFocus&&document.activeElement===document.body)[...document.querySelectorAll('[data-refresh-account]')].find(el=>refreshKey(el.dataset.agent,el.dataset.profile)===refreshKey(id,profile))?.focus({preventScroll:true});
   }
@@ -948,54 +978,76 @@ async function refreshSelected(id = currentTab, profile, force = true, trigger, 
     else showToast(result.extra||stateLabels[result.state]||'未取得额度',result.state==='error'?'error':'warn');
   }
 }
-function refreshAll(force = false) {
+function refreshAll(force = false, platform = currentTab, source = force ? 'manual' : 'automatic') {
   if (!force && (!canAutoRefresh() || statusRetryAt)) return Promise.resolve();
-  const agents=agentsData.filter(a=>hasQuota(a)&&(!force||a.id===currentTab));
-  if(!agents.length)return Promise.resolve();
-  const batch=refreshBatch||(refreshBatch={requests:new Map(),keys:new Set(),completed:0,force:false});
-  batch.force ||= force;
-  for(const target of agents.flatMap(refreshTargets)){
-    if(!force&&target.deadline>Date.now())continue;
-    // Both automatic and manual triggers reuse accounts completed in this pass.
-    if(batch.keys.has(target.key)&&!refreshQueue.get(target.key))continue;
-    const request=requestRefresh(target.id,target.profile,force,force?1:target.profile===agents.find(a=>a.id===target.id)?.active?1:0,force?'manual':'automatic');
-    batch.keys.add(target.key);
-    if(!batch.requests.has(request))batch.requests.set(request,request.then(result=>({result}),error=>({error})).then(outcome=>{batch.completed++;syncRefreshUi();return outcome;}));
-  }
-  if(refreshing){syncRefreshUi();return refreshing;}
-  refreshing=Promise.resolve().then(async()=>{
-    let count,outcomes;
-    do {
-      do {
-        count = batch.requests.size;
-        outcomes = await Promise.all(batch.requests.values());
-      } while (count !== batch.requests.size);
-      if (outcomes.some(o => !o.result?.skipped)) {
-        if (loading) await loading;
-        await loadStatus();
-      }
-    } while (count !== batch.requests.size);
-    if(batch.force){
-      const done=outcomes.filter(o=>!o.result?.skipped);
-      const failed=done.filter(o=>o.error||o.result?.state!=='ok').length;
-      if(done.length)showToast(failed?`已检查 ${done.length} 个账号，${failed} 个未取得新额度`:`已检查 ${done.length} 个账号`,failed?'warn':'ok');
+  const hot = source === 'on-open';
+  const agents = agentsData.filter(a => hasQuota(a) && ((!force && !hot) || a.id === platform));
+  return Promise.all(agents.map(agent => {
+    let targets = refreshTargets(agent);
+    if (hot) {
+      const candidates = targets.filter(t => !t.live && t.switchable && Number.isFinite(t.hotRefreshAt));
+      targets = targets.filter(t => t.live).concat(candidates.slice(0, 4));
     }
-  }).finally(()=>{cancelAnimationFrame(batch.frame);refreshBatch=null;refreshing=null;syncRefreshUi();});
-  syncRefreshUi();
-  return refreshing;
+    if (!force) targets = targets.filter(t => canAutoRefresh(t) && (hot ? t.hotRefreshAt : t.deadline) <= Date.now());
+    if (!targets.length) return;
+    let batch = refreshBatches.get(agent.id);
+    if (!batch) {
+      batch = {requests:new Map(), manual:new Set(), completed:0};
+      refreshBatches.set(agent.id, batch);
+    }
+    for (const t of targets) {
+      if (force) batch.manual.add(t.key);
+      // Completed rows stay in the pass; queued rows can be promoted by a later foreground action.
+      if (batch.requests.has(t.key) && !refreshQueue.get(t.key)) continue;
+      const priority = force ? (t.live ? 3 : 2) : hot ? 1.5 : t.live ? 1 : 0;
+      const request = requestRefresh(t.id, t.profile, force || hot, priority, source);
+      if (!batch.requests.has(t.key)) batch.requests.set(t.key, request.then(result => ({result}), error => ({error}))
+        .then(outcome => { batch.completed++; syncRefreshUi(); return outcome; }));
+    }
+    if (!batch.promise) batch.promise = Promise.resolve().then(async () => {
+      let count, outcomes;
+      do {
+        do {
+          count = batch.requests.size;
+          outcomes = await Promise.all(batch.requests.values());
+        } while (batch.requests.size !== count);
+        if (outcomes.some(o => !o.result?.skipped)) {
+          if (loading) await loading;
+          await loadStatus(!batch.manual.size);
+        }
+      } while (batch.requests.size !== count);
+      if (batch.manual.size) {
+        const done = (await Promise.all([...batch.manual].map(key => batch.requests.get(key)))).filter(o => !o.result?.skipped);
+        const failed = done.filter(o => o.error || o.result?.state !== 'ok').length;
+        if (done.length) showToast(failed ? `已检查 ${done.length} 个账号，${failed} 个未取得新额度` : `已检查 ${done.length} 个账号`, failed ? 'warn' : 'ok');
+      }
+    }).finally(() => {
+      cancelAnimationFrame(batch.frame);
+      refreshBatches.delete(agent.id);
+      syncRefreshUi();
+    });
+    syncRefreshUi();
+    return batch.promise;
+  }));
 }
-async function handleSwitchProfile(id, name, source) {
+async function handleSwitchProfile(id, name, source, decision) {
   if (switchingAccount) return;
   switchingAccount = true;
   syncTray();
+  const tray = source === 'tray';
+  let result;
   try {
-    const result = check(await window.api.useProfile(id, name, source === 'tray' ? 'tray' : 'manual'));
-    if (result.canceled) return;
-    showToast(result.clientRestartError || `已切换到 ${name}；已有终端会话请重新启动`, result.clientRestartError ? 'warn' : 'ok');
+    result = check(await window.api.useProfile(id, name, tray ? 'tray' : 'manual', decision));
+    if (result.confirmation) return { confirmation: result.confirmation };
+    if (result.canceled) return { canceled: true };
+    if (!tray) showToast(result.clientRestartError || `已切换到 ${name}；已有终端会话请重新启动`, result.clientRestartError ? 'warn' : 'ok');
+    if (tray && loading) await loading;
     await loadStatus();
   } finally { switchingAccount = false; syncTray(); }
-  try { await refreshSelected(id, name, false); }
-  catch (error) { showToast(`账号已切换，额度更新失败：${error.message}`, 'warn'); }
+  const refresh = !statusRetryAt && hasQuota(agentsData.find(a => a.id === id)) && settings.liveRefreshInterval !== 'manual'
+    ? requestRefresh(id, name, false, 2, 'automatic').catch(() => {}) : undefined;
+  if (tray) return { warning: [result.clientRestartError, ...(result.warnings || []), statusRetryAt && '账号已切换，暂时无法读取账号列表'].filter(Boolean).join('。') };
+  await refresh;
 }
 async function handleDeleteProfile(id,name,target) {
   const dialog=target.closest('[data-account-details]');if(!dialog)return;
@@ -1098,7 +1150,7 @@ const SESSION_INSTRUCTIONS = {
     label: 'Antigravity',
     file: '个人 Google 账号凭据 JSON',
     mac: null, win: null, linux: null,
-    hint: '可粘贴完整个人账号凭据，或使用「本地登录」独立授权。2.x 当前凭据由系统 Keychain 管理；导入只加入账号池，选择切换后才应用。',
+    hint: '导入后账号会加入账号池，点击「切换」可在本机使用。',
   },
 };
 
@@ -1113,7 +1165,7 @@ function updateSessionGuide() {
   document.querySelector('.session-extract-summary-title').textContent=agentId==='codex'?'对方机器如何提取凭据？查看终端指令':'凭据格式与来源';
   document.querySelector('.session-guide-hint').textContent=info.hint||'在对应系统终端运行后，复制凭据并粘贴到上方输入框即可。';
   $('sessionImportHint').hidden=agentId==='codex';
-  $('sessionImportHint').textContent=agentId==='agy'?(hasIsolatedLogin('agy')?'支持个人 Google 账号凭据；也可使用本地登录添加账号。':'仅导入旧版文件凭据作为备份。'):'';
+  $('sessionImportHint').textContent=agentId==='agy'?(canSaveLocal(agentsData.find(a=>a.id==='agy'))?'支持个人 Google 账号凭据；也可从「本地登录」保存账号。':'仅导入旧版文件凭据作为备份。'):'';
 }
 
 function updateAddAction() {
@@ -1147,6 +1199,7 @@ function updateAddAction() {
   $('saveModalOverlay').classList.toggle('credential-update-dialog',!!activeDialog.updateTarget);
   document.querySelector('.add-account-tabs').setAttribute('aria-label',activeDialog.updateTarget?'更新凭据方式':'添加账号方式');
   document.querySelector('.add-dialog-header [data-action="closeSaveModal"]').setAttribute('aria-label',activeDialog.updateTarget?'关闭更新凭据':'关闭添加账号');
+  $('addTab-local').hidden = !!activeDialog.updateTarget && !hasIsolatedLogin(activeDialog.agent);
   $('addTab-local').textContent=activeDialog.updateTarget?'重新登录':'本地登录';
   $('addTab-session').textContent=activeDialog.updateTarget?'Session 更新':'Session 导入';
   $('addTab-backup').hidden=!!activeDialog.updateTarget;
@@ -1215,7 +1268,7 @@ function resetLocalDraft(label) {
   $('modalAccountEmail').textContent = label;
 }
 async function selectAddTab(tab) {
-  if (activeDialog.busy || tab === activeDialog.tab || !['local','session','backup'].includes(tab) || (activeDialog.updateTarget && tab === 'backup')) return;
+  if (activeDialog.busy || tab === activeDialog.tab || !['local','session','backup'].includes(tab) || $(`addTab-${tab}`).hidden) return;
   const session = ++activeDialog.generation;
   activeDialog.busy = true;
   clearInterval(activeDialog.pollTimer);
@@ -1242,7 +1295,9 @@ function openSaveModal(id, updateTarget) {
   $('keepAdding').checked = false;
   activeDialog.updateTarget = updateTarget;
   if (activeDialog.updateTarget) $('modalAccountEmail').textContent='等待重新登录';
-  clearAddImport(); showAddError(''); activeDialog.tab = canSaveLocal(list.find(a=>a.id===activeDialog.agent))||hasIsolatedLogin(activeDialog.agent)?'local':'session';
+  clearAddImport(); showAddError('');
+  const local = hasIsolatedLogin(activeDialog.agent) || (!updateTarget && canSaveLocal(list.find(a=>a.id===activeDialog.agent)));
+  activeDialog.tab = local ? 'local' : 'session';
   $('saveModalOverlay').showModal(); updateAddAction(); pollLocalAccount();
   $(activeDialog.tab==='session'?'sessionCredentials':activeDialog.updateTarget?'btnModalLaunch':'modalProfileInput').focus();
 }
@@ -1295,7 +1350,7 @@ async function handleModalDetect() {
       $('modalAccountEmail').innerHTML = `${escapeHTML(emailText)} <span class="pill-badge pill-standby">${activeDialog.login.updatable?'将更新':'已添加为'}「${escapeHTML(status.existingProfile)}」</span>`;
       const currentName = $('modalProfileInput').value.trim();
       if (!activeDialog.login.updatable && currentName !== status.existingProfile) {
-        showAddError(`该账号已存在于「${status.existingProfile}」，不能重复添加。如需添加新账号，请点击下方「登录其他账号」。`);
+        showAddError(`该账号已存在于「${status.existingProfile}」，不能重复添加。可在「本地登录」中登录其他账号。`);
       } else if ($('addAccountError').textContent.includes('已存在于')) {
         showAddError('');
       }
@@ -1358,7 +1413,7 @@ async function confirmSaveProfile() {
   }
   if (result.warnings?.length) { await loadStatus(); showToast(result.warnings.join(' '),'warn'); return; }
   showToast(`已${result.updated?'更新':'保存'} ${savedName}`); await loadStatus();
-  if (accountRefreshInterval(id, savedName) === 'manual') return;
+  if (!hasQuota(agentsData.find(a=>a.id===id)) || accountRefreshInterval(id, savedName) === 'manual') return;
   if (keepAdding) void requestRefresh(id, savedName, true, 2).catch(() => {});
   else await refreshSelected(id, savedName, true, undefined, 'automatic');
 }
@@ -1473,6 +1528,9 @@ async function submitAddAccount(event) {
       if (session === activeDialog.generation) await closeSaveModal();
       if (result.warning) { await loadStatus(); showToast(result.warning,'warn'); return; }
       await loadStatus();
+      if (!hasQuota(agentsData.find(a=>a.id===result.agent))) {
+        showToast(result.staged ? '凭据已暂存，启用官方 CLI 后可验证' : '凭据已更新'); return;
+      }
       if (accountRefreshInterval(result.agent, result.profile) === 'manual') {
         showToast(result.staged ? '凭据已暂存，可刷新此账号验证' : '凭据已更新'); return;
       }
@@ -1601,6 +1659,13 @@ const actions = {
     if (!result.canceled) showToast('故障报告已保存，可发给维护者');
   },
   refreshSelected: (id,profile,target) => refreshSelected(id,profile,true,target),
+  openAntigravityInstall: () => window.api.openAntigravityInstall().then(check),
+  recheckAntigravityCli: async (_id, _profile, target) => {
+    target.disabled = true;
+    if (loading) await loading;
+    try { await loadStatus(false, window.api.recheckAntigravityCli); }
+    finally { target.disabled = false; }
+  },
   loadStatus: () => hasQuota(agentsData.find(a=>a.id===currentTab))?refreshAll(true):loadStatus(),
   copyInstruction: async (_id, _profile, target) => {
     const codeId = target.dataset.copyId;
@@ -1684,13 +1749,26 @@ document.addEventListener('keydown', event => {
   if (event.target.matches('.active-session-card.selectable') && ['Enter', ' '].includes(event.key)) { event.preventDefault(); event.target.click(); }
   else if(event.key==='Enter'&&event.target.matches('[data-account-context]'))openAccountContext(event);
 });
-function resumeQuotaRefresh() {
-  clearTimeout(quotaRefreshTimer);
-  if (!document.hidden) loadStatus().then(() => canAutoRefresh() && refreshAll(false)).catch(error => showToast(error.message, 'error'));
+async function resumeQuotaRefresh(platform) {
+  if (!quotaInitialized || quotaPaused) return;
+  await loadStatus(true);
+  if (canAutoRefresh() && !statusRetryAt) return platform ? refreshAll(false, platform, 'on-open') : refreshAll(false);
 }
-document.addEventListener('visibilitychange', resumeQuotaRefresh);
+window.api.onQuotaPower?.(paused => {
+  quotaPaused = paused;
+  clearTimeout(quotaRefreshTimer);
+  if (!paused) void resumeQuotaRefresh();
+});
+window.api.onQuotaOpen?.(platform => {
+  const selected = platform || currentTab;
+  if (quotaInitialized) void resumeQuotaRefresh(selected);
+  else initialOpenPlatform = selected;
+});
 // Age the tray snapshot and reset labels without another network request.
+let mainWindowVisible = !document.hidden;
+window.api.onMainVisibility?.(visible => { mainWindowVisible = visible; });
 setInterval(() => {
+  if (quotaPaused) return;
   const freshCount = freshTrayRows.length;
   freshTrayRows = freshTrayRows.filter(({row,status,agent,isLive}) => {
     if (!stale(status, agent, isLive)) return true;
@@ -1698,7 +1776,7 @@ setInterval(() => {
     return false;
   });
   syncTray(false, freshTrayRows.length !== freshCount);
-  if (!document.hidden && currentTab !== 'settings' && !selecting && !document.querySelector('dialog[open], details[open]') && !$('accountSearch')?.matches(':focus')) renderWorkbench();
+  if (mainWindowVisible && currentTab !== 'settings' && !selecting && !document.querySelector('dialog[open], details[open]') && !$('accountSearch')?.matches(':focus')) renderWorkbench();
 }, 30000);
 const resizer = $('sidebarResizer');
 let resizing = false;
@@ -1766,14 +1844,31 @@ window.api.onAppQuitState?.(state => {
   if (state?.waiting) showToast('正在完成凭据安全回存，完成后将自动退出…');
 });
 if (window.api.updateTray) {
-  document.addEventListener('toggle', event => { if (event.target instanceof HTMLDialogElement) syncTray(); }, true);
+  // A closed dialog may be removed before its deferred toggle event reaches the document.
+  document.addEventListener('beforetoggle', event => {
+    if (event.target instanceof HTMLDialogElement) queueMicrotask(() => syncTray());
+  }, true);
 }
-window.api.onTrayCommand?.(command => handleTrayCommand(command).catch(async error => {
-  if (command.action === 'switch') await window.api.revealTrayMain?.();
-  showToast(error.message,'error');
-}));
-window.api.getSettings().then(result => { settings = check(result); }).catch(error => showToast(error.message, 'error')).then(loadStatus).then(() => {
+window.api.onTrayCommand?.(async command => {
+  let result;
+  try {
+    result = await handleTrayCommand(command);
+  } catch (error) {
+    if (command.action !== 'switch') return showToast(error.message,'error');
+    result = { error: error.message };
+  }
+  if (command.action === 'switch') await window.api.replyTraySwitch(command.request, result || {});
+});
+Promise.all([window.api.getSettings(), window.api.getQuotaPaused?.() ?? false]).then(([prefs, paused]) => {
+  settings = check(prefs);
+  quotaPaused ??= paused;
+}).catch(error => showToast(error.message, 'error')).then(() => loadStatus()).then(() => {
+  quotaInitialized = true;
   selectTab(currentTab);
   window.api.trayReady?.();
-  if (canAutoRefresh()) return refreshAll(false);
+  scheduleQuotaRefresh();
+  if (canAutoRefresh()) {
+    if (initialOpenPlatform) void refreshAll(false, initialOpenPlatform, 'on-open');
+    return refreshAll(false);
+  }
 });

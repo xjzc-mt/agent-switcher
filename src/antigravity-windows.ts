@@ -13,6 +13,10 @@ function run(command: string, fields: string[] = []): string {
     windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
 }
 
+export function hasWindowsAntigravityCredential(): boolean {
+  try { return run('present') === '1'; } catch { return false; }
+}
+
 export function readWindowsCredential(): WindowsCredential {
   try {
     const value = run('read');

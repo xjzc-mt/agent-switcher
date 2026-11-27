@@ -21,6 +21,17 @@ test('reset periods and unsuccessful samples do not have confirmed quota', () =>
   sample.quota.secondaryWindow.resetsAt = now / 1000;
   assert.equal(policy.quotaConfirmed(sample, now), false);
 });
+test('quota window formatting keeps fractional balances, query failures and independent reset times', () => {
+  const status = account('windows', 99.8, 8).status;
+  const {primaryWindow:short, secondaryWindow:week} = status.quota;
+  const atReset = short.resetsAt * 1000;
+  const view = (w, at) => policy.quotaWindowView(w, policy.queryInvalidated(status), at);
+  assert.deepEqual([view(short, now).text, view(short, now).tone], ['<1%', 'low']);
+  assert.equal(view(short, atReset).tone, 'cached');
+  assert.equal(view(week, atReset).tone, 'ample');
+  status.state = 'error';
+  assert.deepEqual(view(week, now), { remaining:92, text:'92%', invalidated:true, tone:'cached' });
+});
 test('refresh age preserves last successful values and their comparison order', () => {
   const ample=account('z-ample',5,10), low=account('a-low',80,95), empty=account('b-empty',0,100);
   const sorted=()=>[low,empty,ample].sort((a,b)=>policy.compare(a,b,now)).map(a=>a.name);

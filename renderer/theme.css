@@ -37,3 +37,9 @@
     --quota-cached-text:#29374a; --quota-cached-bg:#e6ebf1;
   }
 }
+
+[data-tone=ample] { --tone-text:var(--quota-ample-text); --tone-bg:var(--quota-ample-bg); --tone-bar:#10b981; }
+[data-tone=normal] { --tone-text:var(--quota-normal-text); --tone-bg:var(--quota-normal-bg); --tone-bar:#3b82f6; }
+[data-tone=low] { --tone-text:var(--quota-low-text); --tone-bg:var(--quota-low-bg); --tone-bar:#d97706; }
+[data-tone=zero] { --tone-text:var(--quota-empty-text); --tone-bg:var(--quota-empty-bg); --tone-bar:#dc2626; }
+[data-tone=cached] { --tone-text:var(--quota-cached-text); --tone-bg:var(--quota-cached-bg); --tone-bar:var(--text-dim); }

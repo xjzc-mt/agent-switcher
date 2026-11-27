@@ -14,7 +14,9 @@ module.exports = suite(
     const host = createTrayPanel(tray, () => snapshot, command => window.webContents.send('tray-command', command));
     const onSnapshot = (_event, next) => { snapshot = next; host.update(); };
     ipcMain.on('fixture-tray-state', onSnapshot);
-    window.once('closed', () => ipcMain.off('fixture-tray-state', onSnapshot));
+    const onReply = (_event, request, result) => host.replySwitch(request, result);
+    ipcMain.on('fixture-tray-reply', onReply);
+    window.once('closed', () => { ipcMain.off('fixture-tray-state', onSnapshot); ipcMain.off('fixture-tray-reply', onReply); });
 
     await load();
     if (process.platform === 'darwin') {
@@ -78,6 +80,7 @@ module.exports = suite(
     const modalToast=await run(`(()=>{const t=document.querySelector('.toast-item'),r=t.getBoundingClientRect();return {top:r.top,topmost:!!document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.closest('.toast-item'),dialogs:document.querySelectorAll('dialog[open]').length};})()`);
     assert.equal(modalToast.topmost,true,JSON.stringify(modalToast));assert.equal(modalToast.dialogs,1);assert.equal(modalToast.top,toast.top,'Details must not move feedback back to the center');
     await run(`document.querySelector('.account-modal[open]').dismissAccountDialog()`);await pause(180);
+    assert.equal(snapshot.menu.blocked, false, 'Removing the closed details dialog releases the main-window close guard');
     assert.equal(await run(`document.querySelector('#toastBox').parentElement===document.body&&document.querySelector('#toastBox').matches(':popover-open')`),true,'Closing details must preserve its pending feedback');
     await run(`document.querySelector('.toast-close').click()`);await until(`!document.querySelector('#toastBox').matches(':popover-open')`);
     await run(`showToast('连接失败，请稍后再试','error')`);assert.equal(await run(`document.querySelector('.toast-item').getAttribute('role')`),'alert');
@@ -88,10 +91,14 @@ module.exports = suite(
       const a=agentsData[0], sign=a.profiles[1].meta.snapshot=structuredClone(a.profiles[1].meta.snapshot);
       a.status=structuredClone(a.status);
       for(const status of [a.status,sign]) {status.plan='pro';delete status.quota.primaryWindow;status.quota.secondaryWindow.usedPercent=91;}
-      const statuses=a.profiles.slice(2,7).map(p=>p.meta.snapshot=structuredClone(p.meta.snapshot));
-      [0,13,91,100].forEach((used,i)=>statuses[i].quota.primaryWindow.usedPercent=used);
+      const statuses=a.profiles.slice(2,8).map(p=>p.meta.snapshot=structuredClone(p.meta.snapshot));
+      [0,99.7,91,100].forEach((used,i)=>statuses[i].quota.primaryWindow.usedPercent=used);
       delete statuses[0].quota.secondaryWindow;
-      statuses[2].fetchedAt=new Date(0).toISOString();statuses[4].quota.secondaryWindow.windowMins=43200;
+      a.status.fetchedAt = statuses[1].fetchedAt = new Date(0).toISOString();
+      statuses[1].quota.secondaryWindow.usedPercent = 12;
+      statuses[2].quota.primaryWindow.resetsAt = Math.floor(Date.now()/1000)-1;
+      statuses[4].quota.secondaryWindow.windowMins=43200;
+      statuses[5].state='error';
       syncTray(true);
     }`);
     let panel;
@@ -102,10 +109,10 @@ module.exports = suite(
     };
     async function panelUntil(expression) {
       for(let i=0;i<80;i++) { if(await panelRun(expression)) return; await pause(25); }
-      assert.fail('Panel did not reach ' + expression);
+      assert.fail('Panel did not reach ' + expression + ': ' + await panelRun("document.querySelector('#panel').innerText + ' (focus ' + document.activeElement.id + ')'"));
     }
     async function openPanel() {
-      if (!panel?.isVisible()) tray.emit('click', {}, tray.getBounds());
+      if (!panel?.isVisible()) { tray.emit('mouse-down', {}); tray.emit('click', {}, tray.getBounds()); }
       for (let i=0; i<80; i++) {
         panel = BrowserWindow.getAllWindows().find(w => w.webContents.getURL().endsWith('/tray.html'));
         if (panel?.isVisible()) break;
@@ -130,19 +137,45 @@ module.exports = suite(
         hero:box('#current').height, amount:getComputedStyle(document.querySelector('.amount')).fontSize, meter:box('.meter').height,
         reset:document.querySelector('.period-reset').textContent};
     })()`);
-    assert.equal(geometry.count,20);assert.equal(geometry.height,312);assert.equal(geometry.width,260);assert.equal(geometry.visibleRows,5.5);
+    assert.equal(geometry.count,20);assert.equal(geometry.height,396);assert.equal(geometry.width,260);assert.equal(geometry.visibleRows,8.5);
     assert.ok(geometry.aligned && geometry.chipSize && geometry.nameClipped && geometry.private);
-    assert.deepEqual(geometry.tones,['ample','cached','empty','low','normal']);
+    assert.deepEqual(geometry.tones,['ample','cached','low','normal','zero']);
     assert.deepEqual(geometry.pro,['PRO','不限','9%']);assert.deepEqual(geometry.limit,[44,18,'dashed']);
     assert.ok(geometry.missing && geometry.boundary);assert.match(geometry.unusual,/30d 40%/);
     assert.equal(geometry.amount,'17px');assert.equal(geometry.meter,4);assert.match(geometry.reset,/天/);
+    const trayQuotas = () => panelRun(`Object.fromEntries([...document.querySelectorAll('.alternative')].filter(row => !row.querySelector('.unusual')).map(row =>
+      [row.accountName, [...row.querySelectorAll('.chip:not(.unlimited)')].map(chip => [chip.textContent, chip.dataset.tone, getComputedStyle(chip).color])]))`);
+    const expected = await trayQuotas();
+    for (const layout of ['cards','rows']) {
+      const main = await run(`(() => {
+        accountLayout='${layout}'; renderWorkbench();
+        return Object.fromEntries([...document.querySelectorAll('.account-card')].map(card => [card.dataset.profile,
+          [...card.querySelectorAll('.quota-cell')].map(cell => {
+            const value = cell.querySelector('.quota-number');
+            return [value.textContent, cell.dataset.tone, getComputedStyle(value).color];
+          })]));
+      })()`);
+      for (const [name, quotas] of Object.entries(expected)) assert.deepEqual(main[name], quotas, layout + ': ' + name);
+    }
     await run(`selectTab('settings');document.querySelector('[name=showResetTimes][value=false]').click()`);
     await panelUntil("document.querySelector('.period-reset').textContent.includes(':')");
-    snapshot.windowClosed=true;host.update();
-    await panelUntil("!!document.querySelector('.identity .cached') && !document.querySelector('[data-tone]:not([data-tone=cached])')");
-    delete snapshot.windowClosed;host.update();await run(`selectTab('codex')`);
+    window.hide(); host.update(); await openPanel();
+    assert.deepEqual(await trayQuotas(), expected, 'Hiding the main window must retain per-window colors');
+    assert.equal(await panelRun("!!document.querySelector('.identity .cached') && document.querySelector('.period').dataset.tone==='low'"), true);
+    assert.deepEqual(await panelRun(`(() => {
+      const row = [...choices.children].find(r => r.querySelector('.chip')?.textContent === '<1%');
+      const short = group().alternates.find(a => a.name === row.accountName).windows[0];
+      const clock = Date.now;
+      try {
+        Date.now = () => short.resetsAt * 1000;
+        updateQuotaClock();
+        return [...row.querySelectorAll('.chip')].map(chip => chip.dataset.tone);
+      } finally { Date.now = clock; render(); }
+    })()`), ['cached','ample']);
+    window.showInactive(); await run(`selectTab('codex')`);
     await panelRun("document.querySelector('#codex').focus()");key('End');
     await panelUntil("document.querySelector('#agy').getAttribute('aria-selected')==='true' && document.querySelectorAll('.period').length===2");
+    assert.equal(await panelRun("choices.clientHeight===choices.scrollHeight"),true);
     assert.equal(await panelRun("document.querySelector('#current').offsetHeight"),geometry.hero);
     key('Home');await panelUntil("document.querySelector('#codex').getAttribute('aria-selected')==='true'");
     key('Escape');
@@ -161,8 +194,9 @@ module.exports = suite(
       for (const type of ['mouseDown','mouseUp']) panel.webContents.sendInputEvent({type,button:'left',clickCount:1,...point});
     }
     await run(`openAccountDetails('codex','个人主力')`);
-    await chooseLast(); await pause(50);
+    await chooseLast(); await panelUntil("document.querySelector('#switchDetail').textContent.includes('主窗口')");
     assert.equal(await run(`!!document.querySelector('dialog[open]') && !window.testApi.calls().some(c=>c.method==='switch')`), true);
+    key('Escape');await panelUntil("document.querySelector('#switchPrompt').hidden");
     await run(`document.querySelector('.account-modal[open]').dismissAccountDialog()`);
     await run(`selectTab('agy')`);
     await chooseLast();
@@ -170,6 +204,62 @@ module.exports = suite(
     assert.equal(snapshot.groups[0].current?.name, chosen);
     assert.deepEqual(await run(`window.testApi.calls().filter(c=>c.method==='switch')`), [{method:'switch',id:'codex',name:chosen}]);
     assert.equal(await run('currentTab'), 'agy', 'A tray switch must preserve the main window platform');
+    await until('!switchingAccount');
+    for(let i=0;i<80 && panel.isVisible();i++)await pause(25);
+    assert.ok(!panel.isVisible());
+    await run("accountTestApi.trayConfirmation({token:'test',clients:['Codex'],unmanaged:true,migration:true,interrupted:true})");
+    await openPanel();
+    const prompt = async () => {
+      await panelRun("document.querySelector('#codex').click(); choices.firstElementChild.click()");
+      await panelUntil("document.activeElement.id==='confirmSwitch'");
+    };
+    await prompt();
+    assert.match(await panelRun("document.querySelector('#switchPrompt').innerText"),/Codex[\s\S]*中断[\s\S]*尚未保存[\s\S]*私有登录文件[\s\S]*直接切换[\s\S]*保存并切换/);
+    key('Escape');await panelUntil("document.activeElement.matches('.alternative') && document.querySelector('#switchPrompt').hidden");
+    await prompt();await panelRun("document.querySelector('#agy').click()");
+    assert.equal(await panelRun("document.querySelector('#switchPrompt').hidden"), true);
+    await prompt();window.focus();
+    for(let i=0;i<80 && panel.isVisible();i++)await pause(25);
+    assert.ok(!panel.isVisible());
+    await openPanel();
+    assert.equal(await panelRun("document.querySelector('#switchPrompt').hidden"), true);
+    await prompt();key('Enter');
+    await panelUntil("document.querySelector('#switchDetail').innerText.includes('请手动打开客户端')");
+    assert.ok(panel.isVisible());
+    const switches=await run("testApi.calls().filter(c=>c.method==='switch')");
+    assert.equal(switches.length,2);
+    assert.deepEqual(switches[1].decision,{token:'test',saveUnmanaged:true});
+    host.hide();
+    await run(`selectTab('codex'); providerTestApi.native(); loadStatus()`);
+    await run(`{
+      const agent = agentsData.find(a=>a.id==='agy');
+      delete agent.active;
+      agent.status={available:false,state:'signed-out'};
+      for(const p of agent.profiles) {p.isActive=false;p.meta.snapshot.fetchedAt=new Date(0).toISOString();}
+      syncTray(true);
+    }`);
+    window.hide(); await openPanel(); await panelRun("$('agy').click()");
+    const ordered = await panelRun("group().alternates.map(p=>p.name)");
+    assert.equal(ordered.length,2);
+    assert.ok(await panelRun("!group().current && !group().unmanaged && !$('refresh').disabled && group().alternates.every(a=>a.cached)"));
+    const before = await run("testApi.calls().filter(c=>c.method==='refresh').length");
+    await run(`testApi.blockNextRefresh(${JSON.stringify(ordered[1])})`);
+    for (const type of ['keyDown','keyUp']) panel.webContents.sendInputEvent({type,keyCode:'R',modifiers:['meta']});
+    await panelUntil("group().bulkRefreshing && $('refresh').getAttribute('aria-busy')==='true' && group().alternates.some(a=>!a.cached)");
+    assert.deepEqual(await run(`testApi.calls().filter(c=>c.method==='refresh').slice(${before}).map(c=>[c.id,c.name,c.force])`),
+      ordered.map(name=>['agy',name,true]), 'Cmd+R refreshes the viewed platform in list order even with only spare accounts');
+    await panelRun("$('codex').click()");
+    assert.ok(await panelRun("!$('refresh').disabled && $('refresh').getAttribute('aria-busy')==='false'"));
+    host.hide(); await run("testApi.releaseRefresh()");
+    await until("!refreshBatches.size && !refreshQueue.jobs.size");
+    assert.equal(await run('currentTab'),'codex');
+    assert.ok(!window.isVisible() && !panel.isVisible());
+    assert.ok(snapshot.groups.find(g=>g.id==='agy').alternates.every(p=>!p.cached));
+    await run("accountTestApi.trayConfirmation(undefined);providerTestApi.native();providerTestApi.cli('missing');loadStatus()");
+    await openPanel();await panelRun("$('agy').click()");
+    assert.deepEqual(await panelRun("[$('refresh').hidden,!!choices.querySelector('.chip'),choices.firstElementChild.textContent]"),[true,false,'Google BPro']);
+    await panelRun("choices.firstElementChild.click()");
+    await until("!switchingAccount && agentsData[1].active==='Google B'");
     await run(`localStorage.clear()`);
   },
 );

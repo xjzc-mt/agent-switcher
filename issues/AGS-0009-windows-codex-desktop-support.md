@@ -2,7 +2,7 @@
 
 - 状态：待验收
 - 类型：跨平台兼容性与桌面客户端闭环缺陷
-- 来源：2026-11-23 Windows `1.0.1` 实机用户故障报告与界面反馈（关联 [AGS-0003](AGS-0003-desktop-only-accounts.md)、[AGS-0008](AGS-0008-windows-runtime-and-sandbox.md)）
+- 来源：2026-11-23 Windows `1.0.1` 实机用户故障报告与界面反馈（关联 [AGS-0003](archive/AGS-0003-desktop-only-accounts.md)、[AGS-0008](AGS-0008-windows-runtime-and-sandbox.md)）
 - 环境：Windows 10 / 11 x64（及 ARM64），仅安装官方 Codex 桌面端（Microsoft Store / MSIX 包 `OpenAI.Codex_*`），未单独安装 Node.js 或独立 Codex CLI
 
 ## 1. 现象与复现

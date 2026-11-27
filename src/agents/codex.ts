@@ -229,6 +229,7 @@ export class CodexAgent extends BaseAgent {
   switchSupport(): string | undefined {
     return process.platform === 'win32' ? windowsCodexFileIssue(this.homeDir) : undefined;
   }
+  get usesCredentialRevisions() { return true; }
   management() {
     const defaults = { quota: true, storage: 'file' as const, canSaveCurrent: true, isolatedLogin: true }, notice = this.switchSupport();
     return notice ? { ...defaults, storage: 'unknown' as const, canSaveCurrent: false,

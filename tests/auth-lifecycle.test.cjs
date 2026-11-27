@@ -329,6 +329,7 @@ test('a busy Codex client owns live renewal while a spare account can still rota
   await accounts.saveAccount(agent, 'live-card');
   const running = t.mock.method(clients, 'runningClients', async () => { throw new Error('ps failed'); });
   const rpc = t.mock.method(agent, 'queryLiveRpc');
+  const writeReady = t.mock.method(require('../dist/credential-vault'), 'assertCredentialWriteReady');
   const deferred = await accounts.refreshAccount(agent, 'live-card', true);
   assert.equal(rpc.mock.callCount(), 0);
   assert.match(deferred.extra, /客户端正在运行/);
@@ -345,9 +346,14 @@ test('a busy Codex client owns live renewal while a spare account can still rota
   assert.equal((await accounts.refreshAccount(agent, 'live-card', true)).state, 'ok');
   assert.equal(version(dir('live-card')), 'refresh-running-user-2');
   assert.equal(version(agent.homeDir), 'refresh-running-user-2');
+  assert.equal(writeReady.mock.callCount(), 0);
 
   put(dir('spare-card'), 'spare-user');
-  rpc.mock.mockImplementation(async temp => { put(temp, 'spare-user', 2); return success(); });
+  rpc.mock.mockImplementation(async temp => {
+    assert.deepEqual(writeReady.mock.calls.map(call => call.arguments[0]), [file(dir('spare-card'))]);
+    put(temp, 'spare-user', 2);
+    return success();
+  });
   assert.equal((await accounts.refreshAccount(agent, 'spare-card', true)).state, 'ok');
   assert.equal(version(dir('spare-card')), 'refresh-spare-user-2');
 });
@@ -474,7 +480,7 @@ test('a different identity representation sharing a client refresh token is quer
 
 test('credential shared by an Antigravity auxiliary source defers isolated authentication', async t => {
   const { AntigravityAgent } = require('../dist/agents/antigravity');
-  const agy = new AntigravityAgent(() => 'unified', true);
+  const agy = new AntigravityAgent(() => 'unified', true, () => ({ state: 'ready' }));
   const credential = user => Buffer.from(JSON.stringify({ auth_method: 'consumer', id_token_email: user + '@example.test',
     token: { access_token: 'fixture-access', refresh_token: 'fixture-' + user } }));
   const file = agy.authFiles[0], primary = credential('desktop'), cli = credential('cli');

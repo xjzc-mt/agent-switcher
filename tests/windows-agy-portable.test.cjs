@@ -50,7 +50,10 @@ if (process.argv[2] === 'abandon-launch') {
   t.mock.method(os, 'homedir', () => root); t.mock.method(os, 'tmpdir', () => root);
   process.env.LOCALAPPDATA = path.join(root, 'LocalAppData');
   const binary = path.join(process.env.LOCALAPPDATA, 'agy', 'bin', 'agy.exe');
-  fs.mkdirSync(path.dirname(binary), { recursive: true }); fs.writeFileSync(binary, 'fixture');
+  const appFolder = path.join(process.env.LOCALAPPDATA, 'Programs', 'Google Antigravity');
+  fs.mkdirSync(path.join(appFolder, 'resources', 'app'), { recursive: true });
+  fs.writeFileSync(path.join(appFolder, 'Antigravity.exe'), 'fixture');
+  fs.writeFileSync(path.join(appFolder, 'resources', 'app', 'package.json'), '{"version":"2.32.1"}');
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');
   const as = value => Object.defineProperty(process, 'platform', { ...platform, value });
   t.after(() => Object.defineProperty(process, 'platform', platform));
@@ -58,6 +61,8 @@ if (process.argv[2] === 'abandon-launch') {
   const vault = require('../dist/credential-vault');
   const { atomicWrite, readBuffer } = require('../dist/utils'), store = require('../dist/store');
   const { antigravityAgent: agent } = require('../dist/agents/antigravity');
+  assert.equal(agent.management().cliStatus.state, 'missing');
+  assert.ok(agent.management().canSaveCurrent);
   const accounts = require('../dist/accounts'), backup = require('../dist/backup');
   const windows = require('../dist/antigravity-windows'), procs = require('../dist/windows-processes');
   const nativeFile = path.join(root, 'synthetic-wincred');
@@ -97,6 +102,13 @@ if (process.argv[2] === 'abandon-launch') {
   const installed = await backup.installBackup(parsed, parsed.items.map(item => item.key));
   assert.deepEqual(installed.imported.sort(), ['agy/active', 'agy/spare']);
   await accounts.useAccount(agent, nameOf(active));
+  assert.equal(agent.identity().email, active);
+  assert.deepEqual(calls, []);
+  fs.mkdirSync(path.dirname(binary), { recursive: true }); fs.writeFileSync(binary, 'fixture');
+  t.mock.method(require('node:child_process'), 'spawnSync', (file, args, options) =>
+    file === binary && args[0] === '--version' ? { status: 0, stdout: '1.5.9', stderr: '' } : spawnSync(file, args, options));
+  agent.recheckCapabilities();
+  assert.equal(agent.management().quota, true);
   desktop = true;
   const beforeSpare = readBuffer(fileOf(spare));
   let renewedActive, abandoned;

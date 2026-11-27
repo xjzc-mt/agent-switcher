@@ -8,7 +8,7 @@
     放进同一个桌面窗口：谁还有余量一眼看清，点一下顺手切换，既不打断心流，也不误覆盖原有主号。
   </p>
   <p>
-    <a href="docs/release-0.1.0.md"><img src="https://img.shields.io/badge/release-0.1.0-4F46E5?style=flat-square" alt="0.1.0 release" /></a>
+    <a href="docs/release-0.1.1.md"><img src="https://img.shields.io/badge/release-0.1.1-4F46E5?style=flat-square" alt="0.1.1 release" /></a>
     <img src="https://img.shields.io/badge/desktop-macOS_%C2%B7_Windows_x64-172033?style=flat-square" alt="macOS Apple Silicon, macOS Intel, Windows x64" />
     <img src="https://img.shields.io/badge/agents-Codex_%C2%B7_Antigravity-6366F1?style=flat-square" alt="Codex and Antigravity" />
     <img src="https://img.shields.io/badge/privacy-%E9%9B%B6%E8%87%AA%E5%BB%BA%E5%90%8E%E7%AB%AF_%C2%B7_AES--256--GCM-0D9488?style=flat-square" alt="零自建后端 · AES-256-GCM" />
@@ -19,7 +19,7 @@
     <a href="#界面速览">界面速览</a> ·
     <a href="#安全与支持范围">安全与支持范围</a> ·
     <a href="#快速安装">快速安装</a> ·
-    <a href="docs/release-0.1.0.md">0.1.0 版本说明</a> ·
+    <a href="docs/release-0.1.1.md">0.1.1 版本说明</a> ·
     <a href="#门后的彩蛋">✦ 门后彩蛋</a>
   </p>
 </div>
@@ -67,18 +67,18 @@
 - **不丢号、不越界**：未保存的当前登录在切换前会先弹窗提醒保护；只替换登录凭据，不动聊天记录与项目配置，也不会在后台自动切号。
 - **边界清楚**：放入他人账号须事先获持有人授权；本版仅限本机使用。详细机制见 [账号管理流程](docs/account-management.md) 与 [额度刷新](docs/refresh-behavior.md)。
 
-| 平台 | 状态 | macOS 支持与使用条件 |
+| 平台 | 状态 | 支持能力与使用条件 |
 | --- | :---: | --- |
 | **Codex** (`codex`) | ✅ 已支持 | 独立登录、`auth.json` 切换、`5h / 7d` 额度与 Credits（需桌面端内置或独立安装的 Codex CLI；Keychain-only 未适配，API Key 无订阅额度） |
-| **Antigravity** (`agy`) | ✅ 已支持 | Antigravity 2.x 个人 Google 账号独立登录、Keychain 或官方文件切换与模型组额度（需官方 `agy` CLI；企业认证暂未验证） |
+| **Antigravity** (`agy`) | ✅ 已支持 | 仅装 Antigravity 2.x 桌面即可保存、导入和手动切换个人 Google 账号；查看模型组额度与独立浏览器登录需安装官方 `agy` 1.5.9+ CLI（企业认证暂未验证） |
 
-**0.1.0 跨平台状态**：Windows x64 已验证安装、启动和卸载，支持使用独立安装或 Microsoft Store 版 Codex 首次运行准备的组件登录与查额度，切换时可确认关闭并重开 Codex 桌面；Antigravity 2.x 个人账号需安装官方 `agy` CLI。Mac 双真号往返及 Windows 真实账号往返与跨期续期仍待实机验收。
+**0.1.1 跨平台状态**：macOS（Apple Silicon / Intel）与 Windows x64 均已通过安装、启动与自动化回归验证。Windows 支持使用独立安装或 Microsoft Store 版 Codex 内置组件登录与查额度、原生极速检测进程与 DPAPI 密钥，以及仅装 Antigravity 2.x 桌面的个人账号切换；安装官方 `agy` 1.5.9+ 后点击「重新检测」即可启用额度查询。Mac 双真号往返及 Windows 真机全流程终验仍在进行中。
 
 ---
 
 ## 快速安装
 
-推荐使用一行命令自动识别架构、核对发布签名清单并完成安装（若曾安装早期 `1.0.x` 测试包，直接运行即可无损覆盖至 `0.1.0` 并保留全部账号）：
+已安装 `0.1.0` 的用户可直接在应用内 **「设置 → 应用与更新 → 立即安装并重启」** 一键升级。首次安装（或从早期 `1.0.x` 测试包无损切换至 `0.1.1`）推荐使用一行命令自动识别架构、核对签名清单并完成安装：
 
 ```bash
 # macOS（需 macOS 13+，自动识别 Apple Silicon / Intel 并安装至 /Applications）
@@ -90,15 +90,15 @@ curl -fsSL https://xjzc-mt.github.io/agent-switcher/install.sh | bash
 irm https://xjzc-mt.github.io/agent-switcher/install.ps1 | iex
 ```
 
-也可直接下载 `0.1.0` 安装包：
-[macOS · Apple Silicon（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-0.1.0-arm64.dmg) · [macOS · Intel（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-0.1.0-x64.dmg) · [Windows · x64（EXE）](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.0/AgentSwitcher-Setup-0.1.0-x64.exe)
+也可直接下载 `0.1.1` 安装包：
+[macOS · Apple Silicon（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.1/AgentSwitcher-0.1.1-arm64.dmg) · [macOS · Intel（DMG）](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.1/AgentSwitcher-0.1.1-x64.dmg) · [Windows · x64（EXE）](https://github.com/xjzc-mt/agent-switcher/releases/download/v0.1.1/AgentSwitcher-Setup-0.1.1-x64.exe)
 
 - **macOS** 打开 DMG，将 AGS 拖入「应用程序」。切换前先结束官方客户端中的任务，确认后 AGS 会退出并重开原先运行的桌面客户端。使用 Antigravity 时，请先关闭共用登录的 `agy` 或 IDE 会话。
 - **Windows** 运行 EXE 安装。切换前请先结束共用登录的 CLI 或 IDE 会话；若 Codex 桌面正在运行，确认后 AGS 会关闭并在切换完成后按原方式重开。
 
 ```bash
 shasum -a 256 AgentSwitcher-*.dmg   # macOS。将结果与同版 SHA256SUMS 对照。
-# Windows PowerShell: Get-FileHash .\AgentSwitcher-Setup-0.1.0-x64.exe
+# Windows PowerShell: Get-FileHash .\AgentSwitcher-Setup-0.1.1-x64.exe
 ```
 
 > [!IMPORTANT]

@@ -18,19 +18,22 @@ installMockKeychain();
 const native = require('../dist/antigravity-native');
 const clients = require('../dist/clients');
 const { AntigravityAgent } = require('../dist/agents/antigravity');
-const { saveAccount, useAccount, refreshAccount, needsUnmanagedChoice, clientSwitchRevision } = require('../dist/accounts');
+const { activeProfile, saveAccount, useAccount, refreshAccount, needsUnmanagedChoice, clientSwitchRevision } = require('../dist/accounts');
 const store = require('../dist/store');
 const { profileDir, listProfiles } = store;
 const { atomicWrite } = require('../dist/utils');
 const { credentialState } = require('../dist/credential-state');
 const token = (email, generation = 1) => Buffer.from(JSON.stringify({ auth_method: 'consumer',
   id_token_email: email, token: { access_token: `fake-access-${email}-${generation}`, refresh_token: `fake-refresh-${email}`, expiry: new Date(1795000000000 + generation * 60000).toISOString() } }));
+function agyCliFallback(bytes) {
+  return Buffer.from(JSON.stringify({ token: { ...JSON.parse(bytes).token, token_type: 'Bearer' }, auth_method: 'consumer' }));
+}
 let live = token('a@example.test');
 native.readNativeToken = () => live;
 native.writeNativeToken = bytes => { live = bytes; };
 native.sharedAntigravitySessions = async () => [];
 clients.runningClients = async () => [];
-const agent = new AntigravityAgent(() => 'unified', true);
+const agent = new AntigravityAgent(() => 'unified', true, () => ({ state: 'ready' }));
 
 test('legacy JWT and unified email retain the same personal identity after refresh', () => {
   const legacy = { auth_method: 'consumer', token: { refresh_token: 'fake-refresh' },
@@ -38,7 +41,6 @@ test('legacy JWT and unified email retain the same personal identity after refre
   assert.equal(agent.identityFromAuth(legacy).id, agent.identityFromAuth(JSON.parse(token('b@example.test'))).id);
   assert.doesNotThrow(() => native.parseNativeToken(Buffer.from(JSON.stringify(legacy))));
   const unsupported = [{}, { auth_method: 'business', token: { refresh_token: 'fake' } },
-    { auth_method: 'consumer', token: { refresh_token: 'fake' } },
     ...[{}, '   '].map(refresh_token => ({ ...legacy, token: { refresh_token } })),
   ];
   for (const value of unsupported) {
@@ -265,7 +267,8 @@ test('an external logout during long-credential migration remains logged out in 
   }
 });
 
-test('a later explicit switch reconciles an uncertain Keychain retirement or preserves an intervening login', { skip: process.platform !== 'darwin' }, async () => {
+test('a later explicit switch reconciles an uncertain Keychain retirement or preserves an intervening login', { skip: process.platform !== 'darwin' }, async t => {
+  t.mock.method(agent, 'cliStatus', () => ({ state: 'missing' }));
   const { hasPendingAntigravitySwitch } = require('../dist/antigravity-switch-recovery');
   const old = largeToken('recovery-old@example.test'), target = largeToken('recovery-target@example.test');
   const external = token('recovery-outside@example.test');
@@ -575,6 +578,49 @@ test('trusted desktop fallback yields to a readable login and survives an unavai
   });
 });
 
+test('an email-less CLI file permits shared quota for the same grant and isolated renewal for an unrelated spare', { skip: process.platform !== 'darwin' }, async t => {
+  const cli = require('../dist/antigravity-cli');
+  const email = 'cli-live@example.test', liveAuth = JSON.parse(token(email)), spare = token('cli-spare@example.test');
+  liveAuth.token.expiry = '2000-01-01T00:00:00Z';
+  const primary = Buffer.from(JSON.stringify(liveAuth));
+  const successor = JSON.parse(spare);
+  successor.token.refresh_token = 'renewed-spare-grant';
+  const rotated = Buffer.from(JSON.stringify(successor));
+  const usage = { groups: [{ name: 'Gemini', buckets: [{ name: '5h', remaining_fraction: 0.8 }] }] };
+  await withMockKeychain(primary, async ({ paths, writeFile }) => {
+    const sameGrant = agyCliFallback(primary);
+    writeFile(paths.cli, sameGrant);
+    await saveAccount(agent, 'CLI-live');
+    const spareDir = profileDir('agy', 'CLI-spare');
+    agent.writeCredentials(spareDir, { [agent.authFiles[0]]: spare });
+    const clientsRunning = t.mock.method(clients, 'runningClients', async () => ['Antigravity']);
+    t.mock.method(cli, 'queryAccessTokenUsage', () => assert.fail('unexpected bearer query'));
+    const shared = t.mock.method(cli, 'querySharedUsage', async () => usage);
+    const isolated = t.mock.method(cli, 'queryIsolatedUsage', async bytes => {
+      assert.deepEqual(bytes, spare);
+      return { data: usage, rotated };
+    });
+    const liveResult = await refreshAccount(agent, 'CLI-live', true);
+    assert.equal(liveResult.state, 'ok');
+    assert.equal(liveResult.account, email);
+    assert.equal(shared.mock.callCount(), 1);
+    assert.deepEqual(fs.readFileSync(paths.cli), sameGrant);
+
+    const independent = agyCliFallback(token('cli-independent@example.test'));
+    writeFile(paths.cli, independent);
+    assert.equal((await refreshAccount(agent, 'CLI-spare', true)).state, 'ok');
+    assert.equal(isolated.mock.callCount(), 1);
+    assert.deepEqual(agent.readCredentials(spareDir)[agent.authFiles[0]], rotated);
+    assert.deepEqual(fs.readFileSync(paths.cli), independent);
+    clientsRunning.mock.restore();
+    writeFile(paths.cli, sameGrant);
+    assert.equal(needsUnmanagedChoice(agent, 'CLI-spare'), false);
+    await useAccount(agent, 'CLI-spare');
+    assert.equal(fs.existsSync(paths.cli), false);
+    assert.deepEqual(realReadNative(), rotated);
+  });
+});
+
 test('fallback files (stub, older/newer same identity, pool spare, markers) resolve cleanly and converge on switch', { skip: process.platform !== 'darwin' }, async () => {
   await withMockKeychain(token('fa@example.test', 2), async ({ state, paths, encode, writeFile }) => {
     const expected = realReadNative([]), reads = state.toolReads, sharedLogin = () => native.readSharedQuotaLogin(expected);
@@ -602,7 +648,7 @@ test('fallback files (stub, older/newer same identity, pool spare, markers) reso
     assert.deepEqual(native.readSharedQuotaLogin(realReadNative([])), expected, 'quota resumes after unlock without a manual reset');
     atomicWrite(path.join(profileDir('agy', 'FB'), agent.authFiles[0]), token('fb@example.test', 1));
     // 1. Logout stub + markers do not block reading, saving, or switching A -> B -> A.
-    writeFile(paths.cli, JSON.stringify({ auth_method: 'consumer', token: {} }));
+    writeFile(paths.cli, JSON.stringify({ token: { access_token: 'session-only' } }));
     writeFile(paths.desktopMarker, '1');
     writeFile(paths.cliMarker, '1');
     assert.equal(agent.identity().email, 'fa@example.test');
@@ -626,13 +672,16 @@ test('fallback files (stub, older/newer same identity, pool spare, markers) reso
     assert.equal(fs.existsSync(paths.cli), false);
 
     // 3. CLI fallback holds newer rotation of pool spare account FA -> syncs into FA before switching B -> FA.
-    writeFile(paths.cli, token('fa@example.test', 4));
+    const poolCopy = JSON.parse(agyCliFallback(token('fa@example.test', 4)));
+    delete poolCopy.auth_method;
+    writeFile(paths.cli, JSON.stringify(poolCopy));
     writeFile(paths.cliMarker, '1');
     assert.equal(agent.identity().email, 'fb@example.test');
     assert.equal(needsUnmanagedChoice(agent, 'FA'), false);
     await useAccount(agent, 'FA');
-    assert.deepEqual(realReadNative(), token('fa@example.test', 4));
-    assert.deepEqual(readCredentialFile(path.join(profileDir('agy', 'FA'), agent.authFiles[0])), token('fa@example.test', 4));
+    assert.equal(agent.identity().email, 'fa@example.test');
+    assert.deepEqual(JSON.parse(realReadNative()).token, poolCopy.token);
+    assert.deepEqual(readCredentialFile(path.join(profileDir('agy', 'FA'), agent.authFiles[0])), realReadNative());
     assert.equal(fs.existsSync(paths.cli), false);
     assert.equal(fs.existsSync(paths.cliMarker), false);
 
@@ -680,8 +729,10 @@ test('fallback-only auth works with single or same-account files and rejects con
   await withMockKeychain(null, async ({ paths, writeFile, state }) => {
     // Same account in both desktop & CLI picks newer expiry.
     writeFile(paths.desktop, token('same@example.test', 1));
-    writeFile(paths.cli, token('same@example.test', 2));
-    assert.deepEqual(realReadNative(), token('same@example.test', 2));
+    const newer = agyCliFallback(token('same@example.test', 2));
+    writeFile(paths.cli, newer);
+    assert.equal(agent.identity().email, 'same@example.test');
+    assert.deepEqual(JSON.parse(realReadNative()).token, JSON.parse(newer).token);
 
     // After the marker expires, the desktop may still have only the refresh token.
     writeFile(paths.desktopMarker, 'old', 7200_000);
@@ -746,7 +797,7 @@ test('unmanaged fallback credential requires explicit save or discard choice and
   await withMockKeychain(token('ua@example.test', 1), async ({ paths, writeFile }) => {
     await saveAccount(agent, 'UA');
     atomicWrite(path.join(profileDir('agy', 'UB'), agent.authFiles[0]), token('ub@example.test', 1));
-    const unmanagedBytes = token('unmanaged@example.test', 1);
+    const unmanagedBytes = agyCliFallback(token('unmanaged@example.test'));
     writeFile(paths.cli, unmanagedBytes);
     writeFile(paths.cliMarker, '1');
 
@@ -756,11 +807,37 @@ test('unmanaged fallback credential requires explicit save or discard choice and
     assert.deepEqual(fs.readFileSync(paths.cli), unmanagedBytes);
 
     // Save unmanaged -> archived as backup-*, fallback & marker cleared.
+    const before = listProfiles('agy');
     await useAccount(agent, 'UB', { saveUnmanaged: true });
-    const backups = listProfiles('agy').filter(p => /^backup-\d+$/.test(p) && agent.identity(profileDir('agy', p))?.email === 'unmanaged@example.test');
+    const grant = JSON.parse(unmanagedBytes).token.refresh_token;
+    const backups = listProfiles('agy').filter(p => !before.includes(p));
     assert.equal(backups.length, 1);
+    assert.match(backups[0], /^backup-\d+$/);
+    const saved = agent.identity(profileDir('agy', backups[0]));
+    assert.ok(saved.id && saved.id !== grant);
+    assert.equal(saved.email, undefined);
+    const newerBearer = agyCliFallback(token('unmanaged@example.test', 2));
+    assert.deepEqual(agent.identityFromBytes(newerBearer), saved);
+    assert.deepEqual(JSON.parse(agent.readCredentials(profileDir('agy', backups[0]))[agent.authFiles[0]]).token, JSON.parse(unmanagedBytes).token);
     assert.equal(fs.existsSync(paths.cli), false);
     assert.equal(fs.existsSync(paths.cliMarker), false);
+
+    // Older archives may lack auth_method. A later named copy can supply identity, but never its bearer.
+    const archived = JSON.parse(unmanagedBytes);
+    delete archived.auth_method;
+    atomicWrite(path.join(profileDir('agy', backups[0]), agent.authFiles[0]), JSON.stringify(archived));
+    await useAccount(agent, backups[0]);
+    assert.deepEqual(agent.identity(), saved);
+    assert.deepEqual(JSON.parse(realReadNative()).token, archived.token);
+    await useAccount(agent, 'UB');
+    const donor = profileDir('agy', 'named-copy');
+    atomicWrite(path.join(donor, agent.authFiles[0]), token('unmanaged@example.test', 2));
+    await useAccount(agent, backups[0]);
+    assert.equal(agent.identity().email, 'unmanaged@example.test');
+    assert.deepEqual(JSON.parse(realReadNative()).token, archived.token);
+    assert.equal(activeProfile(agent), backups[0]);
+    await useAccount(agent, 'UB');
+    fs.rmSync(donor, { recursive: true });
 
     // Discard unmanaged -> fallback cleared without recreating a pool entry.
     for (const b of backups) fs.rmSync(profileDir('agy', b), { recursive: true, force: true });
@@ -769,7 +846,7 @@ test('unmanaged fallback credential requires explicit save or discard choice and
     assert.equal(needsUnmanagedChoice(agent, 'UB'), true);
     await useAccount(agent, 'UB', { saveUnmanaged: false });
     assert.equal(fs.existsSync(paths.cli), false);
-    assert.equal(listProfiles('agy').some(p => agent.identity(profileDir('agy', p))?.email === 'unmanaged@example.test'), false);
+    assert.deepEqual(listProfiles('agy').sort(), before.sort());
   });
 });
 
@@ -878,7 +955,8 @@ test('background renewal preserves both active file logins and separate refresh 
   });
 });
 
-test('switching preserves independent Keychain and file logins', { skip: process.platform !== 'darwin' }, async () => {
+test('switching preserves independent Keychain and file logins', { skip: process.platform !== 'darwin' }, async t => {
+  t.mock.method(agent, 'cliStatus', () => ({ state: 'missing' }));
   // Saving before the switch must include the Keychain login masked by the desktop marker.
   await withMockKeychain(token('masked-a@example.test', 1), async ({ paths, writeFile }) => {
     for (const p of listProfiles('agy')) fs.rmSync(profileDir('agy', p), { recursive: true, force: true });

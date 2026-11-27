@@ -1,9 +1,10 @@
-import { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, clipboard, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, clipboard, powerMonitor, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { pathToFileURL } from 'url';
-import { ALL_AGENTS, resolveAgent, dashboard, saveAccount, useAccount, prepareSwitchTarget, removeAccount, previewRemoveAccount, needsUnmanagedChoice, clientSwitchRevision, setCriticalCommitTracker, renameAccount, refreshAccount, prepareLogin, loginStatus, cancelLogin, RemovalPreview } from './accounts';
+import { ALL_AGENTS, resolveAgent, dashboard, saveAccount, useAccount, prepareSwitchTarget, previewTraySwitch, removeAccount, previewRemoveAccount, needsUnmanagedChoice, clientSwitchRevision, setCriticalCommitTracker, renameAccount, refreshAccount, prepareLogin, loginStatus, cancelLogin, RemovalPreview } from './accounts';
 import { antigravityLogin } from './antigravity-login';
+import { antigravityAgent } from './agents/antigravity';
 import { withDashboardNativeSnapshot } from './antigravity-native';
 import { withStoreLock } from './store';
 import { codexLogin } from './codex-login';
@@ -36,23 +37,34 @@ function cancelImportPreview() {
   pendingImport = undefined;
 }
 let mainWindow: BrowserWindow | null = null;
+let suspended = false, screenLocked = false;
+let pendingQuotaPlatform: string | undefined;
 let tray: Tray | null = null;
 let trayPanel: ReturnType<typeof createTrayPanel> | undefined;
 let traySnapshot: TraySnapshot | undefined;
 let trayReady = false;
 let updateMenu: ReturnType<typeof installApplicationMenu> | undefined;
 let pendingTrayCommand: WindowCommand | undefined;
+const pendingRefresh = new Set<NonNullable<TraySnapshot['selectedAgent']>>();
 let appUpdates: AppUpdates | undefined;
 const projectUrl = 'https://github.com/xjzc-mt/agent-switcher';
 const rendererFile = path.join(__dirname, '..', 'renderer', 'index.html');
 const loginManagers = new Map([['codex', codexLogin], ['agy', antigravityLogin]]);
-const isolatedLogin = (id: string) => resolveAgent(id).management().isolatedLogin ? loginManagers.get(id) : undefined;
+async function isolatedLogin(id: string, seenAttempt?: number) {
+  const manager = loginManagers.get(id);
+  if (resolveAgent(id).management().isolatedLogin) return manager;
+  if (manager?.canDiscardForDesktop(seenAttempt)) await manager.cancel();
+  return manager?.hasLogin() ? manager : undefined;
+}
 function endWindowLogin() {
   return Promise.all([...loginManagers.values()].map(login => login.cancel())).catch(() => { console.warn('无法清理独立登录目录'); });
 }
+function hasWindowDrafts() {
+  return [...loginManagers.values()].some(login => login.hasLogin()) ||
+    !!(pendingImport?.parsed || pendingImport?.encrypted || pendingImport?.batch);
+}
 const quitGuard = createQuitGuard({
-  hasDrafts: () => [...loginManagers.values()].some(login => login.hasLogin()) ||
-    !!(pendingImport?.parsed || pendingImport?.encrypted || pendingImport?.batch),
+  hasDrafts: hasWindowDrafts,
   isDownloading: () => appUpdates?.isDownloading() ?? false,
   confirm: async () => {
     const detail = [
@@ -91,6 +103,7 @@ function createWindow(show = true) {
     backgroundColor: '#f7f9fc',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -100,10 +113,25 @@ function createWindow(show = true) {
   mainWindow.loadFile(rendererFile);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', event => event.preventDefault());
+  const publishVisibility = () => mainWindow?.webContents.send('main-visibility', mainWindow.isVisible() && !mainWindow.isMinimized());
+  mainWindow.on('show', publishVisibility).on('hide', publishVisibility).on('minimize', publishVisibility).on('restore', publishVisibility);
+  mainWindow.on('focus', () => {
+    if (!mainWindow?.webContents.isLoadingMainFrame()) mainWindow?.webContents.send('quota-open');
+  });
+  mainWindow.webContents.on('did-finish-load', () => {
+    publishVisibility();
+    if (pendingQuotaPlatform || mainWindow?.isFocused()) mainWindow?.webContents.send('quota-open', pendingQuotaPlatform);
+    pendingQuotaPlatform = undefined;
+  });
   mainWindow.webContents.on('did-start-loading', () => { trayReady = false; });
-  mainWindow.webContents.on('render-process-gone', () => { resetTrayWindow(); void endWindowLogin(); });
+  mainWindow.webContents.on('render-process-gone', () => { resetTrayWindow(); cancelImportPreview(); void endWindowLogin(); });
   mainWindow.on('close', event => {
-    if (quitGuard.isClosing() && !quitGuard.canQuit()) event.preventDefault();
+    if (quitGuard.isClosing()) {
+      if (!quitGuard.canQuit()) event.preventDefault();
+    } else if (process.platform === 'darwin') {
+      event.preventDefault();
+      if (!(trayReady && traySnapshot?.menu?.blocked) && !hasWindowDrafts()) mainWindow?.hide();
+    }
   });
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -118,11 +146,13 @@ function createWindow(show = true) {
 // ── Tray ─────────────────────────────────────────────────────────────────────
 
 function resetTrayWindow() {
+  pendingRefresh.clear();
   pendingTrayCommand = undefined;
+  trayPanel?.cancelSwitch();
   trayReady = false;
   updateMenu?.({ tab: 'codex', layout: 'cards', blocked: false });
   if (traySnapshot) {
-    traySnapshot = { ...traySnapshot, refreshing: false, switching: false, windowClosed: true };
+    traySnapshot = { ...traySnapshot, groups: traySnapshot.groups.map(g => ({...g, refreshing:false, bulkRefreshing:false})), switching:false, menu:undefined };
     trayPanel?.update();
   }
 }
@@ -136,15 +166,22 @@ function revealMainWindow() {
 }
 
 function dispatchTrayCommand(command: WindowCommand) {
-  if (quitGuard.isClosing()) return;
+  if (quitGuard.isClosing()) {
+    if (command.action === 'switch' && command.request) trayPanel?.replySwitch(command.request, { error: '正在准备退出 AgentSwitcher' });
+    return;
+  }
   if (command.action === 'quit') { app.quit(); return; }
-  const show = command.action !== 'refresh' && command.action !== 'switch';
+  if (command.action === 'menu' && command.operation === 'refresh' && trayPanel?.refreshIfVisible()) return;
+  const show = command.action !== 'refresh' && command.action !== 'switch' && !(command.action === 'menu' && command.operation === 'refresh');
   const win = mainWindow ?? createWindow(show);
   if (win.webContents.isCrashed()) win.webContents.reload();
   if (show) revealMainWindow();
   if (command.action === 'open') return;
   if (trayReady) win.webContents.send('tray-command', command);
-  else if (!pendingTrayCommand || command.action !== 'refresh') {
+  else if (command.action === 'refresh') pendingRefresh.add(command.agent ?? 'codex');
+  else if (command.action === 'menu' && command.operation === 'refresh') pendingRefresh.add(traySnapshot?.selectedAgent ?? 'codex');
+  else {
+    if (pendingTrayCommand?.action === 'switch') trayPanel?.cancelSwitch();
     pendingTrayCommand = command.action === 'add' && !command.agent ? { ...command, agent: traySnapshot?.selectedAgent } : command;
   }
 }
@@ -157,7 +194,13 @@ function createTray() {
   tray = new Tray(img);
   if (process.platform === 'darwin') {
     tray.setToolTip('AgentSwitcher');
-    trayPanel = createTrayPanel(tray, () => traySnapshot, dispatchTrayCommand);
+    trayPanel = createTrayPanel(tray, () => traySnapshot, dispatchTrayCommand, platform => {
+      if (quitGuard.isClosing()) return;
+      const win = mainWindow ?? createWindow(false);
+      if (win.webContents.isCrashed()) win.webContents.reload();
+      if (win.webContents.isLoadingMainFrame()) pendingQuotaPlatform = platform;
+      else win.webContents.send('quota-open', platform);
+    });
     return;
   }
   const openMain = () => dispatchTrayCommand({ action: 'open' });
@@ -177,6 +220,17 @@ function createTray() {
 if (!app.requestSingleInstanceLock()) app.quit();
 app.on('second-instance', () => { if (tray) dispatchTrayCommand({ action: 'open' }); });
 app.whenReady().then(async () => {
+  screenLocked = powerMonitor.getSystemIdleState(1) === 'locked';
+  function updatePower(asleep: boolean, locked: boolean) {
+    const wasPaused = suspended || screenLocked;
+    suspended = asleep;
+    screenLocked = locked;
+    if (wasPaused !== (asleep || locked)) mainWindow?.webContents.send('quota-power', asleep || locked);
+  }
+  powerMonitor.on('suspend', () => updatePower(true, screenLocked));
+  powerMonitor.on('resume', () => updatePower(false, screenLocked));
+  powerMonitor.on('lock-screen', () => updatePower(suspended, true));
+  powerMonitor.on('unlock-screen', () => updatePower(suspended, false));
   const version = app.getVersion();
   const userDataDir = app.getPath('userData');
   initializeDiagnostics(path.join(userDataDir, 'diagnostics'), app.isPackaged ? version : sourceDiagnosticVersion(version));
@@ -233,7 +287,7 @@ function handle(channel: string, callback: (...args: any[]) => unknown) {
       const execute = async () => accountOperations.has(channel) ? quitGuard.run(invoke) : invoke();
       switch (channel) {
         case 'refresh-account': {
-          const trigger = args[3] === 'tray' ? 'tray' : args[3] === 'automatic' ? 'automatic' :
+          const trigger = args[3] === 'tray' ? 'tray' : args[3] === 'automatic' || args[3] === 'on-open' ? 'automatic' :
             (args[2] || args[3] === 'manual') ? 'manual' : 'automatic';
           return await runDiagnostic('refresh', args[0], trigger, args[1], execute);
         }
@@ -256,8 +310,8 @@ if (process.platform === 'darwin') {
     return mainWindow && event.sender === mainWindow.webContents && event.senderFrame === event.sender.mainFrame &&
       event.senderFrame.url === pathToFileURL(rendererFile).href;
   }
-  ipcMain.handle('tray-reveal-main', event => {
-    if (fromMainWindow(event) && !quitGuard.isClosing()) revealMainWindow();
+  ipcMain.handle('tray-switch-result', (event, request: string, result: { error?: string; warning?: string }) => {
+    if (fromMainWindow(event)) trayPanel?.replySwitch(request, result);
   });
   ipcMain.handle('tray-state', (event, snapshot: TraySnapshot) => {
     if (!fromMainWindow(event)) return;
@@ -268,7 +322,11 @@ if (process.platform === 'darwin') {
   ipcMain.handle('tray-ready', event => {
     if (!fromMainWindow(event)) return;
     trayReady = true;
-    if (pendingTrayCommand && !quitGuard.isClosing()) event.sender.send('tray-command', pendingTrayCommand);
+    if (!quitGuard.isClosing()) {
+      if (pendingTrayCommand) event.sender.send('tray-command', pendingTrayCommand);
+      for (const agent of pendingRefresh) event.sender.send('tray-command', {action:'refresh', agent});
+    }
+    pendingRefresh.clear();
     pendingTrayCommand = undefined;
   });
 }
@@ -293,14 +351,22 @@ handle('open-project-page', async () => {
   return { ok: true };
 });
 handle('get-settings', readSettings);
+handle('get-quota-paused', () => suspended || screenLocked);
 handle('set-sidebar-layout', (collapsed: boolean, width: number) => updateWindowSidebarLayout(mainWindow, collapsed, width));
 handle('save-settings', saveSettings);
 handle('copy-cleanup-prompt', () => { clipboard.writeText(CODEX_CLEANUP_PROMPT); return { ok: true }; });
-handle('get-status', () => withDashboardNativeSnapshot(resolveAgent('agy').management().quota, dashboard));
-handle('login-status', (id: string) => isolatedLogin(id)?.status() ?? loginStatus(resolveAgent(id)));
-handle('refresh-account', async (id: string, name?: string, force = false) => {
+const getDashboard = () => withDashboardNativeSnapshot(!!resolveAgent('agy').sharedQuotaLogin, dashboard);
+handle('get-status', getDashboard);
+handle('open-antigravity-install', () => shell.openExternal('https://antigravity.google/docs/install'));
+handle('recheck-antigravity-cli', () => {
+  antigravityAgent.recheckCapabilities();
+  return getDashboard();
+});
+handle('login-status', async (id: string) => (await isolatedLogin(id))?.status() ?? loginStatus(resolveAgent(id)));
+handle('refresh-account', async (id: string, name?: string, force = false, source?: string) => {
   if (quitGuard.isClosing()) throw new Error('正在准备退出 AgentSwitcher，请稍后重试');
-  const result: StatusResult = await refreshAccount(resolveAgent(id), name, force);
+  if ((suspended || screenLocked) && (source === 'automatic' || source === 'on-open')) return { skipped: true };
+  const result: StatusResult = await refreshAccount(resolveAgent(id), name, force, source === 'on-open' || source === 'automatic' ? source : undefined);
   if (result.authFailure) stepDiagnostic(result.authFailure);
   const outcome = result.state === 'ok' ? 'ok' : result.state === 'unsupported' ? 'unsupported' :
     result.state === 'expired' ? 'expired' : result.state === 'unverified' ? 'waiting' : 'failed';
@@ -320,13 +386,16 @@ handle('export-diagnostics', async () => {
   } finally { await fs.promises.rm(temporary, { force: true }); }
   return { ok: true };
 });
-handle('save-profile', (id: string, name: string, attempt?: number) => {
+handle('save-profile', async (id: string, name: string, attempt?: number) => {
   const agent = resolveAgent(id);
   agent.retryCredentialAccess?.();
-  return isolatedLogin(id)?.save(name, attempt) ?? saveAccount(agent, name);
+  const login = await isolatedLogin(id);
+  if (login) return login.save(name, attempt);
+  if (attempt !== undefined) throw new Error('登录状态已变化，请重新检测账号后保存');
+  return saveAccount(agent, name);
 });
-handle('update-from-login', (id: string, name: string, attempt: number) => {
-  const login = isolatedLogin(id);
+handle('update-from-login', async (id: string, name: string, attempt: number) => {
+  const login = await isolatedLogin(id);
   if (!login) throw new Error('此平台暂不支持通过重新登录更新凭据');
   return login.update(name, attempt);
 });
@@ -371,18 +440,22 @@ handle('delete-profile', async (id: string, name: string, options: { previewId: 
   }
   if (deletePreviews.get(key) === pending) deletePreviews.delete(key);
   // Do not discard an unsaved authorization when an obsolete removal fails.
-  try { await isolatedLogin(id)?.cancelIdentity(pending.preview.identity); }
+  try { await loginManagers.get(id)?.cancelIdentity(pending.preview.identity); }
   catch { return { ...result, warning: '账号已移除；独立登录临时副本尚未清理，请关闭添加窗口或重启 AGS 后复查' }; }
   return result;
 });
 handle('rename-profile', (id: string, oldName: string, newName: string) => renameAccount(resolveAgent(id), oldName, newName));
-handle('use-profile', async (id: string, name: string) => {
+let pendingTraySwitch: { token: string; signature: string } | undefined;
+handle('use-profile', async (id: string, name: string, source?: string, decision?: { token: string; saveUnmanaged?: boolean }) => {
+  const fromTray = source === 'tray';
+  const previous = pendingTraySwitch;
+  if (fromTray) pendingTraySwitch = undefined; // One decision authorizes at most one invocation.
   const agent = resolveAgent(id);
   // Reject unsupported adapters before prompting to quit or touching a client.
   const unsupported = agent.switchSupport();
   if (unsupported) throw new Error(unsupported);
   agent.retryCredentialAccess?.();
-  const native = agent.management().storage === 'keychain';
+  const native = !!agent.sharedQuotaLogin;
   const closed = new Set<string>();
   function confirmSwitch(options: Electron.MessageBoxOptions) {
     stepDiagnostic('confirm');
@@ -392,6 +465,45 @@ handle('use-profile', async (id: string, name: string) => {
   async function closeForSwitch(clients: string[]) {
     await quitClients(clients);
     for (const client of clients) closed.add(client);
+  }
+  async function recoverSwitch(recheck?: () => void) {
+    await withStoreLock(async () => {
+      if ((await runningClients(id, { failClosed: true })).length) throw new Error('Antigravity 已重新打开，请先退出后重试');
+      recheck?.();
+      await agent.recoverInterruptedSwitch?.();
+    });
+  }
+  async function switchFromTray() {
+    // Recovery can reveal another live login. Obtain fresh consent for risks seen only after recovery.
+    for (;;) {
+      const { state, recheck } = await previewTraySwitch(agent, name);
+      const clients = state.alreadySelected ? [] : await runningClients(id, { failClosed: native });
+      const { interrupted, unmanaged, migration } = state;
+      if (interrupted || unmanaged || migration || clients.length) {
+        const risks = { clients: [...new Set([...clients, ...closed])].sort(), unmanaged, migration, interrupted };
+        const signature = JSON.stringify([id, name, state, risks]);
+        if (!decision || !previous || previous.token !== decision.token || previous.signature !== signature ||
+            (unmanaged && typeof decision.saveUnmanaged !== 'boolean')) {
+          const token = randomUUID();
+          pendingTraySwitch = { token, signature };
+          stepDiagnostic('confirm');
+          return { confirmation: { token, ...risks } };
+        }
+      } else if (decision) {
+        throw new Error('确认期间登录状态已变化，请重新选择账号');
+      }
+      if (clients.length) {
+        recheck();
+        await closeForSwitch(clients);
+      }
+      if (!interrupted) return useAccount(agent, name, {
+        expectedCurrentRevision: state.currentRevision, saveUnmanaged: unmanaged ? decision?.saveUnmanaged : undefined,
+        allowFileMigration: migration, recheckConfirmation: recheck,
+      });
+      await recoverSwitch(recheck);
+      if (agent.hasInterruptedSwitch?.()) throw new Error('上次切换的恢复尚未完成，请重新核对');
+      decision = undefined;
+    }
   }
   async function switchFromWindow() {
     if (agent.hasInterruptedSwitch?.()) {
@@ -405,10 +517,7 @@ handle('use-profile', async (id: string, name: string) => {
         if (response !== 1) return { canceled: true };
         await closeForSwitch(clients);
       }
-      await withStoreLock(async () => {
-        if ((await runningClients(id, { failClosed: true })).length) throw new Error('Antigravity 已重新打开，请先退出后重试');
-        await agent.recoverInterruptedSwitch?.();
-      });
+      await recoverSwitch();
     }
 
     const expectedCurrentRevision = clientSwitchRevision(agent);
@@ -443,9 +552,12 @@ handle('use-profile', async (id: string, name: string) => {
     return useAccount(agent, name, { saveUnmanaged, expectedCurrentRevision, allowFileMigration });
   }
   let result;
-  try { result = await switchFromWindow(); }
+  try { result = fromTray ? await switchFromTray() : await switchFromWindow(); }
   catch (error) {
-    if (closed.size) { try { await openClients([...closed]); } catch { /* Preserve the original switch error. */ } }
+    if (closed.size) {
+      try { await openClients([...closed]); }
+      catch { if (fromTray) throw new Error(`${(error as Error).message}。请手动重新打开 ${[...closed].join('、')}`); }
+    }
     throw error;
   }
   if (closed.size) {
@@ -454,7 +566,8 @@ handle('use-profile', async (id: string, name: string) => {
     catch {
       const message = `自动重试 2 次后仍无法打开 ${[...closed].join('、')}，请手动启动`;
       if ('canceled' in result) throw new Error(`已取消切换。${message}`);
-      revealMainWindow();
+      if ('confirmation' in result) throw new Error(`登录已核对。${message}`);
+      if (!fromTray) revealMainWindow();
       return { ...result, clientRestartError: `账号已切换。${message}` };
     }
   }
@@ -590,7 +703,7 @@ handle('cancel-login', async (id?: string) => {
 handle('launch-login', async (id: string, mode: 'open' | 'copy' | 'private' = 'open', seenAttempt?: number, updateProfile?: string) => {
   const agent = resolveAgent(id);
   if (!['open', 'copy', 'private'].includes(mode)) throw new Error('未知登录方式');
-  const login = isolatedLogin(id);
+  const login = await isolatedLogin(id, mode === 'open' && updateProfile === undefined ? seenAttempt : undefined);
   if (login) {
     let deliveryMessage: string | undefined;
     const result = await login.useLink(async url => {

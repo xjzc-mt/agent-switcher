@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('trayPanel', {
       callback(state, reset);
     });
   },
+  onRefresh: (callback: () => void) => { ipcRenderer.on('tray-panel-refresh', () => callback()); },
   resize: (height: number) => ipcRenderer.invoke('tray-panel-resize', height, opening),
   close: () => ipcRenderer.invoke('tray-panel-close', opening),
   action: (command: TrayCommand) => ipcRenderer.invoke('tray-panel-action', command, opening),

@@ -32,6 +32,7 @@ export interface StatusResult {
   state?: QueryState;
   checkedAt?: string;
   refreshFailures?: number;
+  spareActivity?: { activeRounds: number; unchangedRounds: number };
   fetchedAt?: string;
   creditActivity?: { lastDecreaseAt: string; previousBalance: string; currentBalance: string };
   credentialRevision?: string;
@@ -60,7 +61,12 @@ export interface UseOptions {
   allowFileMigration?: boolean;
   journal?: LiveMutationJournal;
 }
+export interface AntigravityCliStatus {
+  state: 'ready' | 'missing' | 'outdated' | 'unverified';
+  version?: string;
+}
 export interface AccountManagement {
+  cliStatus?: AntigravityCliStatus;
   quota: boolean;
   storage: 'file' | 'keychain' | 'unified' | 'unknown';
   canSaveCurrent: boolean;
@@ -78,7 +84,7 @@ export interface SharedQuotaLogin {
   confirmDesktopLogin(expected: Buffer, copies?: Buffer[]): Buffer;
   quotaBearer(bytes: Buffer, copies?: Buffer[], allowUndated?: boolean): { expiry?: string } | undefined;
   ownsQuotaLogin(bytes: Buffer): boolean;
-  recoverProfileCredential(dir: string, identity: string, original: Buffer): { bytes: Buffer; pending: boolean; readOnly: boolean };
+  recoverProfileCredential(dir: string, identity: string, original: Buffer, preview?: boolean): { bytes: Buffer; pending: boolean; readOnly: boolean };
 }
 
 export abstract class BaseAgent {
@@ -108,6 +114,7 @@ export abstract class BaseAgent {
     return { ...query.status, credentialRevision: revision };
   }
   get sharedQuotaLogin(): SharedQuotaLogin | undefined { return undefined; }
+  get usesCredentialRevisions(): boolean { return !!this.sharedQuotaLogin; }
   readonly bindsQuotaEmail: boolean = false;
   abstract sharedSessionIssue(): Promise<string | undefined>;
   abstract clientLogoutIssue(): string | undefined;

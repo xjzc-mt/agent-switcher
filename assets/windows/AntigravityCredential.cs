@@ -32,7 +32,55 @@ public static class AntigravityCredential {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
     static extern bool CreateDirectoryW(string path, ref SecurityAttributes security);
 
-    public static string[] Read() {
+    [StructLayout(LayoutKind.Sequential)]
+    struct Blob { public int Size; public IntPtr Data; }
+    const int CryptProtectUiForbidden = 1;
+    [DllImport("crypt32.dll", ExactSpelling=true, SetLastError=true)]
+    static extern bool CryptProtectData(ref Blob input, IntPtr description, ref Blob entropy,
+        IntPtr reserved, IntPtr prompt, int flags, out Blob output);
+    [DllImport("crypt32.dll", ExactSpelling=true, SetLastError=true)]
+    static extern bool CryptUnprotectData(ref Blob input, IntPtr description, ref Blob entropy,
+        IntPtr reserved, IntPtr prompt, int flags, out Blob output);
+    [DllImport("kernel32.dll", ExactSpelling=true)]
+    static extern IntPtr LocalFree(IntPtr memory);
+
+    // Binary pipes keep the master key out of command lines and immutable strings.
+    static void Dpapi(bool protect, string service) {
+        byte[] input = new byte[protect ? 32 : 65536], entropy = Encoding.UTF8.GetBytes(service);
+        byte[] output = null;
+        GCHandle inputPin = default(GCHandle), entropyPin = default(GCHandle);
+        Blob result = new Blob();
+        try {
+            int count = 0;
+            using (Stream source = Console.OpenStandardInput()) {
+                int n;
+                while (count < input.Length && (n = source.Read(input, count, input.Length - count)) > 0) count += n;
+                if (count == 0 || (protect && count != 32) || source.ReadByte() != -1) throw new InvalidDataException();
+            }
+            inputPin = GCHandle.Alloc(input, GCHandleType.Pinned);
+            entropyPin = GCHandle.Alloc(entropy, GCHandleType.Pinned);
+            Blob data = new Blob { Size = count, Data = inputPin.AddrOfPinnedObject() };
+            Blob extra = new Blob { Size = entropy.Length, Data = entropyPin.AddrOfPinnedObject() };
+            bool ok = protect
+                ? CryptProtectData(ref data, IntPtr.Zero, ref extra, IntPtr.Zero, IntPtr.Zero, CryptProtectUiForbidden, out result)
+                : CryptUnprotectData(ref data, IntPtr.Zero, ref extra, IntPtr.Zero, IntPtr.Zero, CryptProtectUiForbidden, out result);
+            if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (result.Size <= 0 || result.Size > 65536 || (!protect && result.Size != 32)) throw new InvalidDataException();
+            output = new byte[result.Size];
+            Marshal.Copy(result.Data, output, 0, result.Size);
+            using (Stream pipe = Console.OpenStandardOutput()) pipe.Write(output, 0, output.Length);
+        } finally {
+            Array.Clear(input, 0, input.Length);
+            if (inputPin.IsAllocated) inputPin.Free();
+            if (entropyPin.IsAllocated) entropyPin.Free();
+            if (output != null) Array.Clear(output, 0, output.Length);
+            if (result.Data != IntPtr.Zero) {
+                for (int i = 0; i < result.Size; i++) Marshal.WriteByte(result.Data, i, 0);
+                LocalFree(result.Data);
+            }
+        }
+    }
+    public static string[] Read(bool includeBlob = true) {
         IntPtr pointer;
         if (!CredReadW(Target, Generic, 0, out pointer)) {
             int error = Marshal.GetLastWin32Error();
@@ -41,11 +89,12 @@ public static class AntigravityCredential {
         }
         try {
             Credential c = (Credential)Marshal.PtrToStructure(pointer, typeof(Credential));
+            string revision = c.LastWritten.dwHighDateTime.ToString("X8") + c.LastWritten.dwLowDateTime.ToString("X8");
+            if (!includeBlob) return new string[] { null, revision };
             if (c.Size < 0 || c.Size > 2560) throw new InvalidOperationException();
             byte[] bytes = new byte[c.Size];
             if (bytes.Length != 0) Marshal.Copy(c.Blob, bytes, 0, bytes.Length);
-            return new string[] { Convert.ToBase64String(bytes),
-                c.LastWritten.dwHighDateTime.ToString("X8") + c.LastWritten.dwLowDateTime.ToString("X8") };
+            return new string[] { Convert.ToBase64String(bytes), revision };
         } finally { CredFree(pointer); }
     }
     public static void Replace(string expected, string revision, string next) {
@@ -137,6 +186,8 @@ public static class AntigravityCredential {
     public static int Main(string[] args) {
         try {
             switch (args[0]) {
+                case "dpapi-protect": case "dpapi-unprotect": Dpapi(args[0] == "dpapi-protect", args[1]); return 0;
+                case "present": Console.Write(Read(false)[1] == null ? "0" : "1"); return 0;
                 case "read":
                     string[] value = Read();
                     Console.Write((value[1] ?? "-") + ":" + (value[0] ?? "-")); return 0;

@@ -14,7 +14,7 @@ function compile(source, executable) {
   const compiler = process.platform === 'win32'
     ? path.join(process.env.SystemRoot, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe') : 'mcs';
   execFileSync(compiler, ['-nologo', '-noconfig', '-target:exe', '-platform:anycpu', '-optimize+',
-    '-reference:System.dll', '-reference:System.Core.dll', '-out:' + executable, source], { stdio: 'inherit', windowsHide: true });
+    '-reference:System.dll', '-reference:System.Core.dll', '-reference:System.Xml.dll', '-out:' + executable, source], { stdio: 'inherit', windowsHide: true });
 }
 
 async function build(sign) {

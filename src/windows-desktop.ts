@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
-import { desktopCandidates, windowsQuery, type WindowsProcess } from './windows-processes';
+import { execFile, execFileSync, spawn } from 'node:child_process';
+import { codexNames, desktopCandidates, desktopCommand, userProcesses, windowsProcessError, type WindowsProcess } from './windows-processes';
 import { windowsHelper } from './windows-helper';
+import { processProbeError } from './diagnostics';
 import { CODEX_STORE_FAMILY } from './windows-codex';
 
 type Desktop = 'Codex' | 'Antigravity';
@@ -22,10 +23,31 @@ function defaultFiles(name: Desktop) {
   return roots.filter((root): root is string => !!root && path.isAbsolute(root))
     .flatMap(root => folders.map(folder => path.join(root, folder, name + '.exe')));
 }
+export function windowsAntigravityVersion(): string | undefined {
+  for (const file of defaultFiles('Antigravity')) {
+    if (!fs.existsSync(file)) continue;
+    const resources = path.join(path.dirname(file), 'resources');
+    for (const app of ['app', 'app.asar']) {
+      try {
+        const { version } = JSON.parse(fs.readFileSync(path.join(resources, app, 'package.json'), 'utf8'));
+        if (typeof version === 'string' && /^\d+\./.test(version)) return version;
+      } catch { /* Plain Node cannot open an Electron asar as a directory. */ }
+    }
+    try {
+      const version = execFileSync(windowsHelper('DesktopWindows'), ['version', file],
+        { encoding: 'utf8', windowsHide: true, timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      if (/^\d+\./.test(version)) return version;
+    } catch { /* Try the next install location. */ }
+  }
+}
 const equalsPath = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 function hasDesktopResources(file: string): boolean {
   const resources = path.join(path.dirname(file), 'resources');
   return ['app.asar', path.join('app', 'package.json')].some(name => fs.existsSync(path.join(resources, name)));
+}
+
+function elevatedDesktop(name: Desktop) {
+  return windowsProcessError(undefined, `检测到更高权限运行的 ${name} 桌面进程（可能以管理员身份启动），请先手动退出该客户端后再切换`);
 }
 
 export async function windowsDesktop(name: Desktop) {
@@ -37,8 +59,9 @@ export async function windowsDesktop(name: Desktop) {
   });
   // A sandbox renderer can hide both its image path and its owner. Only roots
   // need authority to close windows; descendants are observed and waited for.
-  if (rows.some(row => !row.created) || rootProcesses(rows).some(row => !row.file || !row.ownerKnown))
-    throw new Error(`无法确认 Windows ${name} 桌面进程，请稍后重试`);
+  const roots = rootProcesses(rows);
+  if (roots.some(row => !row.ownerKnown)) throw elevatedDesktop(name);
+  if (rows.some(row => !row.created) || roots.some(row => !row.file)) throw windowsProcessError();
   return rows;
 }
 
@@ -50,30 +73,52 @@ function revision(file: string): string {
   return [stat.dev, stat.ino, stat.size, stat.mtimeNs].join('/');
 }
 
-async function launchTarget(name: Desktop, file: string): Promise<Launch> {
-  if (name === 'Codex' && isCodexStoreDesktop(file)) {
-    const appId = await windowsQuery(`
+// A package update changes the install path. Also invalidate on a same-version manifest replacement.
+let registeredApp: { file: string; stamp: string; id: string } | undefined;
+async function storeAppId(file: string): Promise<string> {
+  const manifest = path.join(path.dirname(path.dirname(file)), 'AppxManifest.xml');
+  const stat = await fs.promises.stat(manifest, { bigint: true }).catch(() =>
+    fs.promises.stat(file, { bigint: true }).catch(() => undefined));
+  const stamp = stat && [stat.dev, stat.ino, stat.ctimeNs, stat.size].join('/');
+  if (stamp && registeredApp?.file === file && registeredApp.stamp === stamp) return registeredApp.id;
+  let id: string;
+  try {
+    id = await desktopCommand(['manifest', file]);
+  } catch (error) {
+    if ((error as { code?: number }).code !== 3) throw windowsProcessError(error);
+    // An inaccessible manifest can still be read by the current user's package registration service.
+    const shell = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const script = `$ErrorActionPreference='Stop'
+      [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
       foreach ($package in (Get-AppxPackage -Name OpenAI.Codex)) {
         if ($package.PackageFamilyName -ine $env:AGS_CODEX_FAMILY) { continue }
-        $root = $package.InstallLocation.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-        if (!$env:AGS_DESKTOP_FILE.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $root = $package.InstallLocation
+        if ($root -ine [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($env:AGS_DESKTOP_FILE))) { continue }
         $apps = @((Get-AppxPackageManifest -Package $package.PackageFullName).Package.Applications.Application)
         $match = @($apps | Where-Object { $_.Executable -and (Join-Path $root $_.Executable) -ieq $env:AGS_DESKTOP_FILE })
-        if (!$match.Count -and $apps.Count -eq 1) { $match = $apps } # A package launcher may start a separate Electron image.
-        foreach ($app in $match) { "$($package.PackageFamilyName)!$($app.Id)" }
-      }`, 5000, { ...process.env, AGS_DESKTOP_FILE: file, AGS_CODEX_FAMILY: CODEX_STORE_FAMILY });
-    const identity = /^([^!]+)![\w.-]+$/.exec(appId);
-    if (identity?.[1].toLowerCase() !== CODEX_STORE_FAMILY.toLowerCase()) throw new Error('无法确认 Codex 商店应用的启动项，请手动操作客户端');
-    return { file, appId };
+        if (!$match.Count -and $apps.Count -eq 1) { $match = $apps }
+        if ($match.Count -eq 1) { $match[0].Id }
+      }`;
+    try {
+      id = await new Promise<string>((resolve, reject) => execFile(shell, ['-NoProfile', '-NonInteractive', '-Command', script],
+        { windowsHide: true, timeout: 10000, env: { ...process.env, AGS_DESKTOP_FILE: file, AGS_CODEX_FAMILY: CODEX_STORE_FAMILY } },
+        (err, stdout) => err ? reject(err) : resolve(stdout.trim())));
+    } catch (failure) { throw processProbeError(failure, '无法查询 Codex 商店应用的启动项，请手动操作客户端', '查询 Codex 商店应用的启动项超时，请稍后重试'); }
   }
+  if (!/^[\w.-]+$/.test(id)) throw new Error('无法确认 Codex 商店应用的启动项，请手动操作客户端');
+  id = CODEX_STORE_FAMILY + '!' + id;
+  if (stamp) registeredApp = { file, stamp, id };
+  return id;
+}
+
+async function launchTarget(name: Desktop, file: string): Promise<Launch> {
+  if (name === 'Codex' && isCodexStoreDesktop(file)) return { file, appId: await storeAppId(file) };
   const stamp = revision(file);
   if (name === 'Codex' && !hasDesktopResources(file)) throw new Error('无法确认 Codex 桌面安装文件，请手动打开');
   if (!defaultFiles(name).some(known => equalsPath(known, file))) {
     // A relocated electron application must still be the observed vendor desktop, never a same-named CLI.
-    const publisher = hasDesktopResources(file) && await windowsQuery(`
-      $signature = Get-AuthenticodeSignature -LiteralPath $env:AGS_DESKTOP_FILE
-      if ($signature.Status -eq 'Valid') { $signature.SignerCertificate.GetNameInfo('SimpleName',$false) }`,
-      5000, { ...process.env, AGS_DESKTOP_FILE: file });
+    const publisher = hasDesktopResources(file) && await desktopCommand(['publisher', file], 10000)
+      .catch(error => { throw windowsProcessError(error, '无法核对桌面安装文件的发布者，请先手动退出客户端'); });
     const vendor = name === 'Codex' ? /^OpenAI(?:,? (?:Inc\.?|LLC|L\.L\.C\.|OpCo,? LLC))?$/i : /^Google (?:LLC|Inc\.?)$/i;
     if (!publisher || !vendor.test(publisher)) throw new Error(`无法确认 ${name} 桌面的安装位置与发布者，请手动操作客户端`);
   }
@@ -82,33 +127,21 @@ async function launchTarget(name: Desktop, file: string): Promise<Launch> {
 
 async function backendProcesses(rows: WindowsProcess[]): Promise<string[]> {
   // Follow the observed desktop lineage even through an intermediate shell. Check creation times against PID reuse.
-  const result = await windowsQuery(`
-    $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
-    $rows = @(foreach ($p in (Get-CimInstance Win32_Process -Filter "SessionId=$session" -Property ProcessId,ParentProcessId,Name,CreationDate)) {
-      $born = if ($p.CreationDate) { $p.CreationDate.ToFileTimeUtc().ToString() } else { '' }
-      [pscustomobject]@{ pid=$p.ProcessId; parent=$p.ParentProcessId; born=$born;
-        backend=($p.Name -match '^codex(?:-cli|-app-server|-(?:aarch64|x86_64)-pc-windows-msvc)?\\.exe$') }
-    })
-    ConvertTo-Json -InputObject $rows -Compress`);
-  const all: { pid: number; parent: number; born: string; backend: boolean }[] = JSON.parse(result);
-  if (!Array.isArray(all) || !all.every(p => p && Number.isSafeInteger(p.pid) && Number.isSafeInteger(p.parent) &&
-      typeof p.backend === 'boolean' && typeof p.born === 'string' && /^(?:\d{16,19})?$/.test(p.born))) {
-    throw new Error('无法确认 Codex 桌面的子进程，请稍后重试');
-  }
+  const all = await userProcesses();
   const tree = new Map(rows.map(row => [row.pid, BigInt(row.created)]));
-  const wait: string[] = [];
-  for (const p of all.sort((a, b) => a.born.length - b.born.length || a.born.localeCompare(b.born))) {
-    if (!p.born) continue; // Idle/system processes may not report a creation time.
-    const born = BigInt(p.born);
-    if (tree.has(p.pid)) {
-      if (tree.get(p.pid) !== born) tree.delete(p.pid); // The desktop's PID was reused after discovery.
-      continue;
-    }
-    const parent = tree.get(p.parent);
-    if (parent === undefined || parent > born) continue;
-    tree.set(p.pid, born);
-    if (p.backend) wait.push(`wait:${p.pid}:${p.born}`);
+  for (const p of all) {
+    if (tree.has(p.pid) && tree.get(p.pid) !== BigInt(p.created)) tree.delete(p.pid);
   }
+  const wait: string[] = [];
+  for (const p of all.sort((a, b) => a.created.length - b.created.length || a.created.localeCompare(b.created))) {
+    if (!p.created || tree.has(p.pid)) continue;
+    const parent = tree.get(p.parent), born = BigInt(p.created);
+    if (parent === undefined || parent > born) continue;
+    if (parent === born) throw windowsProcessError();
+    tree.set(p.pid, born);
+    if (codexNames.includes(p.name.toLowerCase())) wait.push(`wait:${p.pid}:${p.created}`);
+  }
+  if (all.some(p => !p.created && tree.has(p.parent))) throw windowsProcessError();
   return wait;
 }
 
@@ -145,20 +178,23 @@ export async function quitWindowsDesktop(name: Desktop, confirmedNames: string[]
   const target = await launchTarget(name, file);
   const wait = name === 'Codex' ? await backendProcesses(rows) : [];
   const processes = rows.map(row => `${roots.includes(row) ? 'window' : 'wait'}:${row.pid}:${row.created}`);
-  let signaled = false;
+  let acknowledged = false;
   try {
-    await new Promise<void>((resolve, reject) => execFile(windowsHelper('DesktopWindows'), [file, ...processes, ...wait],
-      { windowsHide: true, timeout: 11000 }, error => error ? reject(error) : resolve()));
-    signaled = true;
-    if ((await windowsDesktop(name)).length) throw new Error('desktop still running');
+    await desktopCommand([file, ...processes, ...wait], 11000);
+    acknowledged = true;
+    if ((await windowsDesktop(name)).length) throw new Error(`${name} 未能正常退出，请手动退出后重试`);
   } catch (error) {
     // A desktop may have accepted the close while a backend remains busy. Restore only the desktop we observed.
-    const native = error as { code?: number };
-    if (native.code === 4) throw new Error(`${name} 已退出或运行实例已变化，请重试当前操作`);
-    const attemptedClose = signaled || native.code === 3;
-    if (attemptedClose && !await windowsDesktop(name).then(list => list.length > 0, () => true)) {
+    if (!acknowledged) {
+      const { code } = error as { code?: number };
+      if (code === 5) throw elevatedDesktop(name);
+      if (code === 4) throw new Error(`${name} 已退出或运行实例已变化，请重试当前操作`);
+      if (code !== 3) throw windowsProcessError(error, `${name} 未能正常退出，请完成正在进行的任务后手动退出`);
+    }
+    if (!await windowsDesktop(name).then(list => list.length > 0, () => true)) {
       try { await startTarget(target); } catch { throw new Error(`${name} 已关闭，子进程退出未确认，自动重开失败，请手动打开`); }
     }
+    if (acknowledged) throw error;
     throw new Error(`${name} 未能正常退出，请完成正在进行的任务后手动退出`);
   }
   closed.set(name, target);

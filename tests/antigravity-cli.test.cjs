@@ -16,8 +16,16 @@ native.writeNativeToken = value => { live = value; };
 const binary = path.join(root, '.local/bin/agy'), behaviorFile = path.join(root, 'behavior');
 atomicWrite(binary, `#!${process.execPath}
 const fs=require('fs'),path=require('path'),cp=require('child_process');
+if(process.argv.includes('--version')) { console.log('1.5.9'); return; }
 const home=process.env.HOME,file=path.join(home,'.gemini/antigravity-cli/antigravity-oauth-token');
 const realHome=path.resolve(__dirname,'../..'),mode=fs.readFileSync(path.join(realHome,'behavior'),'utf8');
+if(mode==='unsupported-syntax') {
+ const acp=process.argv.includes('acp');
+ process.stderr.write(acp?'Error: unknown com':'flag provided but not ');
+ setTimeout(()=>process.stderr.write(acp?'mand "acp" fixture-private':'defined: -output-format fixture-private'),10);
+ setInterval(()=>{},10000);
+ return;
+}
 if(mode==='shared-usage') {
  const cwd=process.cwd(), args=process.argv.slice(2);
  if(fs.realpathSync(home)!==fs.realpathSync(realHome)||process.env.TMPDIR!==cwd||fs.realpathSync(home)===cwd||
@@ -76,6 +84,8 @@ rl.on('line',line=>{
  if(mode==='unchanged-usage-failure')return send({id:msg.id,result:{}});
  if(fs.existsSync(file)&&mode!=='login-after-authenticate') {
   const auth=JSON.parse(fs.readFileSync(file));auth.token.access_token='fixture-rotated';auth.token.expiry='2027-01-01T00:00:00Z';
+  if(mode.startsWith('cli-file-')) {delete auth.id_token_email;auth.token.token_type='Bearer';auth.token.expiry=new Date(Date.now()+3600000).toISOString();}
+  if(mode==='cli-file-unbound')auth.token.refresh_token='independent-output';
   fs.writeFileSync(file,JSON.stringify(auth));return send({id:msg.id,result:{_meta:{antigravity:{tier:{name:'Google AI Pro'}}}}});
  }
  cp.execFileSync('open',['https://accounts.google.com/o/oauth2/auth?state=fixture-state'],{env:process.env});
@@ -102,6 +112,41 @@ async function until(fn) {
   for (let i=0;i<300;i++) { const result=fn();if(result)return result;await new Promise(r=>setTimeout(r,10)); }
   throw new Error('Timed out');
 }
+
+test('agy version follows the installed binary and an explicit recheck', { skip: process.platform !== 'darwin' }, t => {
+  let reply = 'agy version v1.5.8';
+  const probe = t.mock.method(require('node:child_process'), 'spawnSync', (exe, args, opts) => {
+    assert.equal(exe, binary); assert.deepEqual(args, ['--version']); assert.ok(opts.timeout > 0);
+    return { status: 0, stdout: reply, stderr: '' };
+  });
+  const status = cli.antigravityCliStatus;
+  assert.deepEqual(status(true), { state: 'outdated', version: '1.5.8' });
+  reply = '1.5.9'; assert.equal(status().state, 'outdated');
+  fs.utimesSync(binary, new Date(), new Date(Date.now() - 2000));
+  assert.deepEqual(status(), { state: 'ready', version: '1.5.9' });
+  reply = 'unexpected output'; assert.deepEqual(status(true), { state: 'unverified' });
+  assert.equal(probe.mock.callCount(), 3);
+  probe.mock.restore(); assert.equal(status(true).state, 'ready');
+});
+
+test('unsupported ACP and quota arguments stop a stalled CLI without consuming the grant', {
+  skip: process.platform !== 'darwin', timeout: 8000,
+}, async t => {
+  fs.writeFileSync(behaviorFile, 'unsupported-syntax');
+  const credential = token('old-cli@example.test'), login = JSON.parse(credential);
+  t.after(() => { fs.utimesSync(binary, new Date(), new Date()); cli.antigravityCliStatus(true); });
+  const incompatible = e => /agy update/.test(e.message) && !/fixture-private|超时/.test(e.message);
+  for (let i = 0; i < 2; i++) {
+    const result = await cli.queryIsolatedUsage(credential, login.id_token_email, login.token.refresh_token);
+    assert.ok(incompatible(result.error)); assert.equal(result.temporaryDirectory, undefined);
+  }
+  assert.equal(cli.antigravityCliStatus().state, 'outdated');
+  const oldQuery = cli.queryAccessTokenUsage(login.id_token_email, login.token.access_token);
+  fs.utimesSync(binary, new Date(), new Date()); // The new fingerprint is ready before the old process reports its error.
+  assert.equal(cli.antigravityCliStatus().state, 'ready');
+  await assert.rejects(oldQuery, incompatible);
+  assert.equal(cli.antigravityCliStatus().state, 'ready');
+});
 
 test('shared /usage uses the official login and stays visible as a shared writer', { skip: process.platform !== 'darwin' }, async t => {
   for (const key of ['AGY_ADC_AUTH', 'ANTIGRAVITY_GEMINI_DIR', 'GEMINI_API_KEY', 'SSH_TTY']) {
@@ -160,7 +205,7 @@ test('a running client reads its own renewed token and never opens a second logi
   assert.equal(paused.extra, antigravityRenewalHint);
   assert.deepEqual(paused.quota, history.quota);
   assert.equal(paused.fetchedAt, oldTime);
-  assert.ok(require('../dist/quota-refresh').quotaRefreshAt(paused, '1m') > Date.now());
+  assert.ok(dashboard().find(a => a.id === 'agy').refreshAt > Date.now());
   assert.equal(usage.mock.callCount(), 0);
 
   account.token.access_token = 'fixture-readonly';
@@ -331,15 +376,45 @@ test('current quota follows the active desktop file when Keychain is unavailable
   assert.equal(forbidden.mock.callCount(), 0);
 });
 
-test('isolated CLI renews the spare account without reading or writing live credentials', {skip:process.platform!=='darwin'}, async () => {
-  const before=live, dir=profileDir('agy','B');atomicWrite(path.join(dir,agent.authFiles[0]),token('b@example.test'));
+test('isolated CLI returns email-less personal credentials and the next refresh recovers only the confirmed grant', {skip:process.platform!=='darwin'}, async () => {
+  const before=live, email='b@example.test', original=token(email);
+  const dir=profileDir('agy','B'), file=path.join(dir,agent.authFiles[0]);
+  atomicWrite(file,original);
+  fs.writeFileSync(behaviorFile,'cli-file-same');
+  const query=await agent.queryCredential(original);
+  assert.equal(query.status.state,'ok');assert.equal(query.status.plan,'Google AI Pro');
+  assert.equal(JSON.parse(query.rotated).id_token_email,email);
+  // The isolated CLI completed, but the process stopped before committing the pool copy.
+  assert.deepEqual(readCredentialFile(file),original);
   const result=await refreshAccount(agent,'B',true);
-  assert.equal(result.state,'ok');assert.equal(result.plan,'Google AI Pro');
+  assert.equal(result.state,'ok');assert.equal(result.account,email);
   assert.equal(result.quota.buckets[0].windows[0].windowMins,300);
-  assert.equal(JSON.parse(readCredentialFile(path.join(dir,agent.authFiles[0]))).token.access_token,'fixture-rotated');
+  assert.deepEqual(readCredentialFile(file),query.rotated);
+  assert.equal(JSON.parse(readCredentialFile(file)).token.access_token,'fixture-rotated');
+  assert.equal(fs.existsSync(query.temporaryDirectory),false);
   assert.deepEqual(live,before);assert.equal(fs.existsSync(path.join(root,'outside')),false);
   assert.equal(dashboard().find(a=>a.id==='agy').profiles.find(p=>p.name==='B').meta.snapshot.state,'ok');
+  const anonymous=JSON.parse(token('archived-grant@example.test'));
+  delete anonymous.id_token_email;
+  const archived=path.join(profileDir('agy','archived-grant'),agent.authFiles[0]);
+  atomicWrite(archived,JSON.stringify(anonymous));
+  const checked=await refreshAccount(agent,'archived-grant',true);
+  assert.equal(checked.state,'ok');assert.equal(checked.account,undefined);
+  assert.equal(JSON.parse(readCredentialFile(archived)).token.access_token,'fixture-rotated');
   assert.equal(cli.isolatedCliPids.size,0);
+});
+
+test('an email-less output with a different grant retains the isolated evidence and original account', {skip:process.platform!=='darwin'}, async () => {
+  const auth=JSON.parse(token('unbound@example.test'));auth.token.expiry='2000-01-01T00:00:00Z';
+  const original=Buffer.from(JSON.stringify(auth)), file=path.join(profileDir('agy','unbound-output'),agent.authFiles[0]);
+  atomicWrite(file,original);fs.writeFileSync(behaviorFile,'cli-file-unbound');
+  const previous=await cli.queryIsolatedUsage(original,'unbound@example.test',JSON.parse(original).token.refresh_token);
+  assert.ok(previous.error);
+  assert.deepEqual(JSON.parse(fs.readFileSync(cli.cliTokenPath(previous.temporaryDirectory))).token.refresh_token,'independent-output');
+  const retry=await refreshAccount(agent,'unbound-output',true);
+  assert.equal(retry.authFailure,'quota-recovery-required');
+  assert.deepEqual(readCredentialFile(file),original);
+  assert.ok(fs.existsSync(previous.temporaryDirectory));
 });
 
 test('a cached spare bearer rejected early renews once and writes only its own saved login', { skip: process.platform !== 'darwin' }, async t => {
